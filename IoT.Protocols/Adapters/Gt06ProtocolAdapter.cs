@@ -124,12 +124,17 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
                             attributes["packet_type"] = "login";
                         }
                         else if (frame.ProtocolNumber == R12LFFrame.ProtocolLocation ||
-                                 frame.ProtocolNumber == R12LFFrame.ProtocolAlarm)
+                                 frame.ProtocolNumber == R12LFFrame.ProtocolAlarm ||
+                                 frame.ProtocolNumber == 0x22 ||
+                                 frame.ProtocolNumber == 0x26)
                         {
-                            var (pos, time) = frame.DecodeLocationPacket();
+                            byte canonical = (frame.ProtocolNumber == 0x22) ? R12LFFrame.ProtocolLocation :
+                                             (frame.ProtocolNumber == 0x26) ? R12LFFrame.ProtocolAlarm :
+                                             frame.ProtocolNumber;
+                            var (pos, time) = frame.DecodeLocationPacket(canonical);
                             position = pos;
                             recordedAt = time;
-                            attributes["packet_type"] = frame.ProtocolNumber == R12LFFrame.ProtocolAlarm ? "alarm" : "location";
+                            attributes["packet_type"] = canonical == R12LFFrame.ProtocolAlarm ? "alarm" : "location";
                             if (position?.SpeedKph.HasValue == true)
                                 metrics["speed_kph"] = position.SpeedKph.Value;
                             if (position?.Heading.HasValue == true)
@@ -138,7 +143,7 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
                         else if (frame.ProtocolNumber == R12LFFrame.ProtocolStatus)
                         {
                             attributes["packet_type"] = "heartbeat";
-                            if (frame.InformationContent.Length >= 5)
+                            if (frame.InformationContent.Length >= 3)
                             {
                                 byte terminalInfo = frame.InformationContent[0];
                                 byte voltageLevel = frame.InformationContent[1];
@@ -148,6 +153,19 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
                                 metrics["ignition_acc"] = acc ? 1.0 : 0.0;
                                 metrics["battery_level"] = voltageLevel;
                                 metrics["csq"] = gsmSignal;
+                            }
+                        }
+                        else if (frame.ProtocolNumber == R12LFFrame.ProtocolStringInfo)
+                        {
+                            attributes["packet_type"] = "command_response";
+                            if (frame.InformationContent.Length >= 5)
+                            {
+                                int cmdLen = frame.InformationContent[0];
+                                int textLen = Math.Max(0, cmdLen - 4);
+                                if (frame.InformationContent.Length >= 5 + textLen)
+                                {
+                                    attributes["command_response"] = System.Text.Encoding.ASCII.GetString(frame.InformationContent, 5, textLen);
+                                }
                             }
                         }
                     }
@@ -203,6 +221,23 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
 
                 if (root.TryGetProperty("ignition", out var ign))
                     metrics["ignition_acc"] = (ign.ValueKind == JsonValueKind.True || (ign.ValueKind == JsonValueKind.Number && ign.GetInt32() == 1)) ? 1.0 : 0.0;
+                else if (root.TryGetProperty("acc", out var accElem))
+                    metrics["ignition_acc"] = (accElem.ValueKind == JsonValueKind.True || (accElem.ValueKind == JsonValueKind.Number && accElem.GetInt32() == 1)) ? 1.0 : 0.0;
+
+                if (root.TryGetProperty("battery_level", out var bat) && bat.TryGetDouble(out var batVal))
+                    metrics["battery_level"] = batVal;
+
+                if (root.TryGetProperty("gsm_signal", out var gsm) && gsm.TryGetDouble(out var gsmVal))
+                    metrics["csq"] = gsmVal;
+
+                if (root.TryGetProperty("command_response", out var cmdResp) && cmdResp.ValueKind == JsonValueKind.String)
+                {
+                    attributes["packet_type"] = "command_response";
+                    attributes["command_response"] = cmdResp.GetString() ?? string.Empty;
+                }
+
+                if (root.TryGetProperty("is_alarm", out var alm) && alm.ValueKind == JsonValueKind.True)
+                    attributes["packet_type"] = "alarm";
             }
 
             if (string.IsNullOrEmpty(chipId))

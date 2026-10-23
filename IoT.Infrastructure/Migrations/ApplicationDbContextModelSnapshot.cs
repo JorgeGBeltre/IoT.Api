@@ -137,6 +137,29 @@ namespace IoT.Infrastructure.Migrations
                     b.Property<int>("OperationalStatus")
                         .HasColumnType("integer");
 
+                    b.Property<bool>("OtaCompleted")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("OtaErrorMessage")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<bool>("OtaInProgress")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("OtaLastChunkSent")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("OtaTargetVersion")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<int>("OtaTotalChunks")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("OtaUpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
 
@@ -269,6 +292,73 @@ namespace IoT.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("device_groups", (string)null);
+                });
+
+            modelBuilder.Entity("IoT.Domain.Entities.FirmwareVersionRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ChunkSizeBytes")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("FeatureDescription")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<long>("FileSizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("FirmwareVersion")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Src")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("TargetModel")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("TotalChunks")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedFromIp")
+                        .HasMaxLength(45)
+                        .HasColumnType("character varying(45)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "FirmwareVersion")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "TargetModel");
+
+                    b.ToTable("firmware_version_records", (string)null);
                 });
 
             modelBuilder.Entity("IoT.Domain.Entities.MqttBrokerConfig", b =>

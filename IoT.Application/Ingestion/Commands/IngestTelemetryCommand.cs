@@ -46,6 +46,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
     private readonly IFleetNotificationService? _notificationService;
     private readonly ITenantContext? _tenantContext;
     private readonly IAuditLogRepository? _auditLogRepository;
+    private readonly IFirmwareOtaService? _firmwareOtaService;
+    private readonly IDeviceCommandRepository? _commandRepository;
 
     public IngestTelemetryCommandHandler(
         ICompositeProtocolAdapter protocolAdapter,
@@ -57,7 +59,9 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         ILogger<IngestTelemetryCommandHandler> logger,
         IFleetNotificationService? notificationService = null,
         ITenantContext? tenantContext = null,
-        IAuditLogRepository? auditLogRepository = null)
+        IAuditLogRepository? auditLogRepository = null,
+        IFirmwareOtaService? firmwareOtaService = null,
+        IDeviceCommandRepository? commandRepository = null)
     {
         _protocolAdapter = protocolAdapter;
         _deviceRepository = deviceRepository;
@@ -69,6 +73,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         _notificationService = notificationService;
         _tenantContext = tenantContext;
         _auditLogRepository = auditLogRepository;
+        _firmwareOtaService = firmwareOtaService;
+        _commandRepository = commandRepository;
     }
 
     public async Task<Result> Handle(IngestTelemetryCommand request, CancellationToken cancellationToken)
@@ -294,6 +300,62 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to broadcast notification for device {ChipId}", device.ChipId);
+            }
+        }
+
+        // 9. Procesamiento de reportes y callbacks OTA emitidos por dispositivos MQTT
+        if (_firmwareOtaService != null &&
+            ev.Attributes.TryGetValue("packet_type", out var pktType) &&
+            pktType == "ota_event" &&
+            ev.Attributes.TryGetValue("ota_action", out var otaAction))
+        {
+            try
+            {
+                await _firmwareOtaService.HandleDeviceOtaReportAsync(
+                    chipId: device.ChipId,
+                    otaAction: otaAction,
+                    payloadJson: request.Payload,
+                    cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error procesando reporte OTA de {ChipId}", device.ChipId);
+            }
+        }
+
+        // 10. Correlación de respuesta a comandos de terminal (GT06/Mictrack 0x15 o similar)
+        if (_commandRepository != null &&
+            ev.Attributes.TryGetValue("command_response", out var cmdResponse) &&
+            !string.IsNullOrWhiteSpace(cmdResponse))
+        {
+            try
+            {
+                var pendingCommands = await _commandRepository.GetPendingCommandsByDeviceAsync(device.Id, cancellationToken);
+                var latestPending = pendingCommands.FirstOrDefault(c => c.Status == CommandStatus.Sent || c.Status == CommandStatus.Pending);
+                if (latestPending != null)
+                {
+                    latestPending.Confirm(cmdResponse);
+                    _commandRepository.Update(latestPending);
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                    if (_notificationService != null)
+                    {
+                        await _notificationService.NotifyCommandStatusUpdatedAsync(
+                            device.TenantId,
+                            device.Id,
+                            latestPending.Id,
+                            latestPending.Status.ToString(),
+                            cmdResponse,
+                            DateTime.UtcNow,
+                            cancellationToken);
+                    }
+                    _logger.LogInformation("Comando {CommandId} de {ChipId} confirmado por respuesta de terminal: {Resp}",
+                        latestPending.Id, device.ChipId, cmdResponse);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error correlacionando respuesta de comando para {ChipId}", device.ChipId);
             }
         }
 

@@ -32,6 +32,15 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped
 
     public bool HasMqttApiKey => !string.IsNullOrEmpty(MqttApiKeyHash);
 
+    // OTA State tracking (portado de References/Mqtt-Broker DeviceStatus)
+    public bool OtaInProgress { get; private set; }
+    public string? OtaTargetVersion { get; private set; }
+    public int OtaLastChunkSent { get; private set; }
+    public int OtaTotalChunks { get; private set; }
+    public bool OtaCompleted { get; private set; }
+    public string? OtaErrorMessage { get; private set; }
+    public DateTime? OtaUpdatedAt { get; private set; }
+
     public IReadOnlyCollection<DeviceCapability> Capabilities => _capabilities.AsReadOnly();
 
     private Device(
@@ -189,5 +198,56 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped
         MqttApiKeyIssuedBy = issuedBy;
         UpdatedAt = DateTime.UtcNow;
         return Result.Success();
+    }
+
+    public void StartOta(string targetVersion, int totalChunks)
+    {
+        OtaInProgress = true;
+        OtaCompleted = false;
+        OtaTargetVersion = targetVersion?.Trim();
+        OtaTotalChunks = totalChunks;
+        OtaLastChunkSent = 0;
+        OtaErrorMessage = null;
+        OtaUpdatedAt = DateTime.UtcNow;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    public void UpdateOtaProgress(int lastChunkSent, int totalChunks)
+    {
+        OtaLastChunkSent = lastChunkSent;
+        OtaTotalChunks = totalChunks;
+        OtaUpdatedAt = DateTime.UtcNow;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    public void CompleteOta(string newVersion)
+    {
+        FirmwareVersion = newVersion?.Trim();
+        OtaInProgress = false;
+        OtaCompleted = true;
+        OtaErrorMessage = null;
+        OtaUpdatedAt = DateTime.UtcNow;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    public void FailOta(string errorMessage)
+    {
+        OtaInProgress = false;
+        OtaCompleted = false;
+        OtaErrorMessage = errorMessage;
+        OtaUpdatedAt = DateTime.UtcNow;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    public void ResetOta()
+    {
+        OtaInProgress = false;
+        OtaCompleted = false;
+        OtaErrorMessage = null;
+        OtaLastChunkSent = 0;
+        OtaTotalChunks = 0;
+        OtaTargetVersion = null;
+        OtaUpdatedAt = DateTime.UtcNow;
+        UpdatedAt = DateTime.UtcNow;
     }
 }

@@ -56,10 +56,95 @@ public class Gt06TcpHandler : ITcpProtocolHandler
                 return true;
 
             case R12LFFrame.ProtocolStatus:
+                byte[] statusAck = R12LFFrame.BuildAck(frame.ProtocolNumber, frame.SerialNumber);
+                if (frame.InformationContent.Length >= 3 && !string.IsNullOrEmpty(boundImei))
+                {
+                    byte termInfo = frame.InformationContent[0];
+                    byte voltLevel = frame.InformationContent[1];
+                    byte gsmLevel = frame.InformationContent[2];
+
+                    bool acc = (termInfo & 0x02) != 0;
+                    bool charge = (termInfo & 0x04) != 0;
+                    bool armed = (termInfo & 0x01) != 0;
+                    bool oilConnected = (termInfo & 0x80) != 0;
+
+                    int batteryPercent = voltLevel switch
+                    {
+                        0 => 0,
+                        1 => 10,
+                        2 => 30,
+                        3 => 50,
+                        4 => 70,
+                        5 => 90,
+                        6 => 100,
+                        _ => Math.Min(100, (int)voltLevel * 15)
+                    };
+                    int gsmPercent = Math.Min(100, gsmLevel * 25);
+
+                    var statusObj = new
+                    {
+                        imei = boundImei,
+                        acc = acc,
+                        charge = charge,
+                        defense_armed = armed,
+                        oil_connected = oilConnected,
+                        battery_level = batteryPercent,
+                        gsm_signal = gsmPercent,
+                        protocol_number = $"0x{frame.ProtocolNumber:X2}",
+                        serial_number = frame.SerialNumber,
+                        timestamp = DateTime.UtcNow.ToString("o")
+                    };
+
+                    outcome = new TcpFrameOutcome
+                    {
+                        Ack = statusAck,
+                        Ingest = true,
+                        IngestTopic = $"devices/{boundImei}/telemetry",
+                        IngestPayload = JsonSerializer.Serialize(statusObj),
+                        TransportProtocol = string.Empty,
+                    };
+                    return true;
+                }
+
                 outcome = new TcpFrameOutcome
                 {
-                    Ack = R12LFFrame.BuildAck(frame.ProtocolNumber, frame.SerialNumber),
+                    Ack = statusAck,
                     Ingest = false,
+                };
+                return true;
+
+            case R12LFFrame.ProtocolStringInfo:
+                string? commandResponse = null;
+                if (frame.InformationContent.Length >= 5)
+                {
+                    int cmdLen = frame.InformationContent[0];
+                    int textLen = Math.Max(0, cmdLen - 4);
+                    if (frame.InformationContent.Length >= 5 + textLen)
+                    {
+                        commandResponse = Encoding.ASCII.GetString(frame.InformationContent, 5, textLen);
+                    }
+                    else if (frame.InformationContent.Length > 5)
+                    {
+                        commandResponse = Encoding.ASCII.GetString(frame.InformationContent, 5, frame.InformationContent.Length - 5);
+                    }
+                }
+
+                var cmdObj = new
+                {
+                    imei = boundImei ?? string.Empty,
+                    command_response = commandResponse,
+                    protocol_number = $"0x{frame.ProtocolNumber:X2}",
+                    serial_number = frame.SerialNumber,
+                    timestamp = DateTime.UtcNow.ToString("o")
+                };
+
+                outcome = new TcpFrameOutcome
+                {
+                    Ack = null,
+                    Ingest = !string.IsNullOrEmpty(boundImei),
+                    IngestTopic = $"devices/{boundImei}/telemetry",
+                    IngestPayload = JsonSerializer.Serialize(cmdObj),
+                    TransportProtocol = string.Empty,
                 };
                 return true;
 

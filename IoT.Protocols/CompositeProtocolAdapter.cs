@@ -45,7 +45,8 @@ public sealed class CompositeProtocolAdapter : ICompositeProtocolAdapter
             new QueclinkTrackProtocolAdapter(),
             new CobanProtocolAdapter(),
             new IStartekProtocolAdapter(),
-            new JointechProtocolAdapter()
+            new JointechProtocolAdapter(),
+            new OtaDeviceAdapter()
         ], registry);
     }
 

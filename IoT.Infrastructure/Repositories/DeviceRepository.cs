@@ -67,6 +67,14 @@ public sealed class DeviceRepository : IDeviceRepository
         return await query.ToListAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<Device>> GetByGroupIdAsync(Guid tenantId, Guid groupId, CancellationToken cancellationToken = default)
+    {
+        return await _context.Devices
+            .Include(d => d.Capabilities)
+            .Where(d => d.TenantId == tenantId && d.GroupId == groupId)
+            .ToListAsync(cancellationToken);
+    }
+
     public async Task AddAsync(Device device, CancellationToken cancellationToken = default)
     {
         await _context.Devices.AddAsync(device, cancellationToken);

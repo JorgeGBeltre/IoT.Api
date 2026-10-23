@@ -136,9 +136,13 @@ public static class OtaChunker
 
             writer.WriteStartObject("Details");
             writer.WriteString("firmware_version", firmwareVersion);
+            writer.WriteString("FirmwareVersion", firmwareVersion);
             writer.WriteNumber("part_index", partIndex);
+            writer.WriteNumber("PartIndex", partIndex);
             writer.WriteNumber("total_parts", totalParts);
-            writer.WriteString("base64", Convert.ToBase64String(chunk));
+            writer.WriteNumber("TotalParts", totalParts);
+            string base64Str = Convert.ToBase64String(chunk);
+            writer.WriteString("base64", base64Str);
             if (!string.IsNullOrWhiteSpace(sha256Hex))
             {
                 writer.WriteString("sha256", sha256Hex);

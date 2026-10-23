@@ -43,6 +43,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     // Tenant Operations
     public DbSet<MqttBrokerConfig> MqttBrokers => Set<MqttBrokerConfig>();
     public DbSet<TenantSettings> TenantSettings => Set<TenantSettings>();
+    public DbSet<FirmwareVersionRecord> FirmwareVersionRecords => Set<FirmwareVersionRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -84,6 +85,8 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             builder.Property(d => d.MqttApiKeyHash).HasMaxLength(128);
             builder.Property(d => d.MqttApiKeyFingerprint).HasMaxLength(32);
             builder.Property(d => d.MqttApiKeyIssuedBy).HasMaxLength(200);
+            builder.Property(d => d.OtaTargetVersion).HasMaxLength(50);
+            builder.Property(d => d.OtaErrorMessage).HasMaxLength(500);
 
             builder.HasMany(d => d.Capabilities)
                 .WithOne()
@@ -249,6 +252,21 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             builder.Property(s => s.MapProvider).HasMaxLength(30).IsRequired();
             builder.Property(s => s.WebhookUrl).HasMaxLength(2048);
             builder.HasIndex(s => s.TenantId).IsUnique();
+        });
+
+        // FirmwareVersionRecord Configuration (OTA - portado de References/Mqtt-Broker)
+        modelBuilder.Entity<FirmwareVersionRecord>(builder =>
+        {
+            builder.ToTable("firmware_version_records");
+            builder.HasKey(f => f.Id);
+            builder.Property(f => f.FirmwareVersion).HasMaxLength(50).IsRequired();
+            builder.Property(f => f.Src).HasMaxLength(500).IsRequired();
+            builder.Property(f => f.TargetModel).HasMaxLength(100);
+            builder.Property(f => f.FeatureDescription).HasMaxLength(500);
+            builder.Property(f => f.Sha256).HasMaxLength(64).IsRequired();
+            builder.Property(f => f.UpdatedFromIp).HasMaxLength(45);
+            builder.HasIndex(f => new { f.TenantId, f.FirmwareVersion }).IsUnique();
+            builder.HasIndex(f => new { f.TenantId, f.TargetModel });
         });
 
         // AuditLog Configuration

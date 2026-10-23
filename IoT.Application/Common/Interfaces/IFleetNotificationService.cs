@@ -39,4 +39,16 @@ public interface IFleetNotificationService
         string? resultJson,
         DateTime updatedAt,
         CancellationToken cancellationToken = default);
+
+    Task NotifyOtaProgressAsync(
+        Guid tenantId,
+        Guid deviceId,
+        string chipId,
+        string version,
+        int currentChunk,
+        int totalChunks,
+        int percentage,
+        string status,
+        string? errorMessage = null,
+        CancellationToken cancellationToken = default);
 }

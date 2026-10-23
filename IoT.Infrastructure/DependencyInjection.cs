@@ -53,6 +53,8 @@ public static class DependencyInjection
         // Tenant Operations Repositories
         services.AddScoped<IMqttBrokerConfigRepository, MqttBrokerConfigRepository>();
         services.AddScoped<ITenantSettingsRepository, TenantSettingsRepository>();
+        services.AddScoped<IFirmwareVersionRecordRepository, FirmwareVersionRecordRepository>();
+        services.AddScoped<IFirmwareOtaService, Services.FirmwareOtaService>();
 
         // Security & Communication Services
         services.AddSingleton<IPasswordHasher, Security.BCryptPasswordHasher>();

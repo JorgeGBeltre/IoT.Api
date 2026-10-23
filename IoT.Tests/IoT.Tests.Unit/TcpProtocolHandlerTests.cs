@@ -110,6 +110,68 @@ public sealed class TcpProtocolHandlerTests
     }
 
     [Fact]
+    public void Mictrack_HeartbeatStatus0x13_IngestsTelemetryAndSendsAck()
+    {
+        var handler = new MictrackTcpHandler();
+        // Frame 0x13: 78780A13470503000200056F3F0D0A
+        var buf = Hex("78 78 0A 13 47 05 03 00 02 00 05 6F 3F 0D 0A");
+
+        bool ok = handler.TryReadFrame(buf, "861234567890123", out var outcome);
+
+        ok.Should().BeTrue();
+        outcome!.Ingest.Should().BeTrue("el heartbeat 0x13 reporta telemetría de estado y batería");
+        outcome.Ack.Should().NotBeNull("el heartbeat requiere ACK");
+        ToHex(outcome.Ack!).Should().StartWith("787805130005");
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("battery_level").GetInt32().Should().Be(90); // level 5 -> 90%
+        root.GetProperty("gsm_signal").GetInt32().Should().Be(75); // level 3 -> 75%
+        root.GetProperty("acc").GetBoolean().Should().BeTrue();
+        root.GetProperty("charge").GetBoolean().Should().BeTrue();
+        root.GetProperty("defense_armed").GetBoolean().Should().BeTrue();
+        root.GetProperty("protocol_number").GetString().Should().Be("0x13");
+    }
+
+    [Fact]
+    public void Mictrack_CommandResponse0x15_IngestsStringResponse()
+    {
+        var handler = new MictrackTcpHandler();
+        // Frame 0x15: 787816150E0000000152454C41592C313A4F4B000200068CE20D0A (contains 'RELAY,1:OK')
+        var buf = Hex("78 78 16 15 0E 00 00 00 01 52 45 4C 41 59 2C 31 3A 4F 4B 00 02 00 06 8C E2 0D 0A");
+
+        bool ok = handler.TryReadFrame(buf, "861234567890123", out var outcome);
+
+        ok.Should().BeTrue();
+        outcome!.Ingest.Should().BeTrue("la respuesta a comandos debe ser procesada para confirmar el comando");
+        outcome.Ack.Should().BeNull("la respuesta a comandos del terminal no requiere ACK");
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("command_response").GetString().Should().Be("RELAY,1:OK");
+        root.GetProperty("protocol_number").GetString().Should().Be("0x15");
+    }
+
+    [Fact]
+    public void Mictrack_BuildCommand_GeneratesValid0x80ServerCommandPacket()
+    {
+        var handler = new MictrackTcpHandler();
+        byte[]? packet = handler.BuildCommand("DYD#", serial: 1);
+
+        packet.Should().NotBeNull();
+        packet![0].Should().Be(0x78);
+        packet[1].Should().Be(0x78);
+        packet[3].Should().Be(R12LFFrame.ProtocolServerCommand); // 0x80
+        packet[^2].Should().Be(0x0D);
+        packet[^1].Should().Be(0x0A);
+
+        // Parse it back through R12LFFrame
+        bool parsed = R12LFFrame.TryParse(packet, out var frame, out int consumed);
+        parsed.Should().BeTrue();
+        frame!.ProtocolNumber.Should().Be(0x80);
+    }
+
+    [Fact]
     public void Gt06Handler_DoesNotDecode0x22_SoAnNt20IsNeverMisread()
     {
         // El X3Tech NT20 define SU PROPIO 0x22 con otro layout (antepone Location Source

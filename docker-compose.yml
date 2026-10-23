@@ -1,0 +1,201 @@
+services:
+  iot-postgres:
+    image: postgis/postgis:16-3.4
+    container_name: iot-postgres-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:?POSTGRES_DB es obligatorio}
+      - POSTGRES_USER=${POSTGRES_USER:?POSTGRES_USER es obligatorio}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    # NO se publica el puerto al host: api/worker se conectan por la red interna
+    # (iot-postgres-db:5432). Para acceso admin, usar un túnel SSH o un servicio en la red.
+    expose:
+      - "5432"
+    volumes:
+      - iot_postgres_data:/var/lib/postgresql/data
+    networks:
+      - iot-network
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  iot-redis:
+    image: redis:7.4-alpine
+    container_name: iot-redis-db
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio}"]
+    # NO se publica al host; accesible sólo por la red interna (iot-redis-db:6379).
+    expose:
+      - "6379"
+    volumes:
+      - iot_redis_data:/data
+    networks:
+      - iot-network
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # El broker MQTT es EMBEBIDO en el proceso iot-api (MQTTnet.Server), no hay
+  # broker externo. iot-api publica el puerto 1883 directamente. Ver EmbeddedMqttBroker.
+
+  iot-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: iot-backend-api
+    restart: unless-stopped
+    depends_on:
+      iot-postgres:
+        condition: service_healthy
+      iot-redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-5000}:5000"
+      # Broker MQTT embebido (dispositivos MQTT 3.1/3.1.1/5)
+      - "${MQTT_PORT:-1883}:1883"
+      # Gateway TCP multi-protocolo (un puerto por familia de GPS)
+      - "${TCP_GT06_PORT:-5023}:5023"       # GT06/Concox/SEEWORLD R12L-F
+      - "${TCP_QUECLINK_PORT:-5027}:5027"   # Queclink @Track
+      - "${TCP_COBAN_PORT:-5013}:5013"      # Coban/TK103
+      - "${TCP_ISTARTEK_PORT:-5001}:5001"   # iStartek
+      - "${TCP_JOINTECH_PORT:-5002}:5002"   # Jointech JT701D
+    volumes:
+      - iot_logs:/app/logs
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:5000
+      - ConnectionStrings__Postgres=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${POSTGRES_USER:?POSTGRES_USER es obligatorio};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
+      - ConnectionStrings__Redis=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
+      - Redis__ConnectionString=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
+      # Broker MQTT embebido (en proceso). En producción exige ApiKey por dispositivo.
+      - MqttBroker__Port=1883
+      # Host/dominio público por el que los dispositivos alcanzan el broker (se muestra
+      # al operador en las credenciales del dispositivo).
+      - MqttBroker__PublicHost=${MQTT_PUBLIC_HOST:-localhost}
+      - MqttBroker__Tls=${MQTT_TLS:-false}
+      - MqttBroker__AllowAnonymous=false
+      - MqttBroker__ApiKeys__0=${MQTT_API_KEY:?MQTT_API_KEY es obligatorio}
+      # Gateway TCP binario para trackers GPS
+      - TcpGateway__Enabled=true
+      - TcpGateway__Port=5023
+      # El cliente de suscripción a broker externo queda deshabilitado (broker embebido).
+      - Mqtt__ExternalSubscriptionEnabled=false
+      - Jwt__SecretKey=${JWT_SECRET:?JWT_SECRET es obligatorio}
+      - Jwt__Issuer=${JWT_ISSUER:-IoT-SaaS-Platform}
+      - Jwt__Audience=${JWT_AUDIENCE:-IoT-Frontend}
+      # Contraseña inicial de administradores sembrados. OBLIGATORIA en producción:
+      # si falta, el API falla al arrancar (no se autogenera ni se loguea ningún secreto).
+      - Seed__AdminPassword=${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD es obligatorio en producción}
+      # Orígenes CORS del frontend (obligatorio en prod). Coma-separados vía índices.
+      - Cors__AllowedOrigins__0=${FRONTEND_ORIGIN:?FRONTEND_ORIGIN es obligatorio (dominio del frontend)}
+      - AllowedHosts=${ALLOWED_HOSTS:-*}
+      - Email__SmtpServer=${SMTP_SERVER:-smtp.gmail.com}
+      - Email__Port=${SMTP_PORT:-587}
+      - Email__SenderEmail=${SMTP_USER:-noreply@iot.caribe}
+      - Email__SenderPassword=${SMTP_PASSWORD:-}
+      - Email__SenderName=${SMTP_SENDER_NAME:-IoT SaaS Caribe}
+      - Email__EnableSsl=${SMTP_ENABLE_SSL:-true}
+      - TZ=America/Santo_Domingo
+    networks:
+      - iot-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  iot-worker:
+    build:
+      context: .
+      dockerfile: Worker.Dockerfile
+    container_name: iot-telemetry-worker
+    restart: unless-stopped
+    depends_on:
+      iot-postgres:
+        condition: service_healthy
+      iot-redis:
+        condition: service_healthy
+    environment:
+      - DOTNET_ENVIRONMENT=Production
+      - ConnectionStrings__Postgres=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${POSTGRES_USER:?POSTGRES_USER es obligatorio};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
+      - ConnectionStrings__Redis=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
+      - Redis__ConnectionString=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
+      # El worker sólo ejecuta retención de datos. El broker MQTT y el gateway TCP
+      # viven en iot-api (AddDeviceFacingGateways). No bindea 1883 ni 5023.
+      - Mqtt__ExternalSubscriptionEnabled=false
+      - TZ=America/Santo_Domingo
+    networks:
+      - iot-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  iot-simulator:
+    profiles: ["dev", "simulation"]
+    build:
+      context: .
+      dockerfile: Simulator.Dockerfile
+    container_name: iot-device-simulator
+    restart: "no"
+    depends_on:
+      iot-api:
+        condition: service_healthy
+    environment:
+      - DOTNET_ENVIRONMENT=Development
+      # El simulador es un CLIENTE MQTT que se conecta al broker embebido de iot-api.
+      - Mqtt__Host=iot-backend-api
+      - Mqtt__Port=1883
+      - Mqtt__ApiKey=${MQTT_API_KEY:?MQTT_API_KEY es obligatorio}
+      - Simulator__IntervalSeconds=4
+    networks:
+      - iot-network
+
+volumes:
+  iot_postgres_data:
+    driver: local
+  iot_redis_data:
+    driver: local
+  iot_logs:
+    driver: local
+
+networks:
+  iot-network:
+    name: iot-network
+    driver: bridge

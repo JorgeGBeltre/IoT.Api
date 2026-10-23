@@ -1,0 +1,58 @@
+﻿name: Backend CI / Test & Docker Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build & Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET SDK 8.0
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore IoT.slnx
+
+    - name: Build Solution (Release)
+      run: dotnet build IoT.slnx --configuration Release --no-restore
+
+    - name: Execute Tests (Unit, Architecture, Integration)
+      run: dotnet test IoT.slnx --configuration Release --no-build --verbosity normal
+
+  docker-lint-build:
+    name: Verify Docker Container Builds
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build API Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: false
+        tags: iot-backend-api:test
+
+    - name: Build Worker Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Worker.Dockerfile
+        push: false
+        tags: iot-telemetry-worker:test

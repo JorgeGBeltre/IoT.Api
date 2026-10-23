@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\IoT.Domain\IoT.Domain.csproj" />
+    <ProjectReference Include="..\IoT.Application\IoT.Application.csproj" />
+    <ProjectReference Include="..\IoT.Protocols\IoT.Protocols.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
+    <!--
+      MailKit 4.18.1 (última disponible) sigue reportando GHSA-9j88-vvj5-vhgr
+      (severidad moderate). El advisory afecta a toda la familia 4.x sin
+      versión parchada; MimeKit (dependencia transitiva) tampoco tiene fix.
+      Mitigación: se usa SMTP sólo para OTP outbound; no se procesan mensajes
+      entrantes vía el componente afectado. Supresión acotada al warning
+      específico hasta que upstream publique una versión parchada.
+    -->
+    <PackageReference Include="MailKit" Version="4.18.1" NoWarn="NU1902" />
+    <PackageReference Include="MQTTnet" Version="5.0.1.1416" />
+    <PackageReference Include="MQTTnet.Server" Version="5.0.1.1416" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.11" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL.NetTopologySuite" Version="8.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Polly" Version="8.5.2" />
+    <PackageReference Include="StackExchange.Redis" Version="2.8.24" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.1.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

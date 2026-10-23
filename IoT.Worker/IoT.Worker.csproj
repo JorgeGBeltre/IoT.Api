@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-IoT.Worker-14103d9e-1e38-47d8-9625-f28289efb105</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="MQTTnet" Version="5.0.1.1416" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\IoT.Domain\IoT.Domain.csproj" />
+    <ProjectReference Include="..\IoT.Application\IoT.Application.csproj" />
+    <ProjectReference Include="..\IoT.Protocols\IoT.Protocols.csproj" />
+    <ProjectReference Include="..\IoT.Infrastructure\IoT.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

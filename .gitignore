@@ -1,0 +1,26 @@
+## Build and output
+**/bin/
+**/obj/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## IDE & Editors
+.vs/
+.vscode/
+.idea/
+
+## Secrets & Local Configuration
+.env
+.env.local
+*.pfx
+*.pem
+*.key
+
+## Database & Local Logs
+*.db
+*.sqlite
+logs/
+data/

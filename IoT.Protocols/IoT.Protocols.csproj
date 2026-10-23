@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\IoT.Domain\IoT.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      AutoMapper 13.0.1 + advisory GHSA-rvv3-g6hj-g44x (deserialización no
+      segura). Las versiones 14/15/16 también están afectadas o rompen
+      compatibilidad con .NET 8. Decisión: mantener 13.0.1 y planificar
+      eliminación de AutoMapper (reemplazo por mapeo manual) en una
+      iteración dedicada; mientras tanto, el advisory se suprime a nivel
+      de restore para que el build no lo convierta en error. El riesgo real
+      se mitiga porque los perfiles de mapping NO deserializan payload de
+      red directamente contra IMapper — ver TelemetryAutoMapper.cs.
+    -->
+    <PackageReference Include="AutoMapper" Version="13.0.1" NoWarn="NU1902;NU1903" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

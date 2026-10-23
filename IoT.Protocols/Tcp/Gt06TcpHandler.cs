@@ -10,9 +10,17 @@ namespace IoT.Protocols.Tcp;
 /// Reusa <see cref="R12LFFrame"/> para framing/decode y emite el payload canónico plano
 /// que decodifica GpsAccidentAdapter. ACK de login/heartbeat/alarma según spec (5s).
 /// </summary>
-public sealed class Gt06TcpHandler : ITcpProtocolHandler
+public class Gt06TcpHandler : ITcpProtocolHandler
 {
-    public string Family => "GT06";
+    public virtual string Family => "GT06";
+
+    /// <summary>
+    /// Traduce el número de protocolo recibido al número CANÓNICO de la familia GT06.
+    /// Por defecto no traduce nada. Los dialectos que renumeran las tramas sin cambiar su
+    /// contenido (p.ej. Mictrack, que documenta posición 0x22 y alarma 0x26) lo sobrescriben.
+    /// El ACK y el payload siempre usan el número ORIGINAL, que es el que el equipo espera.
+    /// </summary>
+    protected virtual byte NormalizeProtocol(byte protocolNumber) => protocolNumber;
 
     public bool TryReadFrame(List<byte> buffer, string? boundImei, out TcpFrameOutcome? outcome)
     {
@@ -30,7 +38,11 @@ public sealed class Gt06TcpHandler : ITcpProtocolHandler
         // En éxito, consumedBytes = ruido inicial + la trama completa (contrato probado).
         buffer.RemoveRange(0, Math.Min(consumedBytes, buffer.Count));
 
-        switch (frame.ProtocolNumber)
+        // El ACK echa de vuelta el número ORIGINAL recibido (es el que el equipo correlaciona);
+        // el enrutado interno usa el número canónico de la familia.
+        byte canonical = NormalizeProtocol(frame.ProtocolNumber);
+
+        switch (canonical)
         {
             case R12LFFrame.ProtocolLogin:
                 string imei = frame.ExtractImeiFromLoginPacket();
@@ -38,7 +50,7 @@ public sealed class Gt06TcpHandler : ITcpProtocolHandler
                 {
                     SessionImei = string.IsNullOrWhiteSpace(imei) ? null : imei,
                     IdentifiesSession = !string.IsNullOrWhiteSpace(imei),
-                    Ack = R12LFFrame.BuildAck(R12LFFrame.ProtocolLogin, frame.SerialNumber),
+                    Ack = R12LFFrame.BuildAck(frame.ProtocolNumber, frame.SerialNumber),
                     Ingest = false,
                 };
                 return true;
@@ -46,16 +58,18 @@ public sealed class Gt06TcpHandler : ITcpProtocolHandler
             case R12LFFrame.ProtocolStatus:
                 outcome = new TcpFrameOutcome
                 {
-                    Ack = R12LFFrame.BuildAck(R12LFFrame.ProtocolStatus, frame.SerialNumber),
+                    Ack = R12LFFrame.BuildAck(frame.ProtocolNumber, frame.SerialNumber),
                     Ingest = false,
                 };
                 return true;
 
             case R12LFFrame.ProtocolLocation:
             case R12LFFrame.ProtocolAlarm:
-                bool isAlarm = frame.ProtocolNumber == R12LFFrame.ProtocolAlarm;
-                var (position, recordedAt) = frame.DecodeLocationPacket();
-                byte[]? ack = isAlarm ? R12LFFrame.BuildAck(R12LFFrame.ProtocolAlarm, frame.SerialNumber) : null;
+                bool isAlarm = canonical == R12LFFrame.ProtocolAlarm;
+                // Se decodifica según el número CANÓNICO: un dialecto puede haberlo enviado
+                // con otro número (Mictrack: 0x22/0x26) y el cuerpo es el mismo.
+                var (position, recordedAt) = frame.DecodeLocationPacket(canonical);
+                byte[]? ack = isAlarm ? R12LFFrame.BuildAck(frame.ProtocolNumber, frame.SerialNumber) : null;
 
                 if (position == null)
                 {

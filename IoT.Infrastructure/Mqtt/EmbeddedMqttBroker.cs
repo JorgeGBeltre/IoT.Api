@@ -42,7 +42,28 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
     private readonly bool _allowAnonymous;
     private readonly int _port;
 
-    private readonly record struct InboundMessage(string Topic, string Payload, string? MessageId, string ClientId);
+    /// <summary>
+    /// TTL de rescate del mapeo ChipId↔ClientId en Redis. Si el proceso muere sin disparar
+    /// los eventos de desconexión (OOM-kill, SIGKILL, corte de red del nodo), las claves
+    /// quedarían vivas para siempre y el push se dirigiría a sesiones inexistentes. Con TTL
+    /// las entradas abandonadas se recogen solas; cada reconexión lo renueva. 0 = sin TTL.
+    /// </summary>
+    private readonly TimeSpan? _clientMapTtl;
+
+    /// <summary>
+    /// ClientId → ChipId VERIFICADO contra el hash de la ApiKey del dispositivo. Sólo se
+    /// puebla cuando la credencial es por dispositivo; con la ApiKey global de bootstrap
+    /// (simulador) un mismo publicador habla por varios equipos y no hay identidad única.
+    /// Permite que el pipeline use la identidad ya autenticada cuando el tópico no la lleva.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _authenticatedChipIds = new(StringComparer.Ordinal);
+
+    private readonly record struct InboundMessage(
+        string Topic,
+        string Payload,
+        string? MessageId,
+        string ClientId,
+        string? AuthenticatedChipId);
 
     public EmbeddedMqttBroker(
         IConfiguration configuration,
@@ -58,6 +79,12 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         _port = int.TryParse(configuration["MqttBroker:Port"], out var p) ? p : 1883;
         _allowAnonymous = bool.TryParse(configuration["MqttBroker:AllowAnonymous"], out var anon) && anon;
         _apiKeys = configuration.GetSection("MqttBroker:ApiKeys").Get<string[]>() ?? Array.Empty<string>();
+
+        // Por defecto 7 días: muy por encima de cualquier intervalo de reconexión real de un
+        // tracker (keepalive en minutos), así que no caduca mapeos vivos, pero garantiza que
+        // una entrada abandonada no sobreviva indefinidamente.
+        int ttlHours = int.TryParse(configuration["MqttBroker:ClientMapTtlHours"], out var h) ? h : 168;
+        _clientMapTtl = ttlHours > 0 ? TimeSpan.FromHours(ttlHours) : null;
     }
 
     // =========================================================================
@@ -112,7 +139,14 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
             using var scope = _scopeFactory.CreateScope();
             var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
             // Reutiliza el pipeline existente (dedup, tenant, provisioning con auditoría).
-            await mediator.Send(new IngestTelemetryCommand(msg.Topic, msg.Payload, "real"), ct);
+            await mediator.Send(
+                new IngestTelemetryCommand(
+                    msg.Topic,
+                    msg.Payload,
+                    "real",
+                    TransportDeviceIdentifier: msg.AuthenticatedChipId,
+                    TransportMessageId: msg.MessageId),
+                ct);
         }
         catch (Exception ex)
         {
@@ -127,6 +161,9 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
     {
         string? apiKey;
         string? chipId;
+        // Verdadero sólo si la conexión se autenticó con la ApiKey PROPIA del dispositivo;
+        // en ese caso el ChipId queda probado y puede propagarse al pipeline.
+        bool authenticatedPerDevice = false;
 
         if (e.ProtocolVersion == MQTTnet.Formatter.MqttProtocolVersion.V500)
         {
@@ -171,6 +208,9 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                         apiKeySvc.Verify(apiKey, device.MqttApiKeyHash!))
                     {
                         isDeviceKey = true;
+                        // Identidad probada: la del REGISTRO, no la que declaró el cliente.
+                        chipId = device.ChipId;
+                        authenticatedPerDevice = true;
                     }
                 }
             }
@@ -188,7 +228,33 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         if (string.IsNullOrWhiteSpace(chipId))
             chipId = e.ClientId;
 
-        await _clientMap.SetOrUpdateAsync(chipId, e.ClientId);
+        if (authenticatedPerDevice)
+        {
+            _authenticatedChipIds[e.ClientId] = chipId;
+        }
+        else
+        {
+            // ApiKey global o anónimo: no hay identidad única por conexión. Se limpia
+            // cualquier resto de una conexión anterior con el mismo ClientId.
+            _authenticatedChipIds.TryRemove(e.ClientId, out _);
+        }
+
+        // El mapeo es para push dirigido y presencia: útil, pero NO es parte de la
+        // autenticación. Si Redis está caído o lento, una excepción aquí rechazaría TODAS
+        // las conexiones de dispositivos (la credencial ya se validó). Se degrada en vez
+        // de cortar la ingesta: el dispositivo entra y publica; sólo el push queda ciego.
+        try
+        {
+            await _clientMap.SetOrUpdateAsync(chipId, e.ClientId, _clientMapTtl);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "No se pudo registrar el mapeo ChipId={ChipId}↔ClientId={ClientId} en Redis; " +
+                "la conexión se acepta pero el push dirigido no funcionará hasta la próxima reconexión.",
+                chipId, e.ClientId);
+        }
+
         _logger.LogInformation("Dispositivo conectado: ClientId={ClientId}, ChipId={ChipId}", e.ClientId, chipId);
         e.ReasonCode = MqttConnectReasonCode.Success;
     }
@@ -214,7 +280,9 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                 // El canal es acotado (500). Si está lleno (pico de reconexión / BD lenta),
                 // TryWrite devuelve false y la trama se descarta: hay que loguearlo para tener
                 // visibilidad del backpressure en vez de perder telemetría en silencio.
-                if (!_channel.Writer.TryWrite(new InboundMessage(topic, payload, messageId, e.ClientId)))
+                _authenticatedChipIds.TryGetValue(e.ClientId, out var authenticatedChipId);
+
+                if (!_channel.Writer.TryWrite(new InboundMessage(topic, payload, messageId, e.ClientId, authenticatedChipId)))
                 {
                     _logger.LogWarning(
                         "Canal de ingesta MQTT lleno (cap {Capacity}); se descartó una trama de {ClientId} (tópico {Topic}). Backpressure.",
@@ -240,11 +308,32 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
 
     private async Task OnClientDisconnected(ClientDisconnectedEventArgs e)
     {
-        _logger.LogInformation("Cliente MQTT desconectado: {ClientId}", e.ClientId);
+        // TAKEOVER: el dispositivo ya reconectó con el MISMO ClientId y el broker cerró la
+        // sesión anterior. El mapeo que hay en Redis es el de la conexión NUEVA (ya escrito
+        // por OnValidatingConnection), así que darlo de baja aquí dejaría al dispositivo
+        // conectado pero invisible para push y presencia. Caso dominante en trackers, que
+        // usan el IMEI como ClientId fijo y reconectan al recuperar cobertura.
+        if (e.DisconnectType == MqttClientDisconnectType.Takeover)
+        {
+            _logger.LogInformation(
+                "Sesión MQTT anterior cerrada por takeover: {ClientId} (el mapeo vivo se conserva).",
+                e.ClientId);
+            return;
+        }
+
+        _logger.LogInformation("Cliente MQTT desconectado: {ClientId} ({DisconnectType})", e.ClientId, e.DisconnectType);
+
+        // Se libera la identidad autenticada de ESTA conexión. En el takeover de arriba no
+        // se toca, porque la entrada ya pertenece a la conexión nueva (mismo ClientId).
+        _authenticatedChipIds.TryRemove(e.ClientId, out _);
+
         var chipId = await _clientMap.GetChipIdByClientIdAsync(e.ClientId);
         if (!string.IsNullOrEmpty(chipId))
         {
-            await _clientMap.RemoveAsync(chipId);
+            // Baja CONDICIONAL: sólo si el mapeo sigue apuntando a ESTA conexión. Protege
+            // contra desconexiones que llegan tarde, después de que el dispositivo ya se
+            // registró de nuevo (con el mismo ClientId o con otro).
+            await _clientMap.RemoveAsync(chipId, e.ClientId);
         }
     }
 

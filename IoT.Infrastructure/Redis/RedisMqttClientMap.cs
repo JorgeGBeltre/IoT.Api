@@ -5,21 +5,78 @@ using StackExchange.Redis;
 namespace IoT.Infrastructure.Redis;
 
 /// <summary>
-/// Implementación Redis del mapa ChipId↔ClientId con ÍNDICE INVERSO.
+/// Implementación Redis del mapa ChipId↔ClientId con ÍNDICE INVERSO ATÓMICO.
 ///
 /// Claves:
-///   <c>mqtt:client:{chipId}</c>    → clientId  (directo: push server→device)
+///   <c>mqtt:client:{chipId}</c>     → clientId  (directo: push server→device)
 ///   <c>mqtt:clientid:{clientId}</c> → chipId    (inverso: presencia en la desconexión)
 ///
 /// El índice inverso evita el SCAN O(N) + GET por clave que se hacía en CADA desconexión
 /// MQTT (hot path con churn de reconexiones de miles de trackers): ahora es un GET O(1).
-/// Ambas claves se mantienen en pareja (alta, cambio de clientId y baja) para no dejar
-/// huérfanas; se conserva un fallback de SCAN sólo para mapeos creados antes de este índice.
+///
+/// Ambas mutaciones (alta y baja) se ejecutan con un script Lua, por dos razones:
+///  1. ATOMICIDAD: son secuencias GET→DEL→SET; partidas en varios round-trips, dos
+///     conexiones concurrentes del mismo dispositivo (o de dos dispositivos que se
+///     intercambian el clientId) dejaban claves huérfanas o borraban el mapeo vivo.
+///  2. BORRADO CONDICIONAL: la baja compara el clientId esperado contra el valor actual
+///     y NO borra si ya no coincide. Esto es lo que impide que la desconexión tardía de
+///     una sesión antigua (takeover al reconectar) mate el mapeo de la conexión nueva.
+///
+/// Nota de despliegue: los scripts construyen la clave inversa dentro de Lua a partir del
+/// valor leído, así que asumen una instancia Redis NO particionada (single node, el modo
+/// del docker-compose). Si algún día se migra a Redis Cluster hay que fijar ambas claves
+/// al mismo hash slot con hashtags.
 /// </summary>
 public sealed class RedisMqttClientMap : IMqttClientMap
 {
     private const string KeyPrefix = "mqtt:client:";
     private const string ReverseKeyPrefix = "mqtt:clientid:";
+
+    /// <summary>
+    /// Alta/actualización atómica del par de claves.
+    /// KEYS[1]=directo(chipId)  KEYS[2]=inverso(clientId)
+    /// ARGV[1]=chipId  ARGV[2]=clientId  ARGV[3]=ttl en segundos (0 = sin TTL)
+    /// ARGV[4]=prefijo inverso  ARGV[5]=prefijo directo
+    /// </summary>
+    private const string SetScript = @"
+local prevClient = redis.call('GET', KEYS[1])
+if prevClient and prevClient ~= ARGV[2] then
+  -- el chip se reconectó con OTRO clientId: borrar su inverso anterior
+  redis.call('DEL', ARGV[4] .. prevClient)
+end
+local prevChip = redis.call('GET', KEYS[2])
+if prevChip and prevChip ~= ARGV[1] then
+  -- el clientId quedó reasignado a otro chip: borrar el directo del chip anterior
+  redis.call('DEL', ARGV[5] .. prevChip)
+end
+local ttl = tonumber(ARGV[3])
+if ttl and ttl > 0 then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ttl)
+  redis.call('SET', KEYS[2], ARGV[1], 'EX', ttl)
+else
+  redis.call('SET', KEYS[1], ARGV[2])
+  redis.call('SET', KEYS[2], ARGV[1])
+end
+return 1";
+
+    /// <summary>
+    /// Baja atómica y CONDICIONAL del par de claves.
+    /// KEYS[1]=directo(chipId)
+    /// ARGV[1]=clientId esperado ('' = cualquiera)  ARGV[2]=prefijo inverso
+    /// Devuelve 1 si borró, 0 si no había mapeo, -1 si el mapeo apunta a otro clientId
+    /// (desconexión obsoleta: se preserva el mapeo vivo).
+    /// </summary>
+    private const string RemoveScript = @"
+local current = redis.call('GET', KEYS[1])
+if not current then
+  return 0
+end
+if ARGV[1] ~= '' and current ~= ARGV[1] then
+  return -1
+end
+redis.call('DEL', KEYS[1])
+redis.call('DEL', ARGV[2] .. current)
+return 1";
 
     private readonly IConnectionMultiplexer _redis;
     private readonly ILogger<RedisMqttClientMap> _logger;
@@ -39,18 +96,12 @@ public sealed class RedisMqttClientMap : IMqttClientMap
     {
         if (string.IsNullOrWhiteSpace(chipId) || string.IsNullOrWhiteSpace(clientId)) return;
 
-        var db = Db;
+        var ttlSeconds = expiry.HasValue ? (long)Math.Max(1, expiry.Value.TotalSeconds) : 0;
 
-        // Si el dispositivo se reconectó con OTRO clientId, borrar el inverso anterior
-        // para no dejar una clave huérfana apuntando a este chipId.
-        var previousClientId = await db.StringGetAsync(ForwardKey(chipId));
-        if (previousClientId.HasValue && previousClientId != clientId)
-        {
-            await db.KeyDeleteAsync(ReverseKey(previousClientId!));
-        }
-
-        await db.StringSetAsync(ForwardKey(chipId), clientId, expiry);
-        await db.StringSetAsync(ReverseKey(clientId), chipId, expiry);
+        await Db.ScriptEvaluateAsync(
+            SetScript,
+            new RedisKey[] { ForwardKey(chipId), ReverseKey(clientId) },
+            new RedisValue[] { chipId, clientId, ttlSeconds, ReverseKeyPrefix, KeyPrefix });
     }
 
     public async Task<string?> GetClientIdAsync(string chipId, CancellationToken ct = default)
@@ -65,13 +116,11 @@ public sealed class RedisMqttClientMap : IMqttClientMap
         if (string.IsNullOrWhiteSpace(clientId)) return null;
         try
         {
-            // Camino normal: O(1) por el índice inverso.
+            // O(1) por el índice inverso. No hay fallback por SCAN: el inverso se escribe
+            // siempre en la misma operación atómica que el directo, así que un miss
+            // significa "no hay mapeo" (o ya se dio de baja), no "hay que buscarlo".
             var reverse = await Db.StringGetAsync(ReverseKey(clientId));
-            if (reverse.HasValue) return reverse.ToString();
-
-            // Fallback (sólo mapeos previos a la existencia del índice): SCAN una vez y
-            // rellenar el inverso para que la siguiente búsqueda ya sea O(1).
-            return await ScanForChipIdAndBackfillAsync(clientId);
+            return reverse.HasValue ? reverse.ToString() : null;
         }
         catch (Exception ex)
         {
@@ -80,39 +129,32 @@ public sealed class RedisMqttClientMap : IMqttClientMap
         }
     }
 
-    public async Task RemoveAsync(string chipId, CancellationToken ct = default)
+    public async Task<bool> RemoveAsync(string chipId, string? expectedClientId = null, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(chipId)) return;
+        if (string.IsNullOrWhiteSpace(chipId)) return false;
 
-        var db = Db;
-        // Leer el clientId asociado ANTES de borrar el directo, para poder borrar su inverso.
-        var clientId = await db.StringGetAsync(ForwardKey(chipId));
-        await db.KeyDeleteAsync(ForwardKey(chipId));
-        if (clientId.HasValue)
+        try
         {
-            await db.KeyDeleteAsync(ReverseKey(clientId!));
-        }
-    }
+            var result = await Db.ScriptEvaluateAsync(
+                RemoveScript,
+                new RedisKey[] { ForwardKey(chipId) },
+                new RedisValue[] { expectedClientId ?? string.Empty, ReverseKeyPrefix });
 
-    private async Task<string?> ScanForChipIdAndBackfillAsync(string clientId)
-    {
-        var endpoint = _redis.GetEndPoints().FirstOrDefault();
-        if (endpoint is null) return null;
-
-        var server = _redis.GetServer(endpoint);
-        foreach (var key in server.Keys(pattern: $"{KeyPrefix}*"))
-        {
-            var value = await Db.StringGetAsync(key);
-            if (value == clientId)
+            var code = (long)result;
+            if (code == -1)
             {
-                string chipId = key.ToString()[KeyPrefix.Length..];
                 _logger.LogDebug(
-                    "ClientId {ClientId} resuelto por SCAN (mapeo previo al índice inverso); rellenando índice.",
-                    clientId);
-                await Db.StringSetAsync(ReverseKey(clientId), chipId);
-                return chipId;
+                    "Baja de mapeo ignorada para ChipId {ChipId}: el mapeo ya apunta a otra conexión " +
+                    "(desconexión obsoleta de ClientId {ClientId}).", chipId, expectedClientId);
+                return false;
             }
+
+            return code == 1;
         }
-        return null;
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "No se pudo dar de baja el mapeo MQTT de ChipId {ChipId}", chipId);
+            return false;
+        }
     }
 }

@@ -153,8 +153,13 @@ public class Phase1Etapa4AdaptersAndProfilesTests
 
         var evt = result.Value;
         evt.DeviceIdentifier.Should().Be("RELAY-NODE-01");
-        evt.Attributes.Should().ContainKey("relay_1_state").WhoseValue.Should().Be("ON");
-        evt.Attributes.Should().ContainKey("relay_2_state").WhoseValue.Should().Be("OFF");
+        // El estado se normaliza a "on"/"off" en minúsculas, independientemente de cómo lo
+        // escriba el firmware ("ON", "1", true) y de por qué mensaje llegue (status con
+        // Details.devices o telemetría periódica con Details.relays). Antes se conservaba
+        // la caja original, así que el MISMO equipo podía producir "ON" y "on" en tramas
+        // distintas y los filtros por atributo fallaban a medias.
+        evt.Attributes.Should().ContainKey("relay_1_state").WhoseValue.Should().Be("on");
+        evt.Attributes.Should().ContainKey("relay_2_state").WhoseValue.Should().Be("off");
         evt.NumericMetrics.Should().ContainKey("uptime_seconds").WhoseValue.Should().Be(1250.0);
     }
 

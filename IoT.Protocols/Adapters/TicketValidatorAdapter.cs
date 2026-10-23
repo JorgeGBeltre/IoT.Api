@@ -12,12 +12,29 @@ public sealed class TicketValidatorAdapter : IDeviceProtocolAdapter
 
     public bool CanHandle(TransportMessage message) => CanHandle(message.TopicOrRoute, message.Payload);
 
+    /// <summary>
+    /// Tópicos FIJOS (sin identificador) que publica el firmware. Transcritos de
+    /// References/Dispositivos/FligoV0.0.1/src/Application/Messaging/MqttTopics.h:28-30.
+    /// Sólo se reconocía el primero, así que el reporte de configuración y el de error de
+    /// OTA los resolvía el adaptador genérico: volcado plano, sin semántica.
+    /// </summary>
+    private static readonly string[] FixedTopics =
+    {
+        "TicketValidationRequest",
+        "DeviceConfigValidationRequest",
+        "ErrorUpdateFirmwareDevice"
+    };
+
     public bool CanHandle(string topic, string payload)
     {
+        // Los tópicos fijos son propios de este firmware: no hace falta inspeccionar el
+        // payload (el reporte de error de OTA no lleva ninguno de los campos de abajo).
+        if (FixedTopics.Contains(topic, StringComparer.OrdinalIgnoreCase))
+            return true;
+
         if (topic.StartsWith("telemetry/", StringComparison.OrdinalIgnoreCase) ||
             topic.StartsWith("events/", StringComparison.OrdinalIgnoreCase) ||
             topic.StartsWith("status/", StringComparison.OrdinalIgnoreCase) ||
-            topic.Equals("TicketValidationRequest", StringComparison.OrdinalIgnoreCase) ||
             TopicPatternMatcher.MatchesMqttTopic("telemetry/+", topic) ||
             TopicPatternMatcher.MatchesMqttTopic("events/+", topic) ||
             TopicPatternMatcher.MatchesMqttTopic("status/+", topic))

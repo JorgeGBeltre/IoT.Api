@@ -69,13 +69,17 @@ public sealed class TelemetryStore : ITelemetryStore
             RecordedAt = recordedAt,
             ReceivedAt = receivedAt,
             MetricsJson = JsonSerializer.Serialize(metrics),
-            RawPayload = rawPayload,
+            // La columna es jsonb: una trama que no sea JSON (texto plano del relé, ASCII
+            // de los trackers, hex de los binarios) hacía fallar el INSERT y se perdía la
+            // telemetría ya decodificada. Ver JsonbText.
+            RawPayload = JsonbText.Normalize(rawPayload),
             Source = source,
             MessageId = messageId
         };
 
         await _context.TelemetryRecords.AddAsync(entity, cancellationToken);
     }
+
 
     public async Task<IReadOnlyList<HistoricalPositionDto>> GetPositionsAsync(
         Guid tenantId,

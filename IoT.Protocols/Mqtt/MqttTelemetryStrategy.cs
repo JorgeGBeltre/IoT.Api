@@ -2,6 +2,7 @@ using IoT.Domain.Common;
 using IoT.Protocols.Contracts;
 using IoT.Protocols.Mapping;
 using IoT.Protocols.Models;
+using IoT.Protocols.Routing;
 using IoT.Protocols.Strategies;
 
 namespace IoT.Protocols.Mqtt;
@@ -80,17 +81,9 @@ public sealed class MqttTelemetryStrategy : ITelemetryStrategy
         }
     }
 
-    private static string? ExtractDeviceIdFromTopic(string topic)
-    {
-        if (string.IsNullOrWhiteSpace(topic)) return null;
-
-        var parts = topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length >= 2 &&
-            parts[0] is "devices" or "event" or "status" or "ticket" or "telemetry" or "device" or "glp")
-        {
-            return parts[1];
-        }
-
-        return parts.Length > 0 ? parts[^1] : null;
-    }
+    // La identidad del tópico se resuelve en TopicIdentity, compartido con los
+    // adaptadores: NO se devuelve el último segmento de un tópico desconocido, que
+    // fabricaba identificadores basura ("progress", "get", "device_switch1_state").
+    private static string? ExtractDeviceIdFromTopic(string topic) =>
+        TopicIdentity.ExtractDeviceId(topic);
 }

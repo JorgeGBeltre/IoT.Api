@@ -191,6 +191,21 @@ public static class TelemetryAutoMapper
             else if (val.ValueKind == JsonValueKind.Number) target.ChipId = val.ToString();
             return;
         }
+        // Alias de identidad que usan los firmwares REALES en la raíz de su trama, cada uno
+        // con un nombre distinto: "device_id" (will de GLP, mqtt_client.cpp:43), "id"
+        // (accidente del GPS, AccidentService.cpp:34) y "device" (familia MQTTOTAv5,
+        // MQTTOTAv5.cpp:1003). Sin ellos la identidad se perdía y la trama se rechazaba.
+        // No sobreescriben un ChipId explícito, que es más fiable, y sólo se aceptan como
+        // valor escalar (en varias tramas "Device" es un objeto anidado).
+        if (normalizedKey is "deviceid" or "device_id" or "device" or "id")
+        {
+            if (string.IsNullOrWhiteSpace(target.ChipId))
+            {
+                if (val.ValueKind == JsonValueKind.String) target.ChipId = val.GetString();
+                else if (val.ValueKind == JsonValueKind.Number) target.ChipId = val.ToString();
+            }
+            return;
+        }
         if (normalizedKey is "chiptype" or "chip_type") { target.ChipType = val.GetString(); return; }
         if (normalizedKey is "macaddress" or "mac_address" or "mac") { target.MacAddress = val.GetString(); return; }
         if (normalizedKey is "clientid" or "client_id" or "client") { target.ClientId = val.GetString(); return; }
@@ -209,8 +224,10 @@ public static class TelemetryAutoMapper
         if (normalizedKey is "isvalid" or "is_valid" or "valido") { if (TryGetBool(val, out var b)) target.IsValid = b; return; }
 
         // 3. Accidentes & Cinemática
-        if (normalizedKey is "impact_detected" or "impactdetected" or "impacto") { if (TryGetBool(val, out var b)) target.ImpactDetected = b; return; }
-        if (normalizedKey is "rollover_detected" or "rolloverdetected" or "volcadura") { if (TryGetBool(val, out var b)) target.RolloverDetected = b; return; }
+        // "impact" y "rollover" SIN el sufijo _detected son los nombres que publica el
+        // firmware de accidentes (AccidentService.cpp:32-33).
+        if (normalizedKey is "impact_detected" or "impactdetected" or "impacto" or "impact") { if (TryGetBool(val, out var b)) target.ImpactDetected = b; return; }
+        if (normalizedKey is "rollover_detected" or "rolloverdetected" or "volcadura" or "rollover") { if (TryGetBool(val, out var b)) target.RolloverDetected = b; return; }
         if (normalizedKey is "impact_magnitude" or "impactmagnitude") { if (TryGetDouble(val, out var d)) target.ImpactMagnitude = (float)d; return; }
         if (normalizedKey is "roll_angle" or "rollangle" or "roll") { if (TryGetDouble(val, out var d)) target.RollAngle = (float)d; return; }
         if (normalizedKey is "pitch_angle" or "pitchangle" or "pitch") { if (TryGetDouble(val, out var d)) target.PitchAngle = (float)d; return; }

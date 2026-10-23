@@ -199,8 +199,19 @@ public sealed record R12LFFrame
     }
 
     public (GeoPosition? Position, DateTime RecordedAt) DecodeLocationPacket()
+        => DecodeLocationPacket(ProtocolNumber);
+
+    /// <summary>
+    /// Decodifica una trama de posición/alarma interpretándola como
+    /// <paramref name="canonicalProtocolNumber"/>, que puede diferir del número realmente
+    /// recibido. Lo necesitan los dialectos que renumeran las tramas sin cambiar su
+    /// contenido: el Mictrack M558G-V2 envía la posición como 0x22 y la alarma como 0x26,
+    /// con el mismo cuerpo que el 0x12/0x16 de GT06. Sin esto el filtro de abajo devolvía
+    /// null y se descartaban todas sus posiciones.
+    /// </summary>
+    public (GeoPosition? Position, DateTime RecordedAt) DecodeLocationPacket(byte canonicalProtocolNumber)
     {
-        if (ProtocolNumber != ProtocolLocation && ProtocolNumber != ProtocolAlarm)
+        if (canonicalProtocolNumber != ProtocolLocation && canonicalProtocolNumber != ProtocolAlarm)
             return (null, DateTime.UtcNow);
 
         if (InformationContent.Length < 18)

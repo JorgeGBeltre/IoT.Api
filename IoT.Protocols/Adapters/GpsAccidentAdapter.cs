@@ -43,16 +43,37 @@ public sealed class GpsAccidentAdapter : IDeviceProtocolAdapter
                 chipId = chipElem.GetString() ?? string.Empty;
             }
 
+            // El firmware de accidentes publica el ChipId en la RAÍZ, bajo la clave "id"
+            // (References/Dispositivos/GPS/src/application/services/AccidentService.cpp:34).
+            // Ningún adaptador leía esa clave, así que la identidad se perdía.
             if (string.IsNullOrEmpty(chipId))
             {
-                if (TopicPatternMatcher.TryExtractParameters("devices/{deviceId}/telemetry", topic, out var p1))
-                    chipId = p1["deviceId"];
-                else if (TopicPatternMatcher.TryExtractParameters("telemetry/{deviceId}", topic, out var p2))
-                    chipId = p2["deviceId"];
+                foreach (var key in new[] { "id", "chipId", "ChipId", "device", "deviceId" })
+                {
+                    if (root.TryGetProperty(key, out var idElem) &&
+                        idElem.ValueKind == JsonValueKind.String)
+                    {
+                        string candidate = idElem.GetString() ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(candidate))
+                        {
+                            chipId = candidate;
+                            break;
+                        }
+                    }
+                }
             }
 
+            // Del tópico sólo se acepta un identificador REAL. El firmware publica en el
+            // tópico fijo "telemetry/accidents", y la plantilla "telemetry/{deviceId}"
+            // devolvía "accidents" como ChipId: cada accidente se rechazaba por dispositivo
+            // no aprovisionado y generaba una fila de auditoría.
             if (string.IsNullOrEmpty(chipId))
-                chipId = "Unknown-Device";
+            {
+                chipId = TopicIdentity.ExtractDeviceId(topic) ?? string.Empty;
+            }
+
+            // Sin identidad no se inventa un marcador ("Unknown-Device" creaba un
+            // dispositivo fantasma): manda la identidad autenticada del transporte.
 
             DateTime recordedAt = DateTime.UtcNow;
             if ((root.TryGetProperty("Timestamp", out var tsElem) || root.TryGetProperty("timestamp", out tsElem))
@@ -112,6 +133,43 @@ public sealed class GpsAccidentAdapter : IDeviceProtocolAdapter
                 }
             }
 
+            // Forma PLANA del firmware de accidentes. Transcrita de AccidentService.cpp:30-39:
+            //   {"type":"accident","impact":bool,"rollover":bool,"id":"<chipId>","timestamp":"<ISO>"}
+            // El adaptador sólo leía Details.accident.{impact_detected,rollover_detected},
+            // que este firmware nunca emite: la alerta llegaba vacía de semántica.
+            // (El firmware lee la posición pero NO la incluye en esta trama MQTT; sólo viaja
+            // en el SMS de alerta, así que aquí no hay posición que recuperar.)
+            if (root.TryGetProperty("type", out var typeElem) && typeElem.ValueKind == JsonValueKind.String)
+            {
+                attributes["event_type"] = typeElem.GetString()!;
+            }
+
+            bool impact = TryReadFlag(root, "impact", out var impactValue) && impactValue;
+            bool rollover = TryReadFlag(root, "rollover", out var rolloverValue) && rolloverValue;
+
+            if (TryReadFlag(root, "impact", out _))
+            {
+                attributes["impact_detected"] = impact.ToString();
+                metrics["impact_detected"] = impact ? 1 : 0;
+            }
+
+            if (TryReadFlag(root, "rollover", out _))
+            {
+                attributes["rollover_detected"] = rollover.ToString();
+                metrics["rollover_detected"] = rollover ? 1 : 0;
+            }
+
+            if (impact || rollover)
+            {
+                // Código de alarma legible para que las vistas y reglas puedan filtrarlo.
+                attributes["alarm_code"] = (impact, rollover) switch
+                {
+                    (true, true) => "impact_and_rollover",
+                    (true, false) => "impact",
+                    _ => "rollover"
+                };
+            }
+
             // Fallback: payload PLANO con lat/lng en la raíz (p.ej. el que publica el
             // gateway TCP R12L-F: {latitude, longitude, speed, course, satellites, isValid}).
             // Sin esto, la posición de los trackers binarios por TCP se perdía en silencio.
@@ -154,6 +212,27 @@ public sealed class GpsAccidentAdapter : IDeviceProtocolAdapter
         catch (Exception ex)
         {
             return Result<NormalizedTelemetryEvent>.Failure(new Error("GpsAccidentAdapter.ParseError", ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Lee una bandera booleana de la raíz, tolerando que el firmware la serialice como
+    /// booleano, número o cadena. Devuelve false si la clave no existe.
+    /// </summary>
+    private static bool TryReadFlag(JsonElement root, string name, out bool value)
+    {
+        value = false;
+        if (!root.TryGetProperty(name, out var element)) return false;
+
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.True: value = true; return true;
+            case JsonValueKind.False: value = false; return true;
+            case JsonValueKind.Number: value = element.GetDouble() != 0; return true;
+            case JsonValueKind.String:
+                return bool.TryParse(element.GetString(), out value);
+            default:
+                return false;
         }
     }
 

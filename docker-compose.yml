@@ -72,6 +72,7 @@ services:
       - "${MQTT_PORT:-1883}:1883"
       # Gateway TCP multi-protocolo (un puerto por familia de GPS)
       - "${TCP_GT06_PORT:-5023}:5023"       # GT06/Concox/SEEWORLD R12L-F
+      - "${TCP_MICTRACK_PORT:-5024}:5024"   # Mictrack M558G-V2 (dialecto GT06: 0x22/0x26)
       - "${TCP_QUECLINK_PORT:-5027}:5027"   # Queclink @Track
       - "${TCP_COBAN_PORT:-5013}:5013"      # Coban/TK103
       - "${TCP_ISTARTEK_PORT:-5001}:5001"   # iStartek

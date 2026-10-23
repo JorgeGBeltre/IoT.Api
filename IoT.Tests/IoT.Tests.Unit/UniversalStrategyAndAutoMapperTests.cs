@@ -94,10 +94,20 @@ public class UniversalStrategyAndAutoMapperTests
 
         // Conversión a NormalizedTelemetryEvent para dominio
         var normalized = canonical.ToNormalizedEvent("fallback-id");
-        normalized.DeviceIdentifier.Should().Be("CLIENT-CORP-42");
+        // El ChipId manda sobre el ClientId: es la clave con la que el pipeline resuelve el
+        // dispositivo (índice único global sobre ChipId). Con la precedencia anterior, una
+        // trama con ambos se buscaba por el ClientId y se rechazaba como no aprovisionada.
+        normalized.DeviceIdentifier.Should().Be("ESP32-CHIP-9988");
         normalized.Position.Should().NotBeNull();
         normalized.Position!.Latitude.Should().Be(18.4861);
         normalized.Position!.Longitude.Should().Be(-69.9312);
+        // Orden de argumentos de GeoPosition.Create: antes se pasaban por posición y la
+        // altitud entraba como velocidad, la velocidad como rumbo y el rumbo como altitud.
+        normalized.Position!.SpeedKph.Should().Be(62.4f);
+        normalized.Position!.Heading.Should().Be(95.0f);
+        normalized.Position!.AltitudeM.Should().Be(14.5f);
+        normalized.Position!.Satellites.Should().Be(11);
+        normalized.Position!.IsValid.Should().BeTrue();
         normalized.NumericMetrics["voltage"].Should().Be(13.8);
         normalized.NumericMetrics["impact_magnitude"].Should().BeApproximately(1850.7, 0.01);
         normalized.NumericMetrics["relay_state"].Should().Be(1.0);
@@ -152,9 +162,101 @@ public class UniversalStrategyAndAutoMapperTests
         canonical.DetectionTime.Should().Be(1729603800ul);
     }
 
+    [Fact]
+    public void CanonicalTelemetry_PreservesPosition_WhenAltitudeIsNegativeOrCourseOutOfRange()
+    {
+        // Ruido GPS real: altitud bajo el nivel del mar y rumbo fuera de [0,360].
+        // Antes, al pasar los argumentos por posición, la altitud negativa entraba como
+        // velocidad y GeoPosition.Create fallaba ('Speed cannot be negative'), con lo que
+        // se descartaba la posición COMPLETA (lat/lon incluidos) en silencio.
+        var canonical = new CanonicalDeviceTelemetry
+        {
+            ChipId = "TRACKER-NEG-ALT",
+            Latitude = 18.47,
+            Longitude = -69.91,
+            Altitude = -5.0f,
+            Speed = 40.0f,
+            Course = 400.0f,
+            Satellites = 9,
+            IsValid = true
+        };
+
+        var normalized = canonical.ToNormalizedEvent();
+
+        normalized.Position.Should().NotBeNull();
+        normalized.Position!.Latitude.Should().Be(18.47);
+        normalized.Position!.AltitudeM.Should().Be(-5.0f);
+        normalized.Position!.SpeedKph.Should().Be(40.0f);
+        normalized.Position!.Heading.Should().Be(40.0f, "el rumbo se normaliza en módulo 360");
+    }
+
+    [Fact]
+    public void CanonicalTelemetry_OmitsImpossibleSpeed_ButKeepsTheRestOfThePosition()
+    {
+        var canonical = new CanonicalDeviceTelemetry
+        {
+            ChipId = "TRACKER-NEG-SPEED",
+            Latitude = 18.47,
+            Longitude = -69.91,
+            Speed = -12.0f,
+            IsValid = false
+        };
+
+        var normalized = canonical.ToNormalizedEvent();
+
+        normalized.Position.Should().NotBeNull();
+        normalized.Position!.SpeedKph.Should().BeNull("una velocidad negativa es imposible, pero no invalida lat/lon");
+        normalized.Position!.IsValid.Should().BeFalse("un fix GPS inválido no debe difundirse como válido");
+    }
+
     // =========================================================================
     // 2. Estrategia MQTT: Tópicos y payloads anidados
     // =========================================================================
+
+    [Theory]
+    // <prefijo>/<id> y <prefijo>/<id>/<sufijo>
+    [InlineData("telemetry/ESP32-AABBCC", "ESP32-AABBCC")]
+    [InlineData("devices/DEV-1/telemetry", "DEV-1")]
+    // <prefijo>/<sub>/<id>: el identificador NO está en el segundo segmento
+    [InlineData("glp/telemetria/GLP-001", "GLP-001")]
+    [InlineData("glp/status/GLP-001", "GLP-001")]
+    [InlineData("glp/config/GLP-001", "GLP-001")]
+    // OTA: el id va en medio, el sufijo es el tipo de reporte
+    [InlineData("ota/A1B2C3D4E5F6/progress", "A1B2C3D4E5F6")]
+    [InlineData("ota/A1B2C3D4E5F6/status", "A1B2C3D4E5F6")]
+    public void MqttStrategy_ExtractsDeviceIdFromTopic_EvenWhenItIsNotTheSecondSegment(
+        string topic, string expectedDeviceId)
+    {
+        var msg = TransportMessage.FromMqtt(topic: topic, payload: """{"temperature": 21.0}""");
+
+        var result = new MqttTelemetryStrategy().Parse(msg);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.ToNormalizedEvent().DeviceIdentifier.Should().Be(expectedDeviceId);
+    }
+
+    [Theory]
+    // Tópicos FIJOS sin identidad: el último segmento es una palabra de protocolo.
+    [InlineData("telemetry/accidents")]
+    // Tópico de un solo segmento (relé: "device_switch1_state" con payload "on"/"off").
+    [InlineData("device_switch1_state")]
+    // Prefijo desconocido: no se puede suponer dónde está el identificador.
+    [InlineData("foo/bar/baz")]
+    public void MqttStrategy_DoesNotInventADeviceId_WhenTheTopicCarriesNoIdentity(string topic)
+    {
+        // Devolver el último segmento fabricaba dispositivos fantasma ('accidents',
+        // 'progress', 'baz') que el pipeline rechazaba por "no aprovisionado", escribiendo
+        // una fila de auditoría por cada trama. Sin identidad en el tópico ni en el payload,
+        // la identidad debe venir de la conexión autenticada (TransportDeviceIdentifier).
+        var msg = TransportMessage.FromMqtt(topic: topic, payload: """{"temperature": 21.0}""");
+
+        var result = new MqttTelemetryStrategy().Parse(msg);
+
+        result.IsSuccess.Should().BeTrue();
+        var deviceId = result.Value.ToNormalizedEvent().DeviceIdentifier;
+        deviceId.Should().NotBe(topic.Split('/')[^1]);
+        deviceId.Should().Be("unknown-device", "sin identidad fiable queda el marcador que el pipeline rechaza");
+    }
 
     [Fact]
     public void MqttStrategy_ProcessesNestedDeviceDetailsPayload_AndExtractsTopicChipId()

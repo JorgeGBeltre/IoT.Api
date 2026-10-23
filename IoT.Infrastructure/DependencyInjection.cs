@@ -96,6 +96,9 @@ public static class DependencyInjection
         // con un listener por protocolo (puerto por protocolo). SOLO singletons aquí; el
         // HostedService se registra en AddDeviceFacingGateways (un solo proceso).
         services.AddSingleton<IoT.Protocols.Tcp.ITcpProtocolHandler, IoT.Protocols.Tcp.Gt06TcpHandler>();
+        // Dialecto Mictrack: mismo cuerpo de trama que GT06 pero posición 0x22 y alarma 0x26.
+        // Va en su propio listener porque el 0x22 del X3Tech NT20 tiene otro layout.
+        services.AddSingleton<IoT.Protocols.Tcp.ITcpProtocolHandler, IoT.Protocols.Tcp.MictrackTcpHandler>();
         services.AddSingleton<IoT.Protocols.Tcp.ITcpProtocolHandler, IoT.Protocols.Tcp.QueclinkTcpHandler>();
         services.AddSingleton<IoT.Protocols.Tcp.ITcpProtocolHandler, IoT.Protocols.Tcp.CobanTcpHandler>();
         services.AddSingleton<IoT.Protocols.Tcp.ITcpProtocolHandler, IoT.Protocols.Tcp.IStartekTcpHandler>();

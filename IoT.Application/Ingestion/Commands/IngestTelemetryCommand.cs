@@ -14,8 +14,25 @@ namespace IoT.Application.Ingestion.Commands;
 /// Ingesta de telemetría. <paramref name="TransportProtocol"/> es opcional: cuando se
 /// indica (p.ej. "TCP-QUECLINK" desde el gateway multi-protocolo), el decode se enruta por
 /// ese hint vía CanHandle del adaptador, en vez de depender del patrón de tópico.
+///
+/// <paramref name="TransportDeviceIdentifier"/> es la identidad YA AUTENTICADA por el
+/// transporte: el ChipId que el broker MQTT verificó contra el hash de la ApiKey del
+/// dispositivo al aceptar la conexión (o el IMEI que el gateway TCP validó contra el
+/// registro). Sólo debe venir informada cuando la credencial es POR DISPOSITIVO; con una
+/// ApiKey global de bootstrap (simulador) el publicador puede hablar por varios equipos y
+/// no hay identidad única que propagar. Cuando viene, manda sobre la que se deduzca del
+/// tópico o del payload, que no están autenticados: sin esto, una trama con el tópico fijo
+/// (telemetry/accidents, ota/&lt;dev&gt;/progress, device_switch1_state…) se atribuía a un
+/// dispositivo inventado a partir del último segmento del tópico y se rechazaba por "no
+/// aprovisionado", perdiendo la trama aunque la plataforma SÍ conocía al emisor.
 /// </summary>
-public sealed record IngestTelemetryCommand(string Topic, string Payload, string Source = "real", string? TransportProtocol = null) : IRequest<Result>;
+public sealed record IngestTelemetryCommand(
+    string Topic,
+    string Payload,
+    string Source = "real",
+    string? TransportProtocol = null,
+    string? TransportDeviceIdentifier = null,
+    string? TransportMessageId = null) : IRequest<Result>;
 
 public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTelemetryCommand, Result>
 {
@@ -81,7 +98,56 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
 
             var ev = decodeResult.Value;
 
+            // 1b. Identidad: la autenticada por el transporte manda sobre la deducida del
+            //     tópico/payload (que no está autenticada). Ver nota en el record.
+            if (!string.IsNullOrWhiteSpace(request.TransportDeviceIdentifier))
+            {
+                if (string.IsNullOrWhiteSpace(ev.DeviceIdentifier) ||
+                    IsPlaceholderIdentifier(ev.DeviceIdentifier))
+                {
+                    _logger.LogDebug(
+                        "Identidad no deducible del tópico '{Topic}'; se usa la autenticada por el transporte: {ChipId}",
+                        request.Topic, request.TransportDeviceIdentifier);
+                }
+                else if (!string.Equals(ev.DeviceIdentifier, request.TransportDeviceIdentifier, StringComparison.OrdinalIgnoreCase))
+                {
+                    // El payload declara un equipo distinto al que se autenticó. Es un
+                    // intento de suplantación entre tenants o un firmware mal configurado:
+                    // se registra y se impone la identidad autenticada.
+                    _logger.LogWarning(
+                        "La trama en '{Topic}' declara el dispositivo '{Declared}' pero la conexión se autenticó como '{Authenticated}'. Se usa la autenticada.",
+                        request.Topic, ev.DeviceIdentifier, request.TransportDeviceIdentifier);
+                }
+
+                ev.DeviceIdentifier = request.TransportDeviceIdentifier!;
+            }
+
+            if (string.IsNullOrWhiteSpace(ev.DeviceIdentifier) || IsPlaceholderIdentifier(ev.DeviceIdentifier))
+            {
+                // Sin identidad fiable no se puede resolver tenant ni dispositivo. Se rechaza
+                // SIN auditar como "dispositivo descubierto": antes se fabricaba un ChipId
+                // con el último segmento del tópico y cada trama creaba una fila de AuditLog
+                // para un equipo fantasma ('progress', 'status', 'accidents'…).
+                _logger.LogWarning(
+                    "Trama descartada en '{Topic}': no se pudo determinar la identidad del dispositivo.",
+                    request.Topic);
+                return Result.Failure(new Error("Ingestion.UnidentifiedDevice",
+                    $"Could not determine the device identity for topic '{request.Topic}'. Telemetry rejected."));
+            }
+
+            // 1c. Saneado de secretos ANTES de hashear y persistir. Algunos firmwares
+            //     mandan credenciales en la trama (Fligo incluye la contraseña WiFi en
+            //     claro) y tanto los atributos como el RawPayload se guardan en base y se
+            //     devuelven en el histórico.
+            IoT.Protocols.Security.TelemetryRedaction.RedactAttributes(ev.Attributes);
+            ev.RawPayload = IoT.Protocols.Security.TelemetryRedaction.RedactPayload(ev.RawPayload);
+
             // 2. Cryptographic MessageId & Deduplication check (E2-03)
+            if (string.IsNullOrWhiteSpace(ev.MessageId) && !string.IsNullOrWhiteSpace(request.TransportMessageId))
+            {
+                ev.MessageId = request.TransportMessageId;
+            }
+
             string messageId = ev.MessageId ?? ComputeCryptographicMessageId(ev.DeviceIdentifier, ev.RecordedAt, ev.RawPayload);
             bool isDuplicate = await _stateCache.IsDuplicateMessageAsync(ev.DeviceIdentifier, ev.RecordedAt, messageId, TimeSpan.FromMinutes(30), cancellationToken);
             if (isDuplicate)
@@ -239,6 +305,16 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
             Common.Observability.IoTMetrics.TelemetryIngestionDuration.Record(stopwatch.Elapsed.TotalMilliseconds);
         }
     }
+
+    /// <summary>
+    /// Identificadores que NO son un dispositivo: marcadores de relleno que los adaptadores
+    /// usan cuando no logran extraer la identidad. Tratarlos como ChipId creaba equipos
+    /// fantasma y una fila de auditoría por trama.
+    /// </summary>
+    private static bool IsPlaceholderIdentifier(string identifier) =>
+        identifier.Equals("unknown-device", StringComparison.OrdinalIgnoreCase) ||
+        identifier.Equals("unknown", StringComparison.OrdinalIgnoreCase) ||
+        identifier.Equals("unidentified", StringComparison.OrdinalIgnoreCase);
 
     private static string ComputeCryptographicMessageId(string deviceId, DateTime recordedAt, string? rawPayload)
     {

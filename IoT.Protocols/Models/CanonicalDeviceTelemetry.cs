@@ -100,9 +100,14 @@ public sealed class CanonicalDeviceTelemetry
     /// </summary>
     public NormalizedTelemetryEvent ToNormalizedEvent(string? fallbackDeviceId = null, string? messageId = null, string? rawPayload = null)
     {
-        var deviceId = !string.IsNullOrWhiteSpace(ClientId) ? ClientId :
-                       !string.IsNullOrWhiteSpace(ChipId) ? ChipId :
+        // El ChipId va PRIMERO: es la clave con la que la plataforma resuelve el dispositivo
+        // (IngestTelemetryCommand usa GetByChipIdGlobalAsync y existe un índice único global
+        // sobre ChipId). Antes mandaba el ClientId, que en varios firmwares es un
+        // identificador de negocio distinto del equipo: cuando la trama traía los dos, se
+        // buscaba por el valor equivocado y la telemetría se rechazaba como no aprovisionada.
+        var deviceId = !string.IsNullOrWhiteSpace(ChipId) ? ChipId :
                        !string.IsNullOrWhiteSpace(Imei) ? Imei :
+                       !string.IsNullOrWhiteSpace(ClientId) ? ClientId :
                        !string.IsNullOrWhiteSpace(MacAddress) ? MacAddress :
                        fallbackDeviceId ?? "unknown-device";
 
@@ -111,12 +116,37 @@ public sealed class CanonicalDeviceTelemetry
         GeoPosition? position = null;
         if (Latitude.HasValue && Longitude.HasValue)
         {
+            // Argumentos NOMBRADOS a propósito: la firma es
+            // Create(latitude, longitude, speedKph, heading, altitudeM, satellites, isValid)
+            // y pasarlos por posición metía Altitude como velocidad, Speed como rumbo y
+            // Course como altitud (y nunca satélites ni validez del fix).
+            //
+            // Además se SANEA en vez de descartar: Create falla con velocidad negativa o
+            // rumbo fuera de [0,360] y entonces se perdía la posición COMPLETA (lat/lon
+            // incluidos) en silencio. Valores imposibles → se omite ese campo, no la posición.
+            float? speedKph = Speed.HasValue && Speed.Value >= 0f && !float.IsNaN(Speed.Value)
+                ? Speed.Value
+                : null;
+
+            float? heading = null;
+            if (Course.HasValue && !float.IsNaN(Course.Value))
+            {
+                // Rumbo en módulo 360 (algunos equipos envían 360, negativos o >360).
+                heading = ((Course.Value % 360f) + 360f) % 360f;
+            }
+
+            short? satellites = Satellites.HasValue
+                ? (short)Math.Clamp(Satellites.Value, 0, short.MaxValue)
+                : null;
+
             var posResult = GeoPosition.Create(
-                Latitude.Value,
-                Longitude.Value,
-                Altitude ?? 0,
-                Speed ?? 0,
-                Course ?? 0);
+                latitude: Latitude.Value,
+                longitude: Longitude.Value,
+                speedKph: speedKph,
+                heading: heading,
+                altitudeM: Altitude,
+                satellites: satellites,
+                isValid: IsValid ?? true);
 
             if (posResult.IsSuccess)
             {

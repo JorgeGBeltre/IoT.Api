@@ -22,5 +22,8 @@ if (builder.Configuration.GetValue<bool>("Mqtt:ExternalSubscriptionEnabled", fal
 }
 builder.Services.AddHostedService<DataRetentionWorker>();
 
+// Latido de liveness para el HEALTHCHECK del contenedor (el worker no expone HTTP).
+builder.Services.AddHostedService<HeartbeatWorker>();
+
 var host = builder.Build();
 host.Run();

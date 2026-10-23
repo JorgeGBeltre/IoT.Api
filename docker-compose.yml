@@ -152,9 +152,17 @@ services:
       # El worker sólo ejecuta retención de datos. El broker MQTT y el gateway TCP
       # viven en iot-api (AddDeviceFacingGateways). No bindea 1883 ni 5023.
       - Mqtt__ExternalSubscriptionEnabled=false
+      - Worker__HeartbeatFile=/tmp/worker-heartbeat
       - TZ=America/Santo_Domingo
     networks:
       - iot-network
+    healthcheck:
+      # Liveness por latido a archivo (el worker no expone HTTP). Unhealthy si >120s sin refrescar.
+      test: ["CMD-SHELL", "test -f /tmp/worker-heartbeat && [ $$(( $$(date +%s) - $$(cat /tmp/worker-heartbeat) )) -lt 120 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     security_opt:
       - no-new-privileges:true
     cap_drop:

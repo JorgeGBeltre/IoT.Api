@@ -48,10 +48,14 @@ COPY --from=builder --chown=appuser:appgroup /app/publish .
 
 ENV DOTNET_ENVIRONMENT=Production \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
-    TZ=America/Santo_Domingo
-
-EXPOSE 5023
+    TZ=America/Santo_Domingo \
+    Worker__HeartbeatFile=/tmp/worker-heartbeat
 
 USER appuser
+
+# Liveness: el worker no expone HTTP; HeartbeatWorker refresca /tmp/worker-heartbeat con el
+# epoch UNIX cada ~30s. Se marca unhealthy si el latido tiene más de 120s (bucle colgado).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD test -f /tmp/worker-heartbeat && [ $(( $(date +%s) - $(cat /tmp/worker-heartbeat) )) -lt 120 ]
 
 ENTRYPOINT ["dotnet", "IoT.Worker.dll"]

@@ -12,6 +12,9 @@ public sealed class R12LFDeviceProfile : IDeviceProfile
     public string DisplayName => "SEEWORLD R12L-F Rastreador Satelital 4G (TCP Binario)";
     public string PrimaryTransport => "TCP-R12LF";
 
+    // Entra por el gateway TCP con el handler de la familia GT06 (listener "GT06").
+    public string? TcpFamily => "GT06";
+
     public IReadOnlyList<CapabilityType> SupportedCapabilities { get; } =
     [
         CapabilityType.Gps,

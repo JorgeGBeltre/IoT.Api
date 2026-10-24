@@ -150,6 +150,39 @@ public class FirmwarePayloadFidelityTests
             .Should().BeTrue();
     }
 
+    [Theory]
+    // Reportes del firmware ya con ámbito por dispositivo (MqttTopics.h de Fligo y Toour,
+    // idénticos salvo el namespace). Antes eran tres tópicos FIJOS compartidos por TODOS los
+    // equipos: cualquiera podía suscribirse y leer los reportes ajenos, incluido el de
+    // configuración, que lleva la contraseña WiFi del cliente.
+    [InlineData("devices/CHIP123/ticket-validation")]
+    [InlineData("devices/CHIP123/config-validation")]
+    [InlineData("devices/CHIP123/ota-error")]
+    public void TicketValidatorAdapter_HandlesThePerDeviceReportTopics(string topic)
+    {
+        new TicketValidatorAdapter().CanHandle(topic, FligoConfigPayload).Should().BeTrue();
+    }
+
+    [Theory]
+    // Equipos todavía sin re-flashear: sus tramas no deben perderse durante la transición.
+    [InlineData("TicketValidationRequest")]
+    [InlineData("DeviceConfigValidationRequest")]
+    [InlineData("ErrorUpdateFirmwareDevice")]
+    public void TicketValidatorAdapter_StillHandlesTheLegacyFixedTopics(string topic)
+    {
+        new TicketValidatorAdapter().CanHandle(topic, FligoConfigPayload).Should().BeTrue();
+    }
+
+    [Fact]
+    public void TicketValidatorAdapter_IgnoresAnotherFirmwaresDeviceScopedTopic()
+    {
+        // No debe quedarse con cualquier cosa que cuelgue de devices/<id>/: el estado del
+        // relé, por ejemplo, lo decodifica RelaySwitchAdapter.
+        new TicketValidatorAdapter()
+            .CanHandle("devices/CHIP123/device_switch1_state", "on")
+            .Should().BeFalse();
+    }
+
     [Fact]
     public void TelemetryRedaction_RemovesCredentialsFromAttributesAndRawPayload()
     {

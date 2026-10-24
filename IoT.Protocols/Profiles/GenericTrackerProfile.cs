@@ -15,6 +15,7 @@ public sealed class GenericTrackerProfile : IDeviceProfile
     public string Model { get; }
     public string DisplayName { get; }
     public string PrimaryTransport { get; }
+    public string? TcpFamily { get; }
     public IReadOnlyList<CapabilityType> SupportedCapabilities { get; }
     public IReadOnlyList<string> TelemetryTopicPatterns { get; }
     public string CommandTopicPattern { get; }
@@ -26,6 +27,7 @@ public sealed class GenericTrackerProfile : IDeviceProfile
         string model,
         string primaryTransport,
         IDeviceProtocolAdapter adapter,
+        string? tcpFamily = null,
         IReadOnlyList<CapabilityType>? capabilities = null,
         IReadOnlyList<string>? topicPatterns = null)
     {
@@ -35,6 +37,9 @@ public sealed class GenericTrackerProfile : IDeviceProfile
         // Nombre estrictamente formateado como <Fabricante> <Modelo>
         DisplayName = $"{manufacturer} {model}";
         PrimaryTransport = primaryTransport;
+        // Familia REAL del handler TCP (clave de TcpGateway:Listeners), no la etiqueta de
+        // display: "TCP (Benway)" y "TCP (NT20)" no existen como handler, los decodifica GT06.
+        TcpFamily = tcpFamily;
         Adapter = adapter;
 
         SupportedCapabilities = capabilities ??

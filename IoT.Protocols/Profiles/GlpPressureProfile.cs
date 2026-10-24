@@ -12,6 +12,9 @@ public sealed class GlpPressureProfile : IDeviceProfile
     public string DisplayName => "Sensor de Presión/Nivel de Tanque Estacionario GLP";
     public string PrimaryTransport => "MQTT";
 
+    // Dispositivo MQTT nativo: no entra por el gateway TCP, así que no tiene familia ni puerto.
+    public string? TcpFamily => null;
+
     public IReadOnlyList<CapabilityType> SupportedCapabilities { get; } =
     [
         CapabilityType.LevelTelemetry,

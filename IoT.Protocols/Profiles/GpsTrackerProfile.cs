@@ -12,6 +12,9 @@ public sealed class GpsTrackerProfile : IDeviceProfile
     public string DisplayName => "Rastreador GPS Flota Urbana (MQTT)";
     public string PrimaryTransport => "MQTT";
 
+    // Dispositivo MQTT nativo: no entra por el gateway TCP, así que no tiene familia ni puerto.
+    public string? TcpFamily => null;
+
     public IReadOnlyList<CapabilityType> SupportedCapabilities { get; } =
     [
         CapabilityType.Gps

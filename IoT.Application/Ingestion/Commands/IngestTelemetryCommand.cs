@@ -303,23 +303,41 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
             }
         }
 
-        // 9. Procesamiento de reportes y callbacks OTA emitidos por dispositivos MQTT
+        // 9. Procesamiento de reportes y callbacks OTA emitidos por dispositivos MQTT.
+        //    Un reporte OTA CAMBIA el estado de la campaña (la marca completada o fallida),
+        //    así que sólo se acepta de una conexión cuya identidad esté AUTENTICADA por el
+        //    transporte (ApiKey por dispositivo) y que coincida con el equipo resuelto. Con
+        //    una credencial global de bootstrap cualquiera podría cerrar la OTA de otro.
+        //    Se pasa el payload YA REDACTADO, no el original.
         if (_firmwareOtaService != null &&
             ev.Attributes.TryGetValue("packet_type", out var pktType) &&
             pktType == "ota_event" &&
             ev.Attributes.TryGetValue("ota_action", out var otaAction))
         {
-            try
+            bool identityAuthenticated =
+                !string.IsNullOrWhiteSpace(request.TransportDeviceIdentifier) &&
+                string.Equals(request.TransportDeviceIdentifier, device.ChipId, StringComparison.OrdinalIgnoreCase);
+
+            if (!identityAuthenticated)
             {
-                await _firmwareOtaService.HandleDeviceOtaReportAsync(
-                    chipId: device.ChipId,
-                    otaAction: otaAction,
-                    payloadJson: request.Payload,
-                    cancellationToken: cancellationToken);
+                _logger.LogWarning(
+                    "Reporte OTA de '{ChipId}' descartado: la conexión no está autenticada por dispositivo.",
+                    device.ChipId);
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogWarning(ex, "Error procesando reporte OTA de {ChipId}", device.ChipId);
+                try
+                {
+                    await _firmwareOtaService.HandleDeviceOtaReportAsync(
+                        chipId: device.ChipId,
+                        otaAction: otaAction,
+                        payloadJson: ev.RawPayload,
+                        cancellationToken: cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error procesando reporte OTA de {ChipId}", device.ChipId);
+                }
             }
         }
 

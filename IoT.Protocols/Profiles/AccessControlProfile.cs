@@ -12,6 +12,9 @@ public sealed class AccessControlProfile : IDeviceProfile
     public string DisplayName => "Control de Acceso & NFC/QR (MQTT)";
     public string PrimaryTransport => "MQTT";
 
+    // Dispositivo MQTT nativo: no entra por el gateway TCP, así que no tiene familia ni puerto.
+    public string? TcpFamily => null;
+
     public IReadOnlyList<CapabilityType> SupportedCapabilities { get; } =
     [
         CapabilityType.NfcTicket,

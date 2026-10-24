@@ -66,9 +66,11 @@ public class Phase1Etapa3TransportsTests
         string glpTopic = routingService.BuildCommandTopic("MQTT-PressureLevelSensor", "GLP-001");
         glpTopic.Should().Be("glp/config/GLP-001");
 
-        // Relay device model resolves Relay switch command pattern
+        // El relé escucha en "commands/<chipId>" (MqttTopics.h del firmware). El valor que
+        // fijaba este test antes, "relays/devices/RELAY-99/commands", no correspondía a
+        // ningún tópico al que el equipo estuviera suscrito: los comandos no llegaban.
         string relayTopic = routingService.BuildCommandTopic("MQTT-Relay-BLE", "RELAY-99");
-        relayTopic.Should().Be("relays/devices/RELAY-99/commands");
+        relayTopic.Should().Be("commands/RELAY-99");
 
         // GPS tracker model resolves GPS command pattern
         string gpsTopic = routingService.BuildCommandTopic("MQTT-GPS-Tracker", "GPS-456");

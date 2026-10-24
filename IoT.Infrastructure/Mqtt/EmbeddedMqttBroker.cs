@@ -58,6 +58,20 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _authenticatedChipIds = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Clientes conectados con la ApiKey GLOBAL de bootstrap (simulador y herramientas del
+    /// operador). No representan a un equipo concreto: pueden publicar telemetría en nombre
+    /// de varios, pero no leer el canal de bajada de ninguno.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _bootstrapClientIds = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// ClientIds de sesiones EXTERNAS aceptadas. Sirve para distinguir una publicación del
+    /// servidor (inyectada en proceso, sin sesión) de una que llega por la red: el privilegio
+    /// no puede depender del nombre, que lo elige quien conecta.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _connectedClientIds = new(StringComparer.Ordinal);
+
     private readonly record struct InboundMessage(
         string Topic,
         string Payload,
@@ -102,6 +116,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
 
         _server.ValidatingConnectionAsync += OnValidatingConnection;
         _server.InterceptingPublishAsync += OnInterceptingPublish;
+        _server.InterceptingSubscriptionAsync += OnInterceptingSubscription;
         _server.ClientConnectedAsync += OnClientConnected;
         _server.ClientDisconnectedAsync += OnClientDisconnected;
 
@@ -159,6 +174,18 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
     // =========================================================================
     private async Task OnValidatingConnection(ValidatingConnectionEventArgs e)
     {
+        // NINGUNA conexión externa puede llamarse como el cliente interno del servidor.
+        // El ClientId lo elige quien conecta, así que sin este rechazo bastaba conectar con
+        // ese nombre —con la ApiKey global, o en modo anónimo— para que el ACL de tópicos
+        // concediera privilegio de SERVIDOR y permitiera publicar firmware a cualquier equipo.
+        if (string.Equals(e.ClientId, MqttTopicAcl.ServerClientId, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "Conexión rechazada: el ClientId '{ClientId}' está reservado al servidor.", e.ClientId);
+            e.ReasonCode = MqttConnectReasonCode.ClientIdentifierNotValid;
+            return;
+        }
+
         string? apiKey;
         string? chipId;
         // Verdadero sólo si la conexión se autenticó con la ApiKey PROPIA del dispositivo;
@@ -231,9 +258,11 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         if (authenticatedPerDevice)
         {
             _authenticatedChipIds[e.ClientId] = chipId;
+            _bootstrapClientIds.TryRemove(e.ClientId, out _);
         }
         else
         {
+            if (!_allowAnonymous) _bootstrapClientIds[e.ClientId] = 1;
             // ApiKey global o anónimo: no hay identidad única por conexión. Se limpia
             // cualquier resto de una conexión anterior con el mismo ClientId.
             _authenticatedChipIds.TryRemove(e.ClientId, out _);
@@ -255,8 +284,46 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                 chipId, e.ClientId);
         }
 
+        _connectedClientIds[e.ClientId] = 1;
         _logger.LogInformation("Dispositivo conectado: ClientId={ClientId}, ChipId={ChipId}", e.ClientId, chipId);
         e.ReasonCode = MqttConnectReasonCode.Success;
+    }
+
+    // =========================================================================
+    // ACL por tópico: un dispositivo sólo accede a LO SUYO
+    // =========================================================================
+    private Task OnInterceptingSubscription(InterceptingSubscriptionEventArgs e)
+    {
+        // Las suscripciones del propio servidor no se filtran.
+        if (string.Equals(e.ClientId, MqttTopicAcl.ServerClientId, StringComparison.Ordinal))
+        {
+            return Task.CompletedTask;
+        }
+
+        _authenticatedChipIds.TryGetValue(e.ClientId, out var chipId);
+        bool isBootstrap = _bootstrapClientIds.ContainsKey(e.ClientId);
+        string topic = e.TopicFilter.Topic;
+
+        switch (MqttTopicAcl.CanSubscribe(topic, chipId, isBootstrap))
+        {
+            case MqttTopicAcl.Decision.Deny:
+                _logger.LogWarning(
+                    "Suscripción RECHAZADA: el cliente {ClientId} (ChipId {ChipId}) pidió '{Topic}', que no le pertenece.",
+                    e.ClientId, chipId ?? "sin autenticar", topic);
+                e.ProcessSubscription = false;
+                e.Response.ReasonCode = MqttSubscribeReasonCode.UnspecifiedError;
+                break;
+
+            case MqttTopicAcl.Decision.AllowSharedLegacy:
+                // Tópico sin identificador que ciertos firmwares ya desplegados usan tal
+                // cual: se permite por compatibilidad, pero NO aísla entre equipos.
+                _logger.LogWarning(
+                    "Suscripción a tópico COMPARTIDO '{Topic}' por {ClientId}: sin aislamiento entre dispositivos.",
+                    topic, e.ClientId);
+                break;
+        }
+
+        return Task.CompletedTask;
     }
 
     // =========================================================================
@@ -267,6 +334,30 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         try
         {
             string topic = e.ApplicationMessage.Topic;
+
+            // ACL de publicación: los tópicos de BAJADA (firmware y comandos) son del
+            // servidor. Sin esto, un equipo autenticado podía publicar en el ota/ de OTRO y
+            // colarle una imagen de firmware, o inyectarle comandos.
+            //
+            // El origen "servidor" se prueba por AUSENCIA de sesión externa con ese ClientId,
+            // no por su nombre: el ClientId lo elige quien conecta, así que confiar en él
+            // dejaba que cualquiera con la ApiKey global se hiciera pasar por el servidor.
+            // (Además, OnValidatingConnection ya rechaza ese ClientId reservado.)
+            bool isServerOrigin =
+                string.Equals(e.ClientId, MqttTopicAcl.ServerClientId, StringComparison.Ordinal) &&
+                !_connectedClientIds.ContainsKey(e.ClientId);
+
+            _authenticatedChipIds.TryGetValue(e.ClientId, out var publisherChipId);
+            var publishDecision = MqttTopicAcl.CanPublish(
+                topic, isServerOrigin, publisherChipId, _bootstrapClientIds.ContainsKey(e.ClientId));
+            if (publishDecision == MqttTopicAcl.Decision.Deny)
+            {
+                _logger.LogWarning(
+                    "Publicación RECHAZADA: el cliente {ClientId} (ChipId {ChipId}) intentó publicar en '{Topic}'.",
+                    e.ClientId, publisherChipId ?? "sin autenticar", topic);
+                e.ProcessPublish = false;
+                return Task.CompletedTask;
+            }
             string payload = e.ApplicationMessage.Payload.Length > 0
                 ? Encoding.UTF8.GetString(e.ApplicationMessage.Payload)
                 : string.Empty;
@@ -275,7 +366,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                 .FirstOrDefault(pp => string.Equals(pp.Name, "message-id", StringComparison.OrdinalIgnoreCase))?.Value;
 
             // No encolar mensajes server-originated (push de comandos/OTA).
-            if (!string.Equals(e.ClientId, "internal-server", StringComparison.Ordinal))
+            if (!string.Equals(e.ClientId, MqttTopicAcl.ServerClientId, StringComparison.Ordinal))
             {
                 // El canal es acotado (500). Si está lleno (pico de reconexión / BD lenta),
                 // TryWrite devuelve false y la trama se descarta: hay que loguearlo para tener
@@ -326,6 +417,8 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         // Se libera la identidad autenticada de ESTA conexión. En el takeover de arriba no
         // se toca, porque la entrada ya pertenece a la conexión nueva (mismo ClientId).
         _authenticatedChipIds.TryRemove(e.ClientId, out _);
+        _bootstrapClientIds.TryRemove(e.ClientId, out _);
+        _connectedClientIds.TryRemove(e.ClientId, out _);
 
         var chipId = await _clientMap.GetChipIdByClientIdAsync(e.ClientId);
         if (!string.IsNullOrEmpty(chipId))
@@ -375,6 +468,6 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                 builder.WithUserProperty(k, v);
 
         await _server.InjectApplicationMessage(
-            new InjectedMqttApplicationMessage(builder.Build()) { SenderClientId = "internal-server" });
+            new InjectedMqttApplicationMessage(builder.Build()) { SenderClientId = MqttTopicAcl.ServerClientId });
     }
 }

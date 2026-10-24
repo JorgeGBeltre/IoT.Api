@@ -70,16 +70,25 @@ public sealed class FirmwareOtaIntegrationTests
         var deviceId = Guid.NewGuid();
         var device = Device.Create(tenantId, "TEST_OTA_CHIP", "AA:BB:CC:11:22:33", "Device 1", "ESP32", "Espressif").Value;
 
+        // El firmware debe vivir DENTRO del almacén del tenant: storage/firmware/{tenant}/...
+        // Antes este fixture lo dejaba como "firmware.bin" en la raíz de la aplicación, que
+        // es precisamente lo que la contención de rutas rechaza (una ruta guardada fuera del
+        // almacén podía apuntar a cualquier archivo del servidor y acabar publicada al
+        // dispositivo). Se usa la misma estructura que genera la subida real.
+        string relativeSrc = Path.Combine(
+            FirmwareStorage.RootFolder, FirmwareStorage.FirmwareFolder,
+            tenantId.ToString(), "1.2.0", "firmware_test.bin");
+
         var firmware = FirmwareVersionRecord.Create(
             tenantId: tenantId,
             firmwareVersion: "1.2.0",
-            src: "firmware.bin",
+            src: relativeSrc,
             fileSizeBytes: 2048,
             sha256: "dummy-sha256",
             totalChunks: 1).Value;
 
-        // Create temporary dummy file so File.Exists returns true
-        string fullPath = Path.Combine(AppContext.BaseDirectory, "firmware.bin");
+        string fullPath = Path.Combine(AppContext.BaseDirectory, relativeSrc);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         await File.WriteAllBytesAsync(fullPath, new byte[] { 0xE9, 0x01, 0x02, 0x03 });
 
         try
@@ -166,7 +175,12 @@ public sealed class FirmwareOtaIntegrationTests
         device.OtaCompleted.Should().BeFalse();
         device.OtaErrorMessage.Should().Be("Flash write timeout");
 
-        // 2. Report Success
+        // 2. Report Success. Hay que RELANZAR la campaña: el reporte de error la cerró, y un
+        // "success" que llega sin OTA en curso es un reporte obsoleto (o forjado) que el
+        // servicio descarta a propósito para que un equipo no pueda marcar como completada
+        // una actualización que nadie lanzó.
+        device.StartOta("1.1.0", 5);
+
         string successPayload = "{\"version\":\"1.1.0\",\"success\":true}";
         await service.HandleDeviceOtaReportAsync("REPORT_CHIP_01", "success", successPayload);
 

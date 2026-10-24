@@ -58,7 +58,15 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         if (string.IsNullOrWhiteSpace(version))
             return Result<FirmwareVersionRecordDto>.Failure(new Error("Firmware.InvalidVersion", "Firmware version is required."));
 
-        string normalizedVersion = version.Trim().TrimStart('v', 'V');
+        // La versión forma parte de la ruta en disco: se valida contra lista blanca ANTES
+        // de usarla para cualquier cosa, incluida la clave de búsqueda del registro.
+        if (!FirmwareStorage.TryNormalizeVersion(version, out string normalizedVersion))
+        {
+            return Result<FirmwareVersionRecordDto>.Failure(new Error(
+                "Firmware.InvalidVersion",
+                "La versión sólo admite letras, números, punto, guion y guion bajo (máx. 50), y no puede contener separadores de ruta."));
+        }
+
         string extension = Path.GetExtension(fileName).ToLowerInvariant();
         var allowedExtensions = new[] { ".bin", ".hex", ".dfu" };
 
@@ -90,12 +98,23 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         int totalChunks = OtaChunker.CountChunks(bytes.Length, OtaChunker.DefaultChunkSizeBytes);
 
         // Guardar archivo en disco
-        string relativeDir = Path.Combine("storage", "firmware", tenantId.ToString(), normalizedVersion);
-        string absoluteDir = Path.Combine(AppContext.BaseDirectory, relativeDir);
-        Directory.CreateDirectory(absoluteDir);
+        // Ruta de guardado SIEMPRE por el resolver: valida la versión contra una lista
+        // blanca, genera el nombre de archivo a partir del hash (la cadena del cliente no
+        // participa en el nombre) y comprueba que la ruta final queda dentro del almacén de
+        // ESTE tenant. Sin esto, una versión como "..\..\x" o "C:\x" escribía fuera.
+        if (!FirmwareStorage.TryBuildRelativeFilePath(
+                tenantId, normalizedVersion, sha256, extension,
+                out string relativeFilePath, out string absoluteFilePath))
+        {
+            _logger.LogWarning(
+                "Subida de firmware rechazada para el tenant {TenantId}: la versión '{Version}' no es válida como ruta.",
+                tenantId, version);
+            return Result<FirmwareVersionRecordDto>.Failure(new Error(
+                "Firmware.InvalidVersion",
+                "La versión sólo admite letras, números, punto, guion y guion bajo (máx. 50), y no puede contener separadores de ruta."));
+        }
 
-        string relativeFilePath = Path.Combine(relativeDir, $"firmware_{normalizedVersion}{extension}");
-        string absoluteFilePath = Path.Combine(AppContext.BaseDirectory, relativeFilePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(absoluteFilePath)!);
         await File.WriteAllBytesAsync(absoluteFilePath, bytes, cancellationToken);
 
         // Buscar registro existente para actualizar o crear nuevo
@@ -148,12 +167,25 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         if (device == null || device.TenantId != tenantId)
             return Result.Failure(new Error("Device.NotFound", "Dispositivo no encontrado."));
 
-        string normalizedVersion = version.Trim().TrimStart('v', 'V');
+        if (!FirmwareStorage.TryNormalizeVersion(version, out string normalizedVersion))
+            return Result.Failure(new Error("Firmware.InvalidVersion", "Versión de firmware inválida."));
+
         var firmware = await _firmwareRepository.GetByVersionAsync(tenantId, normalizedVersion, cancellationToken);
         if (firmware == null)
             return Result.Failure(new Error("Firmware.NotFound", $"Versión de firmware '{normalizedVersion}' no encontrada."));
 
-        string fullPath = Path.Combine(AppContext.BaseDirectory, firmware.Src);
+        // La ruta viene de base de datos: se vuelve a comprobar que sigue dentro del almacén
+        // de este tenant antes de abrirla. Una fila escrita antes de esta validación (o por
+        // otra vía) podría apuntar a cualquier archivo del servidor y acabar publicada a los
+        // dispositivos.
+        if (!FirmwareStorage.TryResolveWithinTenant(tenantId, firmware.Src, out string fullPath))
+        {
+            _logger.LogError(
+                "La ruta almacenada del firmware {Version} del tenant {TenantId} queda fuera del almacén y se ha rechazado: {Src}",
+                normalizedVersion, tenantId, firmware.Src);
+            return Result.Failure(new Error("Firmware.InvalidPath", "La ruta del archivo de firmware no es válida."));
+        }
+
         if (!File.Exists(fullPath))
             return Result.Failure(new Error("Firmware.FileNotFound", "El archivo de firmware físico no existe en el servidor."));
 
@@ -223,6 +255,17 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         if (firmwareRecordId.HasValue && firmwareRecordId.Value != Guid.Empty)
         {
             targetRecord = await _firmwareRepository.GetByIdAsync(firmwareRecordId.Value, cancellationToken);
+
+            // La búsqueda por Id NO está acotada por tenant: hay que comprobarlo aquí. Sin
+            // esto, pasando el Id de un registro de OTRO tenant se revelaba su existencia y
+            // su cadena de versión (queda además en el log de abajo).
+            if (targetRecord != null && targetRecord.TenantId != tenantId)
+            {
+                _logger.LogWarning(
+                    "Rollback rechazado: el registro de firmware {RecordId} pertenece a otro tenant que {TenantId}.",
+                    firmwareRecordId.Value, tenantId);
+                targetRecord = null;
+            }
         }
         else if (!string.IsNullOrWhiteSpace(targetVersion))
         {
@@ -303,6 +346,17 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         string action = otaAction.ToLowerInvariant();
         _logger.LogInformation("Procesando reporte OTA de {ChipId}: acción '{Action}'", chipId, action);
 
+        // Un reporte sólo puede mover el estado de una campaña que esté EN CURSO. Sin esta
+        // comprobación, un equipo podía marcar como completada o fallida una OTA que nadie
+        // había lanzado, y dejar registrada una versión de firmware que nunca se le envió.
+        if (!device.OtaInProgress)
+        {
+            _logger.LogWarning(
+                "Reporte OTA '{Action}' de {ChipId} ignorado: el dispositivo no tiene ninguna actualización en curso.",
+                action, chipId);
+            return;
+        }
+
         if (action == "error")
         {
             string errorMessage = "Dispositivo reportó error en actualización OTA.";
@@ -311,11 +365,13 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 try
                 {
                     using var doc = JsonDocument.Parse(payloadJson);
+                    // Cotas de longitud: el texto lo escribe el dispositivo y acaba
+                    // persistido y difundido por SignalR.
                     if (doc.RootElement.TryGetProperty("error", out var e1))
-                        errorMessage = e1.GetString() ?? errorMessage;
+                        errorMessage = Truncate(e1.GetString(), MaxErrorLength) ?? errorMessage;
                     else if (doc.RootElement.TryGetProperty("details", out var dObj) &&
                              dObj.TryGetProperty("errorMessage", out var e2))
-                        errorMessage = e2.GetString() ?? errorMessage;
+                        errorMessage = Truncate(e2.GetString(), MaxErrorLength) ?? errorMessage;
                 }
                 catch { }
             }
@@ -338,16 +394,51 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         }
         else if (action == "success")
         {
+            // La versión la decide la PLATAFORMA, no el dispositivo: se registra la que se
+            // le envió (OtaTargetVersion). La que reporta el equipo sólo se usa para
+            // comprobar que coincide; si no coincide, flasheó algo distinto de lo que se le
+            // mandó y la campaña se marca fallida en vez de dar por buena su cadena.
             string targetVer = device.OtaTargetVersion ?? device.FirmwareVersion ?? "1.0.0";
+            string? reportedVer = null;
+
             if (!string.IsNullOrWhiteSpace(payloadJson))
             {
                 try
                 {
                     using var doc = JsonDocument.Parse(payloadJson);
-                    if (doc.RootElement.TryGetProperty("version", out var v))
-                        targetVer = v.GetString() ?? targetVer;
+                    if (doc.RootElement.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.String)
+                    {
+                        // Cota de longitud: la cadena acaba persistida y difundida por SignalR.
+                        reportedVer = Truncate(v.GetString(), MaxVersionLength);
+                    }
                 }
-                catch { }
+                catch (JsonException) { }
+            }
+
+            if (reportedVer != null &&
+                device.OtaTargetVersion != null &&
+                !VersionsMatch(reportedVer, device.OtaTargetVersion))
+            {
+                string mismatch =
+                    $"El dispositivo reportó la versión '{reportedVer}' y se le envió '{device.OtaTargetVersion}'.";
+                _logger.LogError("OTA de {ChipId} marcada fallida por versión no coincidente. {Detalle}", chipId, mismatch);
+
+                device.FailOta(mismatch);
+                _deviceRepository.Update(device);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                await _notificationService.NotifyOtaProgressAsync(
+                    tenantId: device.TenantId,
+                    deviceId: device.Id,
+                    chipId: device.ChipId,
+                    version: device.OtaTargetVersion ?? "unknown",
+                    currentChunk: device.OtaLastChunkSent,
+                    totalChunks: device.OtaTotalChunks,
+                    percentage: 0,
+                    status: "Failed",
+                    errorMessage: mismatch,
+                    cancellationToken: cancellationToken);
+                return;
             }
 
             device.CompleteOta(targetVer);
@@ -407,7 +498,19 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             var firmware = await firmwareRepo.GetByIdAsync(firmwareRecordId, ct);
             if (device == null || firmware == null) return;
 
-            string fullPath = Path.Combine(AppContext.BaseDirectory, firmware.Src);
+            // Misma contención en la bomba de envío: es la que lee los bytes que acaban
+            // publicados en el dispositivo.
+            if (!FirmwareStorage.TryResolveWithinTenant(tenantId, firmware.Src, out string fullPath))
+            {
+                _logger.LogError(
+                    "Transmisión OTA abortada: la ruta almacenada {Src} queda fuera del almacén del tenant {TenantId}.",
+                    firmware.Src, tenantId);
+                device.FailOta("La ruta del archivo de firmware no es válida.");
+                deviceRepo.Update(device);
+                await uow.SaveChangesAsync(ct);
+                return;
+            }
+
             if (!File.Exists(fullPath))
             {
                 device.FailOta("Archivo físico de firmware no encontrado en servidor.");
@@ -491,6 +594,26 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             catch { }
         }
     }
+    /// <summary>Cotas de las cadenas que escribe el DISPOSITIVO y que se persisten.</summary>
+    private const int MaxVersionLength = 64;
+    private const int MaxErrorLength = 500;
+
+    private static string? Truncate(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        value = value.Trim();
+        return value.Length <= maxLength ? value : value[..maxLength];
+    }
+
+    /// <summary>
+    /// Compara versiones tolerando la 'v' inicial y la caja, que es lo único que varía
+    /// legítimamente entre lo que se envía y lo que el equipo reporta.
+    /// </summary>
+    private static bool VersionsMatch(string reported, string expected) =>
+        string.Equals(
+            reported.Trim().TrimStart('v', 'V'),
+            expected.Trim().TrimStart('v', 'V'),
+            StringComparison.OrdinalIgnoreCase);
 
     private static FirmwareVersionRecordDto MapToDto(FirmwareVersionRecord r) =>
         new(

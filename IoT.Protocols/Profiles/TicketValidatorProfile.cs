@@ -12,6 +12,9 @@ public sealed class TicketValidatorProfile : IDeviceProfile
     public string DisplayName => "Validador de Tickets NFC & Telemetría Vehicular (LTE)";
     public string PrimaryTransport => "MQTT";
 
+    // Dispositivo MQTT nativo: no entra por el gateway TCP, así que no tiene familia ni puerto.
+    public string? TcpFamily => null;
+
     public IReadOnlyList<CapabilityType> SupportedCapabilities { get; } =
     [
         CapabilityType.Gps,
@@ -26,12 +29,21 @@ public sealed class TicketValidatorProfile : IDeviceProfile
         "telemetry/{deviceId}",
         "events/{deviceId}",
         "status/{deviceId}",
+        // Reportes ya con ámbito por dispositivo (MqttTopics.h de Fligo y Toour).
+        "devices/{deviceId}/ticket-validation",
+        "devices/{deviceId}/config-validation",
+        "devices/{deviceId}/ota-error",
+        // Tópicos fijos del firmware ANTERIOR: se mantienen para no perder las tramas de los
+        // equipos que todavía no se han re-flasheado.
         "TicketValidationRequest",
         "DeviceConfigValidationRequest",
         "ErrorUpdateFirmwareDevice"
     ];
 
-    public string CommandTopicPattern => "commands/{deviceId}";
+    // El firmware se suscribe a "event/<clientId>" (MqttV5Adapter.cpp:12,42), NO a
+    // "commands/<id>", que es donde PUBLICA. Con el patrón anterior los comandos de la
+    // plataforma se publicaban en un tópico que el equipo no escuchaba: no llegaba ninguno.
+    public string CommandTopicPattern => "event/{deviceId}";
 
     public IDeviceProtocolAdapter Adapter { get; }
 

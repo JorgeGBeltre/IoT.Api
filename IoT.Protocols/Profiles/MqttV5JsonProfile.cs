@@ -12,6 +12,9 @@ public sealed class MqttV5JsonProfile : IDeviceProfile
     public string DisplayName => "Dispositivo MQTT 5.0 (JSON nativo)";
     public string PrimaryTransport => "MQTT";
 
+    // Dispositivo MQTT nativo: no entra por el gateway TCP, así que no tiene familia ni puerto.
+    public string? TcpFamily => null;
+
     public IReadOnlyList<CapabilityType> SupportedCapabilities { get; } =
     [
         CapabilityType.Health,

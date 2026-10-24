@@ -13,12 +13,26 @@ public sealed class TicketValidatorAdapter : IDeviceProtocolAdapter
     public bool CanHandle(TransportMessage message) => CanHandle(message.TopicOrRoute, message.Payload);
 
     /// <summary>
-    /// Tópicos FIJOS (sin identificador) que publica el firmware. Transcritos de
-    /// References/Dispositivos/FligoV0.0.1/src/Application/Messaging/MqttTopics.h:28-30.
-    /// Sólo se reconocía el primero, así que el reporte de configuración y el de error de
-    /// OTA los resolvía el adaptador genérico: volcado plano, sin semántica.
+    /// Sufijos de los reportes del firmware, ya con ámbito por dispositivo:
+    /// <c>devices/{chipId}/ticket-validation|config-validation|ota-error</c>
+    /// (References/Dispositivos/FligoV0.0.1/src/Application/Messaging/MqttTopics.h, idéntico
+    /// en Toour_IoT). Antes eran tres tópicos FIJOS sin identificador, compartidos por todos
+    /// los equipos: cualquiera podía suscribirse y leer los reportes de los demás, incluido
+    /// el de validación de configuración, que lleva la contraseña WiFi del cliente.
     /// </summary>
-    private static readonly string[] FixedTopics =
+    private static readonly string[] ReportSuffixes =
+    {
+        "ticket-validation",
+        "config-validation",
+        "ota-error"
+    };
+
+    /// <summary>
+    /// Tópicos FIJOS que publicaban esos firmwares ANTES de pasar a ámbito por dispositivo.
+    /// Se siguen reconociendo para no perder las tramas de los equipos que todavía no se han
+    /// re-flasheado; su identidad la aporta la conexión autenticada.
+    /// </summary>
+    private static readonly string[] LegacyFixedTopics =
     {
         "TicketValidationRequest",
         "DeviceConfigValidationRequest",
@@ -27,9 +41,20 @@ public sealed class TicketValidatorAdapter : IDeviceProtocolAdapter
 
     public bool CanHandle(string topic, string payload)
     {
-        // Los tópicos fijos son propios de este firmware: no hace falta inspeccionar el
-        // payload (el reporte de error de OTA no lleva ninguno de los campos de abajo).
-        if (FixedTopics.Contains(topic, StringComparer.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(topic)) return false;
+
+        // Reportes por dispositivo: el sufijo identifica al firmware sin mirar el payload.
+        var parts = topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 3 &&
+            parts[0].Equals("devices", StringComparison.OrdinalIgnoreCase) &&
+            ReportSuffixes.Contains(parts[^1], StringComparer.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Tópicos fijos del firmware antiguo: tampoco hace falta inspeccionar el payload
+        // (el reporte de error de OTA no lleva ninguno de los campos de abajo).
+        if (LegacyFixedTopics.Contains(topic, StringComparer.OrdinalIgnoreCase))
             return true;
 
         if (topic.StartsWith("telemetry/", StringComparison.OrdinalIgnoreCase) ||

@@ -152,6 +152,17 @@ builder.Services.AddAuthorization(options =>
     options.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
         .Build();
+
+    // Escribir firmware en hardware real exige un ROL explícito. Antes bastaba con estar
+    // autenticado: cualquier usuario del tenant podía subir un .bin y flashear la flota.
+    var firmwareRoles = IoT.Api.Common.AuthorizationPolicies.ResolveFirmwareManageRoles(builder.Configuration);
+    options.AddPolicy(
+        IoT.Api.Common.AuthorizationPolicies.FirmwareManage,
+        policy => policy
+            .RequireAuthenticatedUser()
+            // No se usa RequireRole: compara el valor del claim distinguiendo mayúsculas y un
+            // usuario guardado como "admin" quedaba denegado. Ver AuthorizationPolicies.HasAnyRole.
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, firmwareRoles)));
 });
 
 // 7. Swagger / OpenAPI Documentation

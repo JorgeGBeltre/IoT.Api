@@ -45,7 +45,11 @@ public class ProtocolFamilyWiringTests
 
     private static Dictionary<string, int> ConfiguredListeners()
     {
-        using var doc = JsonDocument.Parse(File.ReadAllText(FindApiAppSettings()));
+        // Se toleran comentarios y comas finales: el proveedor de configuración de .NET los
+        // admite, así que el fichero puede tenerlos y el test no debe ser más estricto que
+        // la aplicación que lo lee.
+        var options = new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
+        using var doc = JsonDocument.Parse(File.ReadAllText(FindApiAppSettings()), options);
         var listeners = doc.RootElement.GetProperty("TcpGateway").GetProperty("Listeners");
 
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);

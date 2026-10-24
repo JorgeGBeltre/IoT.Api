@@ -50,6 +50,8 @@ public sealed class FirmwareController : ControllerBase
     /// <summary>
     /// Sube una nueva versión de firmware (.bin, .hex, .dfu) y opcionalmente dispara la actualización OTA.
     /// </summary>
+    // Escribe firmware en hardware real: irreversible, exige rol explícito.
+    [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
     [HttpPost("upload")]
     [HttpPost("/api/MqttBroker/Firmware/UpdateFirmwareVersion")]
     [Consumes("multipart/form-data")]
@@ -109,6 +111,8 @@ public sealed class FirmwareController : ControllerBase
     /// <summary>
     /// Inicia la actualización OTA de firmware en un dispositivo específico.
     /// </summary>
+    // Escribe firmware en hardware real: irreversible, exige rol explícito.
+    [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
     [HttpPost("devices/{deviceId:guid}/start-ota")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -132,6 +136,8 @@ public sealed class FirmwareController : ControllerBase
     /// <summary>
     /// Inicia la actualización OTA de firmware para todos los dispositivos de un grupo.
     /// </summary>
+    // Escribe firmware en hardware real: irreversible, exige rol explícito.
+    [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
     [HttpPost("groups/{groupId:guid}/start-ota")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -155,6 +161,8 @@ public sealed class FirmwareController : ControllerBase
     /// <summary>
     /// Ejecuta el rollback de firmware para un dispositivo a una versión previa o especificada.
     /// </summary>
+    // Escribe firmware en hardware real: irreversible, exige rol explícito.
+    [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
     [HttpPost("devices/{deviceId:guid}/rollback")]
     [HttpPost("/api/MqttBroker/Firmware/RollbackFirmwareVersion")]
     [HttpGet("/api/MqttBroker/Firmware/RollbackFirmwareVersion")]

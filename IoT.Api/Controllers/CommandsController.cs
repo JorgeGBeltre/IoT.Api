@@ -34,6 +34,8 @@ public sealed class CommandsController : ControllerBase
         string? ResultPayload = null,
         string? ErrorMessage = null);
 
+    // Accionamiento físico de un dispositivo: exige rol explícito, no sólo sesión válida.
+    [Authorize(Policy = AuthorizationPolicies.DeviceCommand)]
     [HttpPost]
     [ProducesResponseType(StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -71,6 +73,8 @@ public sealed class CommandsController : ControllerBase
         return Accepted(new { commandId = result.Value, status = "Sent" });
     }
 
+    // Confirmar un comando cambia su estado y su auditoría: también exige rol.
+    [Authorize(Policy = AuthorizationPolicies.DeviceCommand)]
     [HttpPost("{commandId:guid}/ack")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

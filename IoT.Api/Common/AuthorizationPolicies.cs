@@ -27,13 +27,31 @@ public static class AuthorizationPolicies
     public static readonly string[] DefaultFirmwareManageRoles = { "Admin" };
 
     /// <summary>
-    /// Lee de la configuración los roles que pueden gestionar firmware. Nunca devuelve una
-    /// lista vacía: si la configuración está vacía o mal puesta, se cae al valor por defecto
-    /// en vez de dejar la política sin requisitos (que la volvería permisiva).
+    /// Enviar un comando a un dispositivo o confirmar su resultado. También es accionamiento
+    /// físico —apagar un relé por API no debería requerir sólo una sesión válida— pero es la
+    /// operación del DÍA A DÍA, así que su conjunto de roles por defecto es más amplio que el
+    /// de firmware: flashear es excepcional y irreversible, mandar un comando es rutina.
     /// </summary>
-    public static string[] ResolveFirmwareManageRoles(IConfiguration configuration)
+    public const string DeviceCommand = "DeviceCommand";
+
+    /// <summary>
+    /// Roles admitidos por defecto para <see cref="DeviceCommand"/>. Incluye "Operator",
+    /// que es el rol por defecto de <c>User.Create</c> y el perfil que opera la flota;
+    /// dejarlo fuera rompería el uso normal del producto. Los perfiles de sólo consulta
+    /// quedan excluidos. Ampliable con <c>Authorization:DeviceCommandRoles</c>.
+    /// </summary>
+    public static readonly string[] DefaultDeviceCommandRoles = { "Admin", "Operator" };
+
+    /// <summary>
+    /// Lee de la configuración los roles de una política. Nunca devuelve una lista vacía: si
+    /// la configuración está vacía o mal puesta, se cae al valor por defecto en vez de dejar
+    /// la política sin requisitos (que la volvería permisiva).
+    ///
+    /// Admite las dos formas de escribirlo: array JSON y cadena separada por comas.
+    /// </summary>
+    public static string[] ResolveRoles(IConfiguration configuration, string key, string[] defaults)
     {
-        var fromArray = configuration.GetSection("Authorization:FirmwareManageRoles").Get<string[]>();
+        var fromArray = configuration.GetSection(key).Get<string[]>();
         if (fromArray is { Length: > 0 })
         {
             var cleaned = fromArray
@@ -43,7 +61,7 @@ public static class AuthorizationPolicies
             if (cleaned.Length > 0) return cleaned;
         }
 
-        var raw = configuration["Authorization:FirmwareManageRoles"];
+        var raw = configuration[key];
         if (!string.IsNullOrWhiteSpace(raw))
         {
             var cleaned = raw
@@ -52,8 +70,14 @@ public static class AuthorizationPolicies
             if (cleaned.Length > 0) return cleaned;
         }
 
-        return DefaultFirmwareManageRoles;
+        return defaults;
     }
+
+    public static string[] ResolveFirmwareManageRoles(IConfiguration configuration) =>
+        ResolveRoles(configuration, "Authorization:FirmwareManageRoles", DefaultFirmwareManageRoles);
+
+    public static string[] ResolveDeviceCommandRoles(IConfiguration configuration) =>
+        ResolveRoles(configuration, "Authorization:DeviceCommandRoles", DefaultDeviceCommandRoles);
 
     /// <summary>
     /// ¿Tiene el usuario alguno de los roles indicados?

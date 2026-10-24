@@ -163,6 +163,15 @@ builder.Services.AddAuthorization(options =>
             // No se usa RequireRole: compara el valor del claim distinguiendo mayúsculas y un
             // usuario guardado como "admin" quedaba denegado. Ver AuthorizationPolicies.HasAnyRole.
             .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, firmwareRoles)));
+
+    // Enviar un comando a un dispositivo también es accionamiento físico (apagar un relé),
+    // pero es la operación del día a día: su conjunto de roles por defecto es más amplio.
+    var commandRoles = IoT.Api.Common.AuthorizationPolicies.ResolveDeviceCommandRoles(builder.Configuration);
+    options.AddPolicy(
+        IoT.Api.Common.AuthorizationPolicies.DeviceCommand,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, commandRoles)));
 });
 
 // 7. Swagger / OpenAPI Documentation

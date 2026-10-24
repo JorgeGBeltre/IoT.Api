@@ -27,12 +27,19 @@ public class FirmwareAuthorizationTests
         services.AddLogging();
         services.AddAuthorization(options =>
         {
-            var roles = AuthorizationPolicies.ResolveFirmwareManageRoles(configuration);
+            var firmwareRoles = AuthorizationPolicies.ResolveFirmwareManageRoles(configuration);
             options.AddPolicy(
                 AuthorizationPolicies.FirmwareManage,
                 policy => policy
                     .RequireAuthenticatedUser()
-                    .RequireAssertion(ctx => AuthorizationPolicies.HasAnyRole(ctx.User, roles)));
+                    .RequireAssertion(ctx => AuthorizationPolicies.HasAnyRole(ctx.User, firmwareRoles)));
+
+            var commandRoles = AuthorizationPolicies.ResolveDeviceCommandRoles(configuration);
+            options.AddPolicy(
+                AuthorizationPolicies.DeviceCommand,
+                policy => policy
+                    .RequireAuthenticatedUser()
+                    .RequireAssertion(ctx => AuthorizationPolicies.HasAnyRole(ctx.User, commandRoles)));
         });
 
         return services.BuildServiceProvider().GetRequiredService<IAuthorizationService>();

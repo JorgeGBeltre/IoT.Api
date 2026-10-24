@@ -85,6 +85,28 @@ public static class OtaChunker
         Convert.ToHexString(SHA256.HashData(firmware)).ToLowerInvariant();
 
     /// <summary>
+    /// Igual que <see cref="ValidateImage(ReadOnlySpan{byte})"/> pero sin necesitar la imagen
+    /// completa en memoria: basta con sus primeros bytes y el tamaño total. Lo usa la subida,
+    /// que escribe a disco en streaming y nunca tiene el binario entero en RAM.
+    /// </summary>
+    public static string? ValidateImage(ReadOnlySpan<byte> header, long totalLength)
+    {
+        if (totalLength < MinimumFirmwareBytes)
+            return $"La imagen tiene {totalLength} bytes; el dispositivo rechaza menos de {MinimumFirmwareBytes} ('Firmware too small').";
+
+        if (totalLength < MinimumFirstChunkBytes)
+            return $"La imagen no alcanza los {MinimumFirstChunkBytes} bytes de cabecera que valida el dispositivo.";
+
+        if (header.Length == 0)
+            return "No se pudo leer la cabecera de la imagen.";
+
+        if (header[0] != EspImageMagic)
+            return $"El primer byte es 0x{header[0]:X2} y una imagen ESP32 válida empieza por 0x{EspImageMagic:X2} ('Invalid firmware image header').";
+
+        return null;
+    }
+
+    /// <summary>
     /// Comprueba que la imagen es apta antes de empezar a emitir trozos, para no dejar al
     /// equipo a medias: el primer trozo tiene que llevar la cabecera y el total superar el
     /// mínimo. Devuelve el motivo del rechazo, o null si es apta.

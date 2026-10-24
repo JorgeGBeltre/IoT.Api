@@ -1,4 +1,5 @@
 using IoT.Api.Common;
+using IoT.Infrastructure.Services;
 using IoT.Application.Common.Interfaces;
 using IoT.Application.Firmware;
 using Microsoft.AspNetCore.Authorization;
@@ -52,6 +53,12 @@ public sealed class FirmwareController : ControllerBase
     /// </summary>
     // Escribe firmware en hardware real: irreversible, exige rol explícito.
     [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
+    // Tope DURO del cuerpo de la peticion y del multipart. Sin esto el unico limite era el
+    // default de Kestrel y el client_max_body_size del nginx del FRONTEND, que una llamada
+    // directa al puerto de la API esquiva. El tope efectivo se puede BAJAR por configuracion
+    // con Firmware:MaxUploadBytes; subirlo no sirve porque este atributo rechaza antes.
+    [RequestSizeLimit(FirmwareStorage.MaxUploadBytesHardLimit)]
+    [RequestFormLimits(MultipartBodyLengthLimit = FirmwareStorage.MaxUploadBytesHardLimit)]
     [HttpPost("upload")]
     [HttpPost("/api/MqttBroker/Firmware/UpdateFirmwareVersion")]
     [Consumes("multipart/form-data")]

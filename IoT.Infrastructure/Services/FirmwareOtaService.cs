@@ -23,6 +23,12 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
     private readonly IFleetNotificationService _notificationService;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IAuditLogRepository? _auditLogRepository;
+
+    /// <summary>
+    /// Opcional a propósito: así los tests que ya construían el servicio siguen compilando.
+    /// Si es null se usa el tope de subida por defecto.
+    /// </summary>
+    private readonly Microsoft.Extensions.Configuration.IConfiguration? _configuration;
     private readonly ILogger<FirmwareOtaService> _logger;
 
     public FirmwareOtaService(
@@ -33,7 +39,8 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         IFleetNotificationService notificationService,
         IServiceScopeFactory scopeFactory,
         ILogger<FirmwareOtaService> logger,
-        IAuditLogRepository? auditLogRepository = null)
+        IAuditLogRepository? auditLogRepository = null,
+        Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
     {
         _firmwareRepository = firmwareRepository;
         _deviceRepository = deviceRepository;
@@ -43,6 +50,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         _scopeFactory = scopeFactory;
         _logger = logger;
         _auditLogRepository = auditLogRepository;
+        _configuration = configuration;
     }
 
     public async Task<Result<FirmwareVersionRecordDto>> UploadFirmwareAsync(
@@ -74,48 +82,129 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             return Result<FirmwareVersionRecordDto>.Failure(
                 new Error("Firmware.InvalidExtension", $"Allowed firmware extensions are: {string.Join(", ", allowedExtensions)}."));
 
-        using var memoryStream = new MemoryStream();
-        await fileStream.CopyToAsync(memoryStream, cancellationToken);
-        byte[] bytes = memoryStream.ToArray();
+        // Tope de tamaño ANTES de materializar nada. El fichero NO se carga en memoria: se
+        // escribe en streaming a un temporal dentro del almacén del tenant mientras se calcula
+        // el SHA-256, y se corta en cuanto se pasa del límite. Antes se hacía
+        // `CopyToAsync(memoryStream)` + `ToArray()`, es decir, DOS copias completas en memoria
+        // (la segunda en el Large Object Heap) sin ningún límite de la aplicación.
+        long maxBytes = FirmwareStorage.ResolveMaxUploadBytes(_configuration);
 
-        if (bytes.Length == 0)
-            return Result<FirmwareVersionRecordDto>.Failure(new Error("Firmware.EmptyFile", "Firmware file cannot be empty."));
+        string tempPath = FirmwareStorage.CreateIncomingTempPath(tenantId);
+        long totalBytes = 0;
+        var header = new byte[OtaChunker.MinimumFirstChunkBytes];
+        int headerFilled = 0;
+        string sha256;
 
-        // Validate image structure if .bin
-        if (extension == ".bin")
+        try
         {
-            string? validationError = OtaChunker.ValidateImage(bytes);
-            if (validationError != null)
+            using (var hasher = System.Security.Cryptography.IncrementalHash.CreateHash(
+                       System.Security.Cryptography.HashAlgorithmName.SHA256))
+            using (var output = new FileStream(
+                       tempPath, FileMode.Create, FileAccess.Write, FileShare.None,
+                       bufferSize: 81920, useAsync: true))
             {
-                _logger.LogWarning("Validación de imagen OTA arrojó advertencia: {Warning}", validationError);
-                // Si es menor al mínimo absoluto de ESP32 se rechaza para evitar dañar flash
-                if (bytes.Length < OtaChunker.MinimumFirmwareBytes)
-                    return Result<FirmwareVersionRecordDto>.Failure(new Error("Firmware.InvalidImage", validationError));
+                var buffer = new byte[81920];
+                int read;
+                while ((read = await fileStream.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    totalBytes += read;
+                    if (totalBytes > maxBytes)
+                    {
+                        _logger.LogWarning(
+                            "Subida de firmware del tenant {TenantId} abortada: supera el límite de {Max} bytes.",
+                            tenantId, maxBytes);
+                        return Result<FirmwareVersionRecordDto>.Failure(new Error(
+                            "Firmware.TooLarge",
+                            $"La imagen supera el tamaño máximo admitido ({maxBytes / (1024 * 1024)} MiB)."));
+                    }
+
+                    if (headerFilled < header.Length)
+                    {
+                        int copy = Math.Min(read, header.Length - headerFilled);
+                        Array.Copy(buffer, 0, header, headerFilled, copy);
+                        headerFilled += copy;
+                    }
+
+                    hasher.AppendData(buffer, 0, read);
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                }
+
+                sha256 = Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
             }
+
+            if (totalBytes == 0)
+                return Result<FirmwareVersionRecordDto>.Failure(new Error("Firmware.EmptyFile", "Firmware file cannot be empty."));
+
+            // Validación de la estructura de la imagen con la cabecera leída y el tamaño
+            // total, sin necesitar el binario completo en memoria.
+            if (extension == ".bin")
+            {
+                string? validationError = OtaChunker.ValidateImage(header.AsSpan(0, headerFilled), totalBytes);
+                if (validationError != null)
+                {
+                    _logger.LogWarning("Validación de imagen OTA arrojó advertencia: {Warning}", validationError);
+                    if (totalBytes < OtaChunker.MinimumFirmwareBytes)
+                        return Result<FirmwareVersionRecordDto>.Failure(new Error("Firmware.InvalidImage", validationError));
+                }
+            }
+
+            int totalChunks = OtaChunker.CountChunks(totalBytes, OtaChunker.DefaultChunkSizeBytes);
+
+            // Ruta final SIEMPRE por el resolver: valida la versión contra lista blanca,
+            // genera el nombre a partir del hash (la cadena del cliente no participa) y
+            // comprueba que queda dentro del almacén de ESTE tenant.
+            if (!FirmwareStorage.TryBuildRelativeFilePath(
+                    tenantId, normalizedVersion, sha256, extension,
+                    out string relativeFilePath, out string absoluteFilePath))
+            {
+                _logger.LogWarning(
+                    "Subida de firmware rechazada para el tenant {TenantId}: la versión '{Version}' no es válida como ruta.",
+                    tenantId, version);
+                return Result<FirmwareVersionRecordDto>.Failure(new Error(
+                    "Firmware.InvalidVersion",
+                    "La versión sólo admite letras, números, punto, guion y guion bajo (máx. 50), y no puede contener separadores de ruta."));
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(absoluteFilePath)!);
+            File.Move(tempPath, absoluteFilePath, overwrite: true);
+
+            return await PersistFirmwareRecordAsync(
+                tenantId, normalizedVersion, relativeFilePath, absoluteFilePath,
+                totalBytes, sha256, totalChunks, targetModel, featureDescription, updatedFromIp,
+                cancellationToken);
         }
-
-        string sha256 = OtaChunker.Sha256Hex(bytes);
-        int totalChunks = OtaChunker.CountChunks(bytes.Length, OtaChunker.DefaultChunkSizeBytes);
-
-        // Guardar archivo en disco
-        // Ruta de guardado SIEMPRE por el resolver: valida la versión contra una lista
-        // blanca, genera el nombre de archivo a partir del hash (la cadena del cliente no
-        // participa en el nombre) y comprueba que la ruta final queda dentro del almacén de
-        // ESTE tenant. Sin esto, una versión como "..\..\x" o "C:\x" escribía fuera.
-        if (!FirmwareStorage.TryBuildRelativeFilePath(
-                tenantId, normalizedVersion, sha256, extension,
-                out string relativeFilePath, out string absoluteFilePath))
+        finally
         {
-            _logger.LogWarning(
-                "Subida de firmware rechazada para el tenant {TenantId}: la versión '{Version}' no es válida como ruta.",
-                tenantId, version);
-            return Result<FirmwareVersionRecordDto>.Failure(new Error(
-                "Firmware.InvalidVersion",
-                "La versión sólo admite letras, números, punto, guion y guion bajo (máx. 50), y no puede contener separadores de ruta."));
+            // Si se abortó por tamaño, por validación o por un error, el temporal no debe
+            // quedarse ocupando el almacén.
+            try
+            {
+                if (File.Exists(tempPath)) File.Delete(tempPath);
+            }
+            catch (IOException) { /* el almacén se limpia aparte; no tapar el error original */ }
         }
+    }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(absoluteFilePath)!);
-        await File.WriteAllBytesAsync(absoluteFilePath, bytes, cancellationToken);
+    /// <summary>
+    /// Crea o actualiza el registro de la versión y devuelve su DTO. Si falla el guardado, el
+    /// binario que se acaba de dejar en su sitio se elimina: antes quedaba huérfano en disco
+    /// porque el archivo se escribía ANTES del SaveChanges.
+    /// </summary>
+    private async Task<Result<FirmwareVersionRecordDto>> PersistFirmwareRecordAsync(
+        Guid tenantId,
+        string normalizedVersion,
+        string relativeFilePath,
+        string absoluteFilePath,
+        long fileSizeBytes,
+        string sha256,
+        int totalChunks,
+        string? targetModel,
+        string? featureDescription,
+        string? updatedFromIp,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
 
         // Buscar registro existente para actualizar o crear nuevo
         var existing = await _firmwareRepository.GetByVersionAsync(tenantId, normalizedVersion, cancellationToken);
@@ -129,7 +218,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             // quedaba huérfano en disco.
             string? previousSrc = existing.ReplaceBinary(
                 src: relativeFilePath,
-                fileSizeBytes: bytes.Length,
+                fileSizeBytes: fileSizeBytes,
                 sha256: sha256,
                 totalChunks: totalChunks,
                 chunkSizeBytes: OtaChunker.DefaultChunkSizeBytes,
@@ -168,7 +257,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 tenantId: tenantId,
                 firmwareVersion: normalizedVersion,
                 src: relativeFilePath,
-                fileSizeBytes: bytes.Length,
+                fileSizeBytes: fileSizeBytes,
                 sha256: sha256,
                 totalChunks: totalChunks,
                 chunkSizeBytes: OtaChunker.DefaultChunkSizeBytes,
@@ -183,13 +272,26 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             await _firmwareRepository.AddAsync(record, cancellationToken);
         }
 
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        _logger.LogInformation(
-            "Firmware {Version} subido exitosamente para tenant {TenantId}. Tamaño: {Bytes} bytes, Chunks: {Chunks}",
-            normalizedVersion, tenantId, bytes.Length, totalChunks);
+            _logger.LogInformation(
+                "Firmware {Version} subido exitosamente para tenant {TenantId}. Tamaño: {Bytes} bytes, Chunks: {Chunks}",
+                normalizedVersion, tenantId, fileSizeBytes, totalChunks);
 
-        return Result<FirmwareVersionRecordDto>.Success(MapToDto(record));
+            return Result<FirmwareVersionRecordDto>.Success(MapToDto(record));
+        }
+        catch (Exception)
+        {
+            // El binario ya está en su sitio pero el registro no se pudo guardar: sin fila
+            // que lo referencie es un huérfano, así que se elimina.
+            try
+            {
+                if (File.Exists(absoluteFilePath)) File.Delete(absoluteFilePath);
+            }
+            catch (IOException) { /* no tapar la excepción original */ }
+
+            throw;
+        }
     }
 
     public async Task<Result> StartDeviceOtaAsync(

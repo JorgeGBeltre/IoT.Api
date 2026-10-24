@@ -79,6 +79,11 @@ services:
       - "${TCP_JOINTECH_PORT:-5002}:5002"   # Jointech JT701D
     volumes:
       - iot_logs:/app/logs
+      # Almacen de imagenes de firmware. SIN este volumen se borraba al recrear el
+      # contenedor y la base de datos quedaba apuntando a binarios inexistentes: la
+      # campana OTA fallaba con "archivo fisico no encontrado" y no habia forma de
+      # recuperarlo salvo volver a subir cada version.
+      - iot_firmware:/app/storage
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:5000
@@ -197,6 +202,8 @@ services:
       - iot-network
 
 volumes:
+  iot_firmware:
+    driver: local
   iot_postgres_data:
     driver: local
   iot_redis_data:

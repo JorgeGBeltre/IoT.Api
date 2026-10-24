@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using System.Text.RegularExpressions;
 
 namespace IoT.Infrastructure.Services;
@@ -120,5 +121,51 @@ public static class FirmwareStorage
 
         absolutePath = resolved;
         return true;
+    }
+
+    /// <summary>
+    /// Tope DURO del tamaño de una imagen de firmware, en bytes (32 MiB). Es el valor del
+    /// atributo <c>[RequestSizeLimit]</c> del endpoint, así que no puede depender de la
+    /// configuración. Una imagen de ESP32 real ronda 1-2 MiB; esto deja margen de sobra.
+    /// </summary>
+    public const long MaxUploadBytesHardLimit = 32L * 1024 * 1024;
+
+    /// <summary>Tope por defecto si no se configura otro (16 MiB, igual que el nginx del borde).</summary>
+    public const long DefaultMaxUploadBytes = 16L * 1024 * 1024;
+
+    /// <summary>
+    /// Tamaño máximo admitido, leído de <c>Firmware:MaxUploadBytes</c>. Se acota al tope duro:
+    /// configurar un valor mayor no sirve de nada porque el atributo del endpoint rechaza
+    /// antes, y configurar 0 o un valor negativo cae al valor por defecto en vez de dejar la
+    /// subida sin límite.
+    ///
+    /// Antes NO había ningún límite en la aplicación: el único tope era el `client_max_body_size`
+    /// de 16m del nginx del FRONTEND, que una llamada directa al puerto 5000 de la API —que el
+    /// compose publica al host— esquiva por completo.
+    /// </summary>
+    public static long ResolveMaxUploadBytes(IConfiguration? configuration)
+    {
+        long configured = DefaultMaxUploadBytes;
+
+        if (configuration is not null &&
+            long.TryParse(configuration["Firmware:MaxUploadBytes"], out var fromConfig) &&
+            fromConfig > 0)
+        {
+            configured = fromConfig;
+        }
+
+        return Math.Min(configured, MaxUploadBytesHardLimit);
+    }
+
+    /// <summary>
+    /// Ruta de un archivo temporal DENTRO del almacén del tenant, para escribir la subida en
+    /// streaming antes de conocer su hash (que es lo que da nombre al archivo final). Al estar
+    /// en el mismo volumen, el movimiento posterior al nombre definitivo es atómico.
+    /// </summary>
+    public static string CreateIncomingTempPath(Guid tenantId)
+    {
+        string incoming = Path.Combine(TenantRoot(tenantId), ".incoming");
+        Directory.CreateDirectory(incoming);
+        return Path.Combine(incoming, Guid.NewGuid().ToString("N") + ".part");
     }
 }

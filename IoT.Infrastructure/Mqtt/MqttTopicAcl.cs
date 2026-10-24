@@ -29,14 +29,17 @@ public static class MqttTopicAcl
     private static readonly string[] DeviceScopedPrefixes =
     {
         "ota", "event", "events", "commands", "command", "devices", "device",
-        "telemetry", "telemetria", "status", "glp"
+        "telemetry", "telemetria", "status", "glp",
+        // El firmware GPS se suscribe a "config/<chipId>" (antes al literal "config",
+        // compartido por todos los equipos).
+        "config"
     };
 
     /// <summary>
     /// Tópicos de BAJADA: los escribe el servidor y el dispositivo sólo los lee. Si un
     /// dispositivo pudiera publicar aquí, podría inyectar un firmware o un comando a otro.
     /// </summary>
-    private static readonly string[] DownlinkPrefixes = { "ota", "event", "commands", "command" };
+    private static readonly string[] DownlinkPrefixes = { "ota", "event", "commands", "command", "config" };
 
     /// <summary>
     /// Tópicos FIJOS, sin identificador, en los que Fligo y Toour publicaban sus reportes.

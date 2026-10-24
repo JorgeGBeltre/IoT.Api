@@ -93,6 +93,12 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 "La versión sólo admite letras, números, punto, guion y guion bajo (máx. 50), y no puede contener separadores de ruta."));
         }
 
+        // Cotas de los campos de texto del formulario: los escribe el usuario y acaban en
+        // columnas acotadas, donde una cadena larga provocaba un 22001 DESPUÉS de haber
+        // escrito ya el binario en disco.
+        targetModel = Truncate(targetModel, MaxTargetModelLength);
+        featureDescription = Truncate(featureDescription, MaxFeatureDescriptionLength);
+
         string extension = Path.GetExtension(fileName).ToLowerInvariant();
         var allowedExtensions = new[] { ".bin", ".hex", ".dfu" };
 
@@ -900,7 +906,10 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 var device = await deviceRepo.GetByIdAsync(deviceId, ct);
                 if (device != null)
                 {
-                    device.FailOta($"Error de transmisión: {ex.Message}");
+                    // Truncado: el mensaje de la excepción es de longitud arbitraria y la
+                    // columna no lo es. Sin esto Postgres devolvía 22001, el error se
+                    // tragaba en el catch vacío y el equipo quedaba bloqueado en "actualizando".
+                    device.FailOta(Truncate($"Error de transmisión: {ex.Message}", MaxErrorLength)!);
                     deviceRepo.Update(device);
                     await uow.SaveChangesAsync(ct);
                 }
@@ -954,6 +963,8 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
     /// <summary>Cotas de las cadenas que escribe el DISPOSITIVO y que se persisten.</summary>
     private const int MaxVersionLength = 64;
     private const int MaxErrorLength = 500;
+    private const int MaxTargetModelLength = 100;
+    private const int MaxFeatureDescriptionLength = 500;
 
     private static string? Truncate(string? value, int maxLength)
     {

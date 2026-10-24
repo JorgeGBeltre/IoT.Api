@@ -51,6 +51,14 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
     private readonly TimeSpan? _clientMapTtl;
 
     /// <summary>
+    /// <summary>
+    /// Tamaño máximo de una trama entrante, en bytes. Ninguna telemetría legítima de estos
+    /// dispositivos se acerca: la mayor es el reporte de estado del relé, de unos pocos KiB.
+    /// Configurable con <c>MqttBroker:MaxInboundPayloadBytes</c>.
+    /// </summary>
+    private readonly long _maxInboundPayloadBytes;
+
+    /// <summary>
     /// ClientId → ChipId VERIFICADO contra el hash de la ApiKey del dispositivo. Sólo se
     /// puebla cuando la credencial es por dispositivo; con la ApiKey global de bootstrap
     /// (simulador) un mismo publicador habla por varios equipos y no hay identidad única.
@@ -97,6 +105,11 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         // Por defecto 7 días: muy por encima de cualquier intervalo de reconexión real de un
         // tracker (keepalive en minutos), así que no caduca mapeos vivos, pero garantiza que
         // una entrada abandonada no sobreviva indefinidamente.
+        _maxInboundPayloadBytes =
+            long.TryParse(configuration["MqttBroker:MaxInboundPayloadBytes"], out var maxPayload) && maxPayload > 0
+                ? maxPayload
+                : 256L * 1024;
+
         int ttlHours = int.TryParse(configuration["MqttBroker:ClientMapTtlHours"], out var h) ? h : 168;
         _clientMapTtl = ttlHours > 0 ? TimeSpan.FromHours(ttlHours) : null;
     }
@@ -121,6 +134,15 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         _server.ClientDisconnectedAsync += OnClientDisconnected;
 
         await _server.StartAsync();
+
+        if (_allowAnonymous)
+        {
+            _logger.LogWarning(
+                "BROKER EN MODO ANÓNIMO: no se exige ApiKey, así que NINGUNA conexión tiene " +
+                "identidad probada. El ACL de tópicos no puede comprobar la propiedad, de modo " +
+                "que los equipos no podrán leer sus canales de bajada (comandos, firmware). " +
+                "Sólo para desarrollo; en producción MqttBroker:AllowAnonymous debe ser false.");
+        }
         _logger.LogInformation(
             "Broker MQTT embebido iniciado en puerto {Port}. Anónimo={Anon}, ApiKeys configuradas={KeyCount}",
             _port, _allowAnonymous, _apiKeys.Length);
@@ -283,7 +305,12 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         }
         else
         {
-            if (!_allowAnonymous) _bootstrapClientIds[e.ClientId] = 1;
+            // En modo anónimo tampoco hay identidad por dispositivo, pero SÍ hay que poder
+            // publicar: si no, el ACL denegaba toda publicación con ámbito y el entorno de
+            // desarrollo quedaba roto en silencio. Se trata como credencial global: puede
+            // publicar en nombre de varios equipos, nunca leer el canal de ninguno ni
+            // escribir en un canal de bajada.
+            _bootstrapClientIds[e.ClientId] = 1;
             // ApiKey global o anónimo: no hay identidad única por conexión. Se limpia
             // cualquier resto de una conexión anterior con el mismo ClientId.
             _authenticatedChipIds.TryRemove(e.ClientId, out _);
@@ -379,7 +406,20 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                 e.ProcessPublish = false;
                 return Task.CompletedTask;
             }
-            string payload = e.ApplicationMessage.Payload.Length > 0
+            // Cota de tamaño ANTES de materializar el payload en string: sin ella un equipo
+            // podía mandar megabytes por trama, que se convertían a string, se guardaban en la
+            // columna jsonb RawPayload y multiplicaban la memoria del canal de ingesta.
+            long payloadLength = e.ApplicationMessage.Payload.Length;
+            if (payloadLength > _maxInboundPayloadBytes)
+            {
+                _logger.LogWarning(
+                    "Trama MQTT descartada de {ClientId} en '{Topic}': {Size} bytes supera el máximo de {Max}.",
+                    e.ClientId, topic, payloadLength, _maxInboundPayloadBytes);
+                e.ProcessPublish = false;
+                return Task.CompletedTask;
+            }
+
+            string payload = payloadLength > 0
                 ? Encoding.UTF8.GetString(e.ApplicationMessage.Payload)
                 : string.Empty;
 

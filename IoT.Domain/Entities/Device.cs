@@ -69,6 +69,14 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped
         UpdatedAt = DateTime.UtcNow;
     }
 
+    /// <summary>
+    /// Caracteres prohibidos en un ChipId porque rompen su uso como segmento de tópico MQTT.
+    /// </summary>
+    private static readonly char[] InvalidChipIdChars =
+    {
+        '/', '+', '#', ' ', (char)9, (char)13, (char)10, (char)0
+    };
+
     public static Result<Device> Create(
         Guid tenantId,
         string chipId,
@@ -84,6 +92,18 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped
 
         if (string.IsNullOrWhiteSpace(chipId))
             return Result<Device>.Failure(new Error("Device.InvalidChipId", "ChipId is required."));
+
+        // El ChipId se usa LITERAL como segmento de tópico MQTT (ota/<chipId>,
+        // event/<chipId>, devices/<chipId>/...) y el broker decide por ese segmento de quién
+        // es el tópico. Un ChipId con una barra partiría el tópico en dos y rompería la
+        // comprobación de propiedad; uno con un comodín MQTT ("+", "#") podría convertir una
+        // suscripción propia en una suscripción a los tópicos de TODOS los equipos.
+        if (chipId.IndexOfAny(InvalidChipIdChars) >= 0)
+        {
+            return Result<Device>.Failure(new Error(
+                "Device.InvalidChipId",
+                "El ChipId no puede contener barras, comodines MQTT (+, #), espacios ni caracteres de control: se usa literalmente como segmento de tópico."));
+        }
 
         if (string.IsNullOrWhiteSpace(macAddress))
             return Result<Device>.Failure(new Error("Device.InvalidMacAddress", "MacAddress is required."));

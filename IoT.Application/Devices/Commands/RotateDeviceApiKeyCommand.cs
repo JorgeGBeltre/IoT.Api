@@ -20,17 +20,20 @@ public sealed class RotateDeviceApiKeyCommandHandler : IRequestHandler<RotateDev
     private readonly IDeviceApiKeyService _apiKeyService;
     private readonly IMqttConnectionInfoProvider _connectionInfo;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IMqttSessionRevoker? _sessionRevoker;
 
     public RotateDeviceApiKeyCommandHandler(
         IDeviceRepository deviceRepository,
         IDeviceApiKeyService apiKeyService,
         IMqttConnectionInfoProvider connectionInfo,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        IMqttSessionRevoker? sessionRevoker = null)
     {
         _deviceRepository = deviceRepository;
         _apiKeyService = apiKeyService;
         _connectionInfo = connectionInfo;
         _unitOfWork = unitOfWork;
+        _sessionRevoker = sessionRevoker;
     }
 
     public async Task<Result<DeviceCredentialsDto>> Handle(RotateDeviceApiKeyCommand request, CancellationToken cancellationToken)
@@ -51,6 +54,17 @@ public sealed class RotateDeviceApiKeyCommandHandler : IRequestHandler<RotateDev
 
         _deviceRepository.Update(device);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        // Rotar la clave tiene que cerrar la sesión abierta: si no, la credencial vieja
+        // seguía dando acceso mientras el equipo no reconectara —días, en un tracker con
+        // keepalive largo—. Va DESPUÉS de guardar, para que el equipo no pueda volver a
+        // entrar con la clave anterior. Si falla no se deshace la rotación: la re-validación
+        // periódica del broker cierra la sesión en el siguiente ciclo.
+        if (_sessionRevoker is not null)
+        {
+            await _sessionRevoker.RevokeSessionAsync(
+                device.ChipId, "la ApiKey MQTT del dispositivo se rotó", cancellationToken);
+        }
 
         return Result<DeviceCredentialsDto>.Success(
             DeviceCredentialsMapper.ToDto(device, _connectionInfo, plaintextKey: plainKey));

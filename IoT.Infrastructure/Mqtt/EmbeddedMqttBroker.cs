@@ -2,6 +2,7 @@ using System.Text;
 using System.Threading.Channels;
 using IoT.Application.Common.Interfaces;
 using IoT.Application.Ingestion.Commands;
+using IoT.Domain.Enums;
 using IoT.Domain.Repositories;
 using MediatR;
 using Microsoft.Extensions.Configuration;
@@ -24,7 +25,7 @@ namespace IoT.Infrastructure.Mqtt;
 /// Implementa <see cref="IMqttPublisher"/> para el push dirigido server→device
 /// (comandos / OTA) mediante InjectApplicationMessage.
 /// </summary>
-public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
+public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqttSessionRevoker
 {
     private readonly IConfiguration _configuration;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -50,7 +51,6 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
     /// </summary>
     private readonly TimeSpan? _clientMapTtl;
 
-    /// <summary>
     /// <summary>
     /// Tamaño máximo de una trama entrante, en bytes. Ninguna telemetría legítima de estos
     /// dispositivos se acerca: la mayor es el reporte de estado del relé, de unos pocos KiB.
@@ -79,6 +79,24 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
     /// no puede depender del nombre, que lo elige quien conecta.
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _connectedClientIds = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// ClientId → huella de la ApiKey con la que se autenticó la sesión. Es lo que permite
+    /// detectar una rotación de credencial sin guardar el hash en memoria: si la huella del
+    /// registro ya no coincide con la de la sesión, esa sesión entró con la clave vieja.
+    /// Sólo se puebla para credenciales por dispositivo.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _sessionKeyFingerprints = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Cada cuánto se vuelven a validar las sesiones YA establecidas. El broker sólo
+    /// comprobaba la credencial en el CONNECT, así que suspender un equipo o rotarle la
+    /// ApiKey no le quitaba el acceso: su sesión y sus suscripciones seguían vivas hasta que
+    /// él decidiera reconectar (un tracker con keepalive largo, días). El gateway TCP sí
+    /// re-valida cada 60 s; esto equipara el MQTT. Configurable con
+    /// <c>MqttBroker:AuthRecheckSeconds</c>; 0 o negativo lo desactiva.
+    /// </summary>
+    private readonly TimeSpan _authRecheckInterval;
 
     private readonly record struct InboundMessage(
         string Topic,
@@ -109,6 +127,11 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
             long.TryParse(configuration["MqttBroker:MaxInboundPayloadBytes"], out var maxPayload) && maxPayload > 0
                 ? maxPayload
                 : 256L * 1024;
+
+        _authRecheckInterval =
+            int.TryParse(configuration["MqttBroker:AuthRecheckSeconds"], out var recheck)
+                ? TimeSpan.FromSeconds(recheck)
+                : TimeSpan.FromSeconds(60);
 
         int ttlHours = int.TryParse(configuration["MqttBroker:ClientMapTtlHours"], out var h) ? h : 168;
         _clientMapTtl = ttlHours > 0 ? TimeSpan.FromHours(ttlHours) : null;
@@ -147,6 +170,12 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
             "Broker MQTT embebido iniciado en puerto {Port}. Anónimo={Anon}, ApiKeys configuradas={KeyCount}",
             _port, _allowAnonymous, _apiKeys.Length);
 
+        // El bucle de re-validación corre en paralelo al consumidor del canal. Cuelga de su
+        // PROPIO token enlazado: si el consumidor termina por una razón distinta a la
+        // cancelación, el finally tiene que poder pararlo en vez de quedarse esperándolo.
+        using var recheckCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var recheckLoop = RunAuthRecheckLoopAsync(recheckCts.Token);
+
         // Consumidor del canal → pipeline de ingesta
         try
         {
@@ -161,12 +190,152 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         }
         finally
         {
+            // Se para y se espera el bucle para no dejar una tarea huérfana tocando el
+            // servidor mientras se detiene. Nunca lanza: tiene su propio catch.
+            recheckCts.Cancel();
+            await recheckLoop;
+
             if (_server is not null)
             {
                 await _server.StopAsync();
                 _logger.LogInformation("Broker MQTT embebido detenido.");
             }
         }
+    }
+
+    // =========================================================================
+    // Re-validación periódica de las sesiones establecidas
+    // =========================================================================
+
+    /// <summary>
+    /// Vuelve a validar cada sesión autenticada por dispositivo y cierra las que ya no
+    /// deberían existir: equipo suspendido o revocado, equipo borrado del registro, o
+    /// credencial rotada (la huella de la sesión no coincide con la del registro).
+    ///
+    /// Es la red de seguridad de la revocación: cubre cualquier cambio en el registro,
+    /// incluidos los que no pasan por <see cref="IMqttSessionRevoker"/> (una edición directa
+    /// en base de datos, o un cambio hecho por otra instancia del backend).
+    /// </summary>
+    private async Task RunAuthRecheckLoopAsync(CancellationToken stoppingToken)
+    {
+        if (_authRecheckInterval <= TimeSpan.Zero)
+        {
+            _logger.LogWarning(
+                "Re-validación periódica de sesiones MQTT DESACTIVADA (MqttBroker:AuthRecheckSeconds<=0): " +
+                "suspender un equipo o rotarle la ApiKey no cerrará su sesión abierta.");
+            return;
+        }
+
+        try
+        {
+            using var timer = new PeriodicTimer(_authRecheckInterval);
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+            {
+                await RecheckAuthenticatedSessionsAsync(stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // apagado ordenado
+        }
+        catch (Exception ex)
+        {
+            // Que el bucle muera no debe tumbar la ingesta, pero sí tiene que verse: a
+            // partir de aquí las revocaciones dejan de aplicarse a sesiones abiertas.
+            _logger.LogError(ex,
+                "El bucle de re-validación de sesiones MQTT se detuvo por un error; las sesiones " +
+                "abiertas ya no se re-validarán hasta reiniciar el servicio.");
+        }
+    }
+
+    /// <summary>
+    /// Un ciclo de re-validación. Cuesta una lectura por sesión autenticada, igual que el
+    /// gateway TCP, así que con muchos equipos conviene subir
+    /// <c>MqttBroker:AuthRecheckSeconds</c>. Sólo ve las sesiones de ESTA instancia: con
+    /// varias réplicas, cada una revalida las suyas, que es justo lo que hace que la
+    /// revocación acabe aplicándose aunque la petición entre por otra réplica.
+    /// </summary>
+    private async Task RecheckAuthenticatedSessionsAsync(CancellationToken ct)
+    {
+        // Se toma una foto: el diccionario cambia mientras se itera (conexiones y
+        // desconexiones), y una sesión que desaparezca sola ya no necesita revocarse.
+        var sessions = _authenticatedChipIds.ToArray();
+        if (sessions.Length == 0) return;
+
+        using var scope = _scopeFactory.CreateScope();
+        var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
+
+        foreach (var (clientId, chipId) in sessions)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // La sesión pudo cerrarse entre la foto y ahora.
+            if (!_connectedClientIds.ContainsKey(clientId)) continue;
+
+            var device = await deviceRepo.GetByChipIdGlobalAsync(chipId, ct);
+
+            _sessionKeyFingerprints.TryGetValue(clientId, out var sessionFingerprint);
+            var motivo = MqttSessionRevocation.ReasonToRevoke(device, sessionFingerprint);
+
+            if (motivo is not null)
+            {
+                await DisconnectSessionAsync(clientId, chipId, motivo);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cierra una sesión concreta y suelta su estado en memoria. No lanza: el cierre es
+    /// saneamiento y no debe tumbar ni el bucle ni la operación que lo pidió.
+    /// </summary>
+    private async Task<bool> DisconnectSessionAsync(string clientId, string chipId, string reason)
+    {
+        try
+        {
+            if (_server is null) return false;
+
+            _logger.LogWarning(
+                "Sesión MQTT REVOCADA: {ClientId} (ChipId {ChipId}); motivo: {Reason}.",
+                clientId, chipId, reason);
+
+            await _server.DisconnectClientAsync(clientId, new MqttServerClientDisconnectOptions
+            {
+                ReasonCode = MqttDisconnectReasonCode.NotAuthorized,
+                ReasonString = reason
+            });
+
+            // El estado se suelta aquí además de en OnClientDisconnected: si el evento se
+            // retrasa, una sesión revocada no debe seguir contando como autenticada.
+            _authenticatedChipIds.TryRemove(clientId, out _);
+            _sessionKeyFingerprints.TryRemove(clientId, out _);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "No se pudo cerrar la sesión MQTT {ClientId} (ChipId {ChipId}).", clientId, chipId);
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // IMqttSessionRevoker — revocación inmediata
+    // =========================================================================
+    public async Task<bool> RevokeSessionAsync(string chipId, string reason, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(chipId)) return false;
+
+        bool any = false;
+
+        // Se busca por ChipId AUTENTICADO, no por ClientId: aunque hoy el CONNECT exige que
+        // coincidan, la correspondencia la decide la autenticación, no el nombre del cliente.
+        foreach (var (clientId, sessionChipId) in _authenticatedChipIds.ToArray())
+        {
+            if (!string.Equals(sessionChipId, chipId, StringComparison.OrdinalIgnoreCase)) continue;
+            if (await DisconnectSessionAsync(clientId, chipId, reason)) any = true;
+        }
+
+        return any;
     }
 
     private async Task DispatchToPipelineAsync(InboundMessage msg, CancellationToken ct)
@@ -208,11 +377,18 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
             return;
         }
 
+        // La ApiKey se busca en varios sitios porque cada firmware la manda donde le
+        // conviene: Relay y GPS en el username con contraseña vacía, Fligo y Toour en una
+        // UserProperty de MQTT 5, y el GLP tiene usuario y contraseña editables, así que el
+        // operador la pone donde diga la ficha de credenciales. Se aceptan todos: lo que se
+        // verifica es la clave contra el hash del dispositivo, no en qué campo viajó.
         string? apiKey;
+        string? apiKeyAlt = null;
         string? chipId;
         // Verdadero sólo si la conexión se autenticó con la ApiKey PROPIA del dispositivo;
         // en ese caso el ChipId queda probado y puede propagarse al pipeline.
         bool authenticatedPerDevice = false;
+        string? deviceKeyFingerprint = null;
 
         if (e.ProtocolVersion == MQTTnet.Formatter.MqttProtocolVersion.V500)
         {
@@ -220,17 +396,32 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                 .FirstOrDefault(pp => string.Equals(pp.Name, "ApiKey", StringComparison.OrdinalIgnoreCase))?.Value;
             chipId = e.UserProperties?
                 .FirstOrDefault(pp => string.Equals(pp.Name, "ChipId", StringComparison.OrdinalIgnoreCase))?.Value;
+
+            // Un cliente MQTT 5 que no use la UserProperty (una herramienta genérica, o un
+            // firmware futuro) sigue pudiendo autenticarse por los campos de siempre.
+            if (string.IsNullOrEmpty(apiKey)) apiKey = e.UserName;
+            apiKeyAlt = e.Password;
         }
         else
         {
-            // Legacy (3.1 / 3.1.1): Username = ApiKey, ClientId = ChipId
+            // Legacy (3.1 / 3.1.1): ClientId = ChipId, y la ApiKey en el username (lo que
+            // mandan Relay y GPS) o en la contraseña (como la pone el operador en el GLP
+            // siguiendo la ficha de credenciales).
             apiKey = e.UserName;
+            apiKeyAlt = e.Password;
             chipId = e.ClientId;
         }
 
         if (!_allowAnonymous)
         {
-            if (string.IsNullOrEmpty(apiKey))
+            // Candidatas en orden: primero donde la manda el firmware, después el otro
+            // campo. Se descartan las vacías para no llamar a Verify con cadena vacía.
+            var apiKeyCandidates = new[] { apiKey, apiKeyAlt }
+                .Where(k => !string.IsNullOrEmpty(k))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+
+            if (apiKeyCandidates.Length == 0)
             {
                 _logger.LogWarning("Conexión rechazada ({ClientId}): ApiKey no provista.", e.ClientId);
                 e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
@@ -241,7 +432,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
             // (b) ApiKey por dispositivo: el ChipId debe estar REGISTRADO y la clave
             //     coincidir con el hash almacenado. Un ChipId no registrado se rechaza
             //     (modelo de adopción: la plataforma no "ve" dispositivos no provisionados).
-            bool isGlobalKey = _apiKeys.Length > 0 && _apiKeys.Contains(apiKey);
+            bool isGlobalKey = _apiKeys.Length > 0 && apiKeyCandidates.Any(k => _apiKeys.Contains(k));
             bool isDeviceKey = false;
 
             if (!isGlobalKey)
@@ -254,7 +445,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                     var apiKeySvc = scope.ServiceProvider.GetRequiredService<IDeviceApiKeyService>();
                     var device = await deviceRepo.GetByChipIdGlobalAsync(lookupChip);
                     if (device is not null && device.HasMqttApiKey &&
-                        apiKeySvc.Verify(apiKey, device.MqttApiKeyHash!))
+                        apiKeyCandidates.Any(k => apiKeySvc.Verify(k!, device.MqttApiKeyHash!)))
                     {
                         // El ClientId DEBE ser el del propio dispositivo. En MQTT 5 el ChipId
                         // viaja en una UserProperty y el ClientId es independiente, así que sin
@@ -277,10 +468,22 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                             return;
                         }
 
+                        if (device.AdminStatus != DeviceAdminStatus.Active)
+                        {
+                            _logger.LogWarning(
+                                "Conexión rechazada ({ClientId}): el dispositivo {ChipId} está en estado {Status}.",
+                                e.ClientId, device.ChipId, device.AdminStatus);
+                            e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
+                            return;
+                        }
+
                         isDeviceKey = true;
                         // Identidad probada: la del REGISTRO, no la que declaró el cliente.
                         chipId = device.ChipId;
                         authenticatedPerDevice = true;
+                        // Huella de la clave con la que entra: la re-validación periódica la
+                        // compara con la del registro para detectar una rotación.
+                        deviceKeyFingerprint = device.MqttApiKeyFingerprint;
                     }
                 }
             }
@@ -302,6 +505,10 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         {
             _authenticatedChipIds[e.ClientId] = chipId;
             _bootstrapClientIds.TryRemove(e.ClientId, out _);
+            if (!string.IsNullOrEmpty(deviceKeyFingerprint))
+                _sessionKeyFingerprints[e.ClientId] = deviceKeyFingerprint!;
+            else
+                _sessionKeyFingerprints.TryRemove(e.ClientId, out _);
         }
         else
         {
@@ -314,6 +521,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
             // ApiKey global o anónimo: no hay identidad única por conexión. Se limpia
             // cualquier resto de una conexión anterior con el mismo ClientId.
             _authenticatedChipIds.TryRemove(e.ClientId, out _);
+            _sessionKeyFingerprints.TryRemove(e.ClientId, out _);
         }
 
         // El mapeo es para push dirigido y presencia: útil, pero NO es parte de la
@@ -480,6 +688,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
         _authenticatedChipIds.TryRemove(e.ClientId, out _);
         _bootstrapClientIds.TryRemove(e.ClientId, out _);
         _connectedClientIds.TryRemove(e.ClientId, out _);
+        _sessionKeyFingerprints.TryRemove(e.ClientId, out _);
 
         var chipId = await _clientMap.GetChipIdByClientIdAsync(e.ClientId);
         if (!string.IsNullOrEmpty(chipId))

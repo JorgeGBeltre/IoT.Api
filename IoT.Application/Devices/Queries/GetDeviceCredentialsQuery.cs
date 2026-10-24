@@ -48,8 +48,13 @@ internal static class DeviceCredentialsMapper
         return new DeviceCredentialsDto(
             DeviceId: device.Id,
             ChipId: device.ChipId,
-            // El dispositivo se identifica por su ChipId; la ApiKey es la "contraseña".
-            MqttUsername: device.ChipId,
+            // El ChipId va en el CLIENT ID, que el broker exige que coincida con él.
+            // El usuario y la contraseña llevan los dos la ApiKey porque cada firmware la
+            // manda en un campo distinto y el broker acepta ambos: así la ficha vale tal
+            // cual para cualquiera de ellos. Antes decía "usuario = ChipId", y un equipo
+            // configurado así era rechazado con NotAuthorized.
+            MqttClientId: device.ChipId,
+            MqttUsername: plaintextKey,
             MqttPasswordPlaintext: plaintextKey,
             MqttPasswordFingerprint: device.MqttApiKeyFingerprint,
             MqttTopicPrefix: $"devices/{device.ChipId}",

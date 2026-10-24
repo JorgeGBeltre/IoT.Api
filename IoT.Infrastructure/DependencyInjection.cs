@@ -82,6 +82,7 @@ public static class DependencyInjection
         services.AddSingleton<IMqttClientMap, RedisMqttClientMap>();
         services.AddSingleton<EmbeddedMqttBroker>();
         services.AddSingleton<IMqttPublisher>(sp => sp.GetRequiredService<EmbeddedMqttBroker>());
+        services.AddSingleton<IMqttSessionRevoker>(sp => sp.GetRequiredService<EmbeddedMqttBroker>());
 
         // Cliente MQTT saliente legacy (IDeviceTransport). Conservado para rutas de
         // transporte no-broker; no se usa ya como IMqttPublisher.

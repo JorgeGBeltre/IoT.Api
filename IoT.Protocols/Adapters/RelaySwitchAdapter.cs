@@ -18,6 +18,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         if (topic.StartsWith("relays/", StringComparison.OrdinalIgnoreCase) ||
             topic.EndsWith("/state", StringComparison.OrdinalIgnoreCase) ||
             topic.EndsWith("_state", StringComparison.OrdinalIgnoreCase) ||
+            topic.EndsWith("/report", StringComparison.OrdinalIgnoreCase) ||
             topic.Contains("switch", StringComparison.OrdinalIgnoreCase) ||
             topic.Contains("relay", StringComparison.OrdinalIgnoreCase))
         {
@@ -194,7 +195,10 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         // Nombre del conmutador a partir del tópico: "device_switch1_state" → "device_switch1",
         // "device_switch1/state" → "device_switch1". Permite varios relés por equipo.
         string switchName = topic;
-        foreach (var suffix in new[] { "_state", "/state", "/command", "/get", "/set" })
+        // "/report" es el tópico por el que el equipo REPORTA su estado; "_state" es el de
+        // bajada con el que el servidor se lo fija. Se aceptan los dos para no perder nada
+        // de los equipos aún sin re-flashear.
+        foreach (var suffix in new[] { "/report", "_state", "/state", "/command", "/get", "/set" })
         {
             if (switchName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
             {

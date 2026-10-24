@@ -229,10 +229,10 @@ public class MqttTopicAclTests
     }
 
     [Theory]
-    // Lo que el firmware SÍ publica debe seguir permitido. Ojo al guion bajo: el relé
-    // publica su estado real en "<base>_state", que es SUBIDA, mientras "/state" (con barra)
-    // es la orden del servidor. Si se confundieran, el equipo no podría reportar su estado.
-    [InlineData("devices/A1B2C3D4E5F6/device_switch1_state")]
+    // Lo que el firmware SÍ publica debe seguir permitido. El relé reporta su estado en
+    // "<base>/report"; "<base>_state" y "/state" son canales del SERVIDOR (el firmware
+    // obedece lo que llegue ahí), así que NO aparecen en esta lista.
+    [InlineData("devices/A1B2C3D4E5F6/device_switch1/report")]
     [InlineData("devices/A1B2C3D4E5F6/device_switch1/get")]
     [InlineData("devices/A1B2C3D4E5F6/telemetry")]
     [InlineData("telemetry/A1B2C3D4E5F6")]
@@ -246,13 +246,17 @@ public class MqttTopicAclTests
     }
 
     [Fact]
-    public void TheUnderscoreStateTopicIsUplinkAndTheSlashStateTopicIsDownlink()
+    public void BothStateTopicsAreDownlinkAndOnlyReportIsUplink()
     {
-        // Distinción que el firmware hace y el ACL debe respetar byte a byte.
+        // Este test afirmaba lo contrario —que "_state" era subida— y así fijaba por escrito
+        // el fallo que permitía accionar el relé de un equipo ajeno. El firmware OBEDECE lo
+        // que llegue a los dos tópicos de estado; sólo "/report" es suyo.
         MqttTopicAcl.CanPublish($"devices/{Mine}/device_switch1_state", isServerOrigin: false, Mine)
-            .Should().Be(MqttTopicAcl.Decision.Allow);
+            .Should().Be(MqttTopicAcl.Decision.Deny);
         MqttTopicAcl.CanPublish($"devices/{Mine}/device_switch1/state", isServerOrigin: false, Mine)
             .Should().Be(MqttTopicAcl.Decision.Deny);
+        MqttTopicAcl.CanPublish($"devices/{Mine}/device_switch1/report", isServerOrigin: false, Mine)
+            .Should().Be(MqttTopicAcl.Decision.Allow);
     }
 
     [Theory]
@@ -316,6 +320,52 @@ public class MqttTopicAclTests
         // defensa real es doble: OnValidatingConnection rechaza ese ClientId en el CONNECT
         // (ClientIdentifierNotValid) y el ACL exige origen en proceso.
         MqttTopicAcl.ServerClientId.Should().Be("internal-server");
+    }
+
+    // ---------------------------------------------------------------------
+    // CRITICO-1 del informe: accionamiento fisico del rele por el canal _state
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void NobodyButTheServerCanDriveARelayThroughTheUnderscoreStateTopic()
+    {
+        // El firmware OBEDECE lo que llegue a "<base>_state": aplica el estado al relé
+        // (RelayFirmwareController, rama topic == stateTopic -> applyDesiredState). Mientras
+        // ese sufijo estuvo clasificado como SUBIDA, cualquiera autorizado a publicar
+        // telemetría podía CERRAR UN RELÉ en una instalación ajena. La credencial global lo
+        // podía hacer sobre cualquier equipo de cualquier tenant.
+        string victim = $"devices/{Other}/device_switch1_state";
+        string own = $"devices/{Mine}/device_switch1_state";
+
+        MqttTopicAcl.CanPublish(victim, isServerOrigin: false, Mine).Should().Be(MqttTopicAcl.Decision.Deny);
+        MqttTopicAcl.CanPublish(victim, isServerOrigin: false, null, isBootstrapCredential: true)
+            .Should().Be(MqttTopicAcl.Decision.Deny, "la credencial global no puede accionar el relé de nadie");
+        // Ni siquiera el propio equipo: ese canal es del servidor.
+        MqttTopicAcl.CanPublish(own, isServerOrigin: false, Mine).Should().Be(MqttTopicAcl.Decision.Deny);
+
+        MqttTopicAcl.CanPublish(victim, isServerOrigin: true, null).Should().Be(MqttTopicAcl.Decision.Allow);
+    }
+
+    [Fact]
+    public void TheDeviceReportsItsRelayStateOnItsOwnReportTopic()
+    {
+        // El equipo ya no publica en "_state": reporta en "<base>/report", que sigue siendo
+        // subida suya. Si esto se clasificara como bajada, el relé se quedaría mudo.
+        MqttTopicAcl.CanPublish($"devices/{Mine}/device_switch1/report", isServerOrigin: false, Mine)
+            .Should().Be(MqttTopicAcl.Decision.Allow);
+        MqttTopicAcl.CanPublish($"devices/{Other}/device_switch1/report", isServerOrigin: false, Mine)
+            .Should().Be(MqttTopicAcl.Decision.Deny);
+    }
+
+    [Theory]
+    // Variantes del sufijo: cualquier cosa que acabe en _state es canal del servidor.
+    [InlineData("devices/A1B2C3D4E5F6/device_switch1_state")]
+    [InlineData("devices/A1B2C3D4E5F6/rele_principal_state")]
+    [InlineData("devices/A1B2C3D4E5F6/zona3/salida_state")]
+    public void EveryUnderscoreStateSuffixIsTreatedAsDownlink(string topic)
+    {
+        MqttTopicAcl.CanPublish(topic, isServerOrigin: false, Mine).Should().Be(MqttTopicAcl.Decision.Deny);
+        MqttTopicAcl.CanPublish(topic, isServerOrigin: true, null).Should().Be(MqttTopicAcl.Decision.Allow);
     }
 
     // ---------------------------------------------------------------------

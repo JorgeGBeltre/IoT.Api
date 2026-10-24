@@ -89,8 +89,9 @@ public static class MqttTopicAcl
     /// Clasificarlos mal dejaba que un cliente que no es el servidor publicara órdenes a un
     /// equipo ajeno.
     ///
-    /// OJO con <c>devices/{id}/{base}_state</c> (guion bajo): ése lo PUBLICA el dispositivo
-    /// con su estado real, así que es subida y no debe entrar aquí.
+    /// OJO: <c>devices/{id}/{base}_state</c> (guion bajo) es BAJADA — el servidor fija ahí el
+    /// estado deseado y el firmware obedece. El equipo reporta su estado real en 
+    /// <c>{base}/report</c>, que sí es subida.
     /// </summary>
     private static bool IsDownlink(string topic)
     {
@@ -117,6 +118,19 @@ public static class MqttTopicAcl
                 last.Equals("commands", StringComparison.OrdinalIgnoreCase) ||
                 last.Equals("state", StringComparison.OrdinalIgnoreCase) ||
                 last.Equals("config", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // "<base>_state" (guion bajo) es el canal por el que el SERVIDOR fija el estado
+            // deseado de un relé, y el firmware OBEDECE lo que llegue ahí
+            // (RelayFirmwareController, rama topic == stateTopic -> applyDesiredState).
+            // Estaba clasificado como SUBIDA porque el equipo también publicaba su estado
+            // en ese mismo tópico; ya no lo hace (reporta en "<base>/report"), así que aquí
+            // es bajada sin ambigüedad. Mientras fue subida, cualquier cliente autorizado a
+            // publicar telemetría —incluida la credencial global— podía ACCIONAR FÍSICAMENTE
+            // el relé de cualquier equipo de cualquier tenant.
+            if (last.EndsWith("_state", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }

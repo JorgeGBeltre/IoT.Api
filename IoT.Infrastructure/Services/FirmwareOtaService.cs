@@ -123,9 +123,44 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
 
         if (existing != null)
         {
-            existing.SetActive(true);
+            // Re-subida de una versión existente: hay que APUNTAR AL BINARIO NUEVO. Antes
+            // sólo se re-activaba el registro, así que la flota seguía recibiendo el archivo
+            // viejo mientras la API respondía con la versión nueva, y el recién subido
+            // quedaba huérfano en disco.
+            string? previousSrc = existing.ReplaceBinary(
+                src: relativeFilePath,
+                fileSizeBytes: bytes.Length,
+                sha256: sha256,
+                totalChunks: totalChunks,
+                chunkSizeBytes: OtaChunker.DefaultChunkSizeBytes,
+                targetModel: targetModel,
+                featureDescription: featureDescription,
+                updatedFromIp: updatedFromIp);
+
             _firmwareRepository.Update(existing);
             record = existing;
+
+            // El binario anterior ya no lo referencia nadie: se elimina para no acumular
+            // imágenes muertas en el almacén. Se vuelve a validar la contención por si la
+            // fila venía de antes de esa comprobación.
+            if (previousSrc is not null &&
+                FirmwareStorage.TryResolveWithinTenant(tenantId, previousSrc, out var previousAbsolute) &&
+                File.Exists(previousAbsolute))
+            {
+                try
+                {
+                    File.Delete(previousAbsolute);
+                    _logger.LogInformation(
+                        "Firmware {Version} del tenant {TenantId} reemplazado; se eliminó el binario anterior.",
+                        normalizedVersion, tenantId);
+                }
+                catch (IOException ex)
+                {
+                    // No es motivo para fallar la subida: el registro ya apunta al nuevo.
+                    _logger.LogWarning(ex,
+                        "No se pudo eliminar el binario anterior de {Version}: {Src}", normalizedVersion, previousSrc);
+                }
+            }
         }
         else
         {
@@ -273,8 +308,38 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         }
         else
         {
-            var records = await _firmwareRepository.GetRecordsAsync(tenantId, take: 5, cancellationToken: cancellationToken);
-            targetRecord = records.FirstOrDefault(r => r.IsActive);
+            // "Rollback" sin versión explícita = volver a la ANTERIOR, no a la actual.
+            // Antes se tomaba el primer registro con IsActive, pero IsActive queda en true en
+            // TODOS los registros (Create lo pone a true, FirmwareVersionRecord.cs:48, y nada
+            // lo apaga: SetActive(false) no se llama en ninguna parte del repo) y la lista
+            // viene ordenada por CreatedAt DESCENDENTE, así que el "rollback" re-desplegaba
+            // exactamente la versión que acababa de fallar.
+            var rollbackDevice = await _deviceRepository.GetByIdAsync(deviceId, cancellationToken);
+            if (rollbackDevice is null || rollbackDevice.TenantId != tenantId)
+                return Result.Failure(new Error("Device.NotFound", "Dispositivo no encontrado."));
+
+            string? current = rollbackDevice.OtaTargetVersion ?? rollbackDevice.FirmwareVersion;
+            string currentNormalized = (current ?? string.Empty).Trim().TrimStart('v', 'V');
+
+            var records = await _firmwareRepository.GetRecordsAsync(
+                tenantId, take: 20, cancellationToken: cancellationToken);
+
+            targetRecord = records.FirstOrDefault(r =>
+                currentNormalized.Length == 0 ||
+                !string.Equals(
+                    r.FirmwareVersion.Trim().TrimStart('v', 'V'),
+                    currentNormalized,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (targetRecord is null)
+            {
+                return Result.Failure(new Error("Rollback.NoPreviousVersion",
+                    $"No hay ninguna versión distinta de '{current}' registrada para este tenant. Indica la versión destino de forma explícita."));
+            }
+
+            _logger.LogInformation(
+                "Rollback de {ChipId}: de '{Current}' a la anterior disponible '{Target}'.",
+                rollbackDevice.ChipId, current ?? "(desconocida)", targetRecord.FirmwareVersion);
         }
 
         if (targetRecord == null)
@@ -530,11 +595,36 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 device.ChipId, totalParts, startChunk);
 
             string otaTopic = OtaChunker.TopicFor(device.ChipId);
-            string legacyEventTopic = $"event/{device.ChipId}";
+            // Ya NO se publica una copia en "event/<chipId>": la librería del dispositivo sólo
+            // está suscrita a "ota/<chipId>" (MQTTOTAv5, coincidencia exacta), así que esa copia
+            // no la leía nadie y doblaba el tráfico de cada trozo.
 
             for (int partIndex = startChunk; partIndex <= totalParts; partIndex++)
             {
                 if (ct.IsCancellationRequested) break;
+
+                // Estado REAL en base de datos antes de cada trozo. Los reportes del
+                // dispositivo (un "error", o una cancelación del operador) llegan por OTRO
+                // ámbito y escriben sobre su propia instancia; esta bomba mantenía la suya y
+                // al persistir el progreso REESCRIBÍA la entidad completa con su snapshot
+                // viejo, BORRANDO el fallo recién registrado y siguiendo a la vez enviando
+                // trozos a un equipo que ya había abortado.
+                Device? current;
+                using (var checkScope = _scopeFactory.CreateScope())
+                {
+                    var checkRepo = checkScope.ServiceProvider.GetRequiredService<IDeviceRepository>();
+                    current = await checkRepo.GetByIdAsync(deviceId, ct);
+                }
+
+                if (current is null || !current.OtaInProgress ||
+                    !string.Equals(current.OtaTargetVersion, firmware.FirmwareVersion, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "Transmisión OTA detenida en el trozo {Part}/{Total}: la campaña de {ChipId} ya no está activa (en curso={InProgress}, versión objetivo='{Target}', error='{Error}').",
+                        partIndex, totalParts, device.ChipId,
+                        current?.OtaInProgress, current?.OtaTargetVersion, current?.OtaErrorMessage);
+                    return;
+                }
 
                 int offset = (partIndex - 1) * chunkSize;
                 int bytesToSend = Math.Min(chunkSize, firmwareBytes.Length - offset);
@@ -547,14 +637,22 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                     sha256Hex: sha256,
                     timestampUtc: DateTime.UtcNow);
 
-                // Publicar con QoS 1 a ota/{chipId}
+                // Publicar con QoS 1 a ota/{chipId}, el tópico al que el firmware está suscrito.
                 await publisher.PublishAsync(otaTopic, payload, qos: 1, retain: false, cancellationToken: ct);
-                // Publicar también a event/{chipId} para clientes legacy (paridad con References/Mqtt-Broker)
-                await publisher.PublishAsync(legacyEventTopic, payload, qos: 1, retain: false, cancellationToken: ct);
 
-                device.UpdateOtaProgress(partIndex, totalParts);
-                deviceRepo.Update(device);
-                await uow.SaveChangesAsync(ct);
+                // El progreso se aplica sobre la instancia RECIÉN LEÍDA y se guarda en su
+                // propio ámbito, para no arrastrar un snapshot viejo.
+                using (var saveScope = _scopeFactory.CreateScope())
+                {
+                    var saveRepo = saveScope.ServiceProvider.GetRequiredService<IDeviceRepository>();
+                    var saveUow = saveScope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+                    var toUpdate = await saveRepo.GetByIdAsync(deviceId, ct);
+                    if (toUpdate is null || !toUpdate.OtaInProgress) return;
+
+                    toUpdate.UpdateOtaProgress(partIndex, totalParts);
+                    saveRepo.Update(toUpdate);
+                    await saveUow.SaveChangesAsync(ct);
+                }
 
                 int pct = (partIndex * 100) / totalParts;
                 await notif.NotifyOtaProgressAsync(
@@ -568,15 +666,17 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                     status: "InProgress",
                     cancellationToken: ct);
 
-                // Retardo de 250ms (portado de FirmwareServices.cs) para no saturar memoria flash del microcontrolador
+                // Retardo de 250ms (portado de FirmwareServices.cs) para no saturar la
+                // memoria flash del microcontrolador.
                 await Task.Delay(250, ct);
             }
 
-            if (device.OtaLastChunkSent >= totalParts)
-            {
-                _logger.LogInformation("Todos los chunks OTA fueron transmitidos a {ChipId} ({Version})",
-                    device.ChipId, firmware.FirmwareVersion);
-            }
+            // Se han EMITIDO todos los trozos. Eso NO significa que la actualización haya
+            // funcionado: la campaña sólo se cierra cuando el propio equipo publica su
+            // reporte de éxito en ota/<chipId>/success. El estado sigue "en curso" a propósito.
+            _logger.LogInformation(
+                "Emitidos los {Total} trozos de {Version} a {ChipId}. Pendiente de que el equipo confirme.",
+                totalParts, firmware.FirmwareVersion, device.ChipId);
         }
         catch (Exception ex)
         {

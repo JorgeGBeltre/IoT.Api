@@ -100,6 +100,43 @@ public sealed class FirmwareVersionRecord : Entity<Guid>, ITenantScoped
         UpdatedAt = DateTime.UtcNow;
     }
 
+    /// <summary>
+    /// Reemplaza el binario de esta versión. Devuelve la ruta del archivo ANTERIOR si cambió,
+    /// para que quien llama pueda eliminarlo (queda sin referencias).
+    ///
+    /// Sin esto, re-subir una versión que ya existía sólo la re-activaba: el registro seguía
+    /// apuntando al archivo VIEJO con su sha256 y su número de trozos, así que la plataforma
+    /// continuaba distribuyendo el binario antiguo mientras la API respondía con la versión
+    /// nueva, y el archivo recién subido quedaba huérfano en disco.
+    /// </summary>
+    public string? ReplaceBinary(
+        string src,
+        long fileSizeBytes,
+        string sha256,
+        int totalChunks,
+        int chunkSizeBytes,
+        string? targetModel = null,
+        string? featureDescription = null,
+        string? updatedFromIp = null)
+    {
+        string? previousSrc = string.Equals(Src, src, StringComparison.OrdinalIgnoreCase) ? null : Src;
+
+        Src = src;
+        FileSizeBytes = fileSizeBytes;
+        Sha256 = sha256;
+        TotalChunks = totalChunks;
+        ChunkSizeBytes = chunkSizeBytes;
+        if (targetModel is not null) TargetModel = targetModel;
+        if (featureDescription is not null) FeatureDescription = featureDescription;
+        if (updatedFromIp is not null) UpdatedFromIp = updatedFromIp;
+
+        IsDeleted = false;
+        IsActive = true;
+        UpdatedAt = DateTime.UtcNow;
+
+        return previousSrc;
+    }
+
     public void SetActive(bool active)
     {
         IsActive = active;

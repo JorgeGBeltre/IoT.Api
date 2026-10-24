@@ -234,6 +234,27 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher
                     if (device is not null && device.HasMqttApiKey &&
                         apiKeySvc.Verify(apiKey, device.MqttApiKeyHash!))
                     {
+                        // El ClientId DEBE ser el del propio dispositivo. En MQTT 5 el ChipId
+                        // viaja en una UserProperty y el ClientId es independiente, así que sin
+                        // esta comprobación un equipo podía autenticarse con SU credencial y
+                        // elegir el ClientId de OTRO. Consecuencias: (a) expulsaba a la víctima
+                        // por takeover de forma sostenida; (b) con sesión persistente
+                        // (setCleanStart(false), que GLP y Relay usan) al reanudar esa sesión
+                        // heredaba sus SUSCRIPCIONES sin que el ACL volviera a evaluarse —sólo
+                        // corre en el paquete SUBSCRIBE—, y con ellas el firmware de la víctima.
+                        //
+                        // Los cinco firmwares reales ya usan ClientId == ChipId: Fligo y Toour
+                        // lo envían explícitamente como UserProperty, y Relay, GLP y GPS caen en
+                        // el respaldo chipId = ClientId. Esta comprobación no les quita nada.
+                        if (!string.Equals(e.ClientId, device.ChipId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogWarning(
+                                "Conexión rechazada: la credencial autentica al dispositivo {ChipId} pero el ClientId es '{ClientId}'. El ClientId debe ser el ChipId del equipo.",
+                                device.ChipId, e.ClientId);
+                            e.ReasonCode = MqttConnectReasonCode.ClientIdentifierNotValid;
+                            return;
+                        }
+
                         isDeviceKey = true;
                         // Identidad probada: la del REGISTRO, no la que declaró el cliente.
                         chipId = device.ChipId;

@@ -29,6 +29,19 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
     /// Si es null se usa el tope de subida por defecto.
     /// </summary>
     private readonly Microsoft.Extensions.Configuration.IConfiguration? _configuration;
+
+    /// <summary>
+    /// Limita las transmisiones simultaneas del PROCESO. Opcional para no romper los tests
+    /// que ya construian el servicio; si falta, no hay cota (comportamiento anterior).
+    /// </summary>
+    private readonly OtaTransmissionThrottle? _throttle;
+
+    /// <summary>
+    /// Permite que un apagado ordenado detenga las bombas en curso. La bomba se lanzaba con
+    /// CancellationToken.None, asi que su comprobacion de cancelacion era codigo muerto y
+    /// seguia publicando trozos contra un broker que ya se estaba parando.
+    /// </summary>
+    private readonly Microsoft.Extensions.Hosting.IHostApplicationLifetime? _appLifetime;
     private readonly ILogger<FirmwareOtaService> _logger;
 
     public FirmwareOtaService(
@@ -40,7 +53,9 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         IServiceScopeFactory scopeFactory,
         ILogger<FirmwareOtaService> logger,
         IAuditLogRepository? auditLogRepository = null,
-        Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
+        Microsoft.Extensions.Configuration.IConfiguration? configuration = null,
+        OtaTransmissionThrottle? throttle = null,
+        Microsoft.Extensions.Hosting.IHostApplicationLifetime? appLifetime = null)
     {
         _firmwareRepository = firmwareRepository;
         _deviceRepository = deviceRepository;
@@ -51,6 +66,8 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         _logger = logger;
         _auditLogRepository = auditLogRepository;
         _configuration = configuration;
+        _throttle = throttle;
+        _appLifetime = appLifetime;
     }
 
     public async Task<Result<FirmwareVersionRecordDto>> UploadFirmwareAsync(
@@ -364,7 +381,11 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             null, cancellationToken);
 
         // Lanzar transmisión en background
-        _ = Task.Run(() => DispatchOtaTransmissionAsync(tenantId, device.Id, firmware.Id, CancellationToken.None));
+        // Token del apagado ordenado, no CancellationToken.None: asi un Ctrl+C o un
+        // "docker compose stop" detienen la transmision en vez de dejarla publicando contra
+        // un broker que ya se esta cerrando.
+        var backgroundToken = _appLifetime?.ApplicationStopping ?? CancellationToken.None;
+        _ = Task.Run(() => DispatchOtaTransmissionAsync(tenantId, device.Id, firmware.Id, backgroundToken), backgroundToken);
 
         return Result.Success();
     }
@@ -703,6 +724,28 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
 
     private async Task DispatchOtaTransmissionAsync(Guid tenantId, Guid deviceId, Guid firmwareRecordId, CancellationToken ct)
     {
+        // Hueco del limitador de concurrencia ANTES de crear el ambito y de tocar la base:
+        // un rollout de grupo crea una tarea por dispositivo, y si cada una abriera su
+        // DbContext y leyera el registro antes de esperar, un grupo grande tendria N
+        // contextos vivos sin hacer nada. Sin el limitador, ademas, eran N bombas publicando
+        // a la vez contra el mismo broker.
+        IDisposable? throttleSlot = null;
+        if (_throttle is not null)
+        {
+            try
+            {
+                throttleSlot = await _throttle.AcquireAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation(
+                    "Transmision OTA del dispositivo {DeviceId} cancelada mientras esperaba hueco (apagado del servicio).",
+                    deviceId);
+                return;
+            }
+        }
+
+        using var _throttleSlotHolder = throttleSlot;
         using var scope = _scopeFactory.CreateScope();
         var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
         var firmwareRepo = scope.ServiceProvider.GetRequiredService<IFirmwareVersionRecordRepository>();
@@ -737,10 +780,20 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 return;
             }
 
-            byte[] firmwareBytes = await File.ReadAllBytesAsync(fullPath, ct);
+            // La imagen NO se carga en memoria: antes era un File.ReadAllBytesAsync por
+            // dispositivo, asi que un rollout de grupo de 100 equipos con una imagen de 1 MB
+            // eran 100 copias completas simultaneas (en el Large Object Heap). Ahora cada
+            // bomba lee del disco solo el trozo que va a publicar, reutilizando un unico
+            // buffer del tamano del chunk.
             int chunkSize = firmware.ChunkSizeBytes > 0 ? firmware.ChunkSizeBytes : OtaChunker.DefaultChunkSizeBytes;
-            int totalParts = OtaChunker.CountChunks(firmwareBytes.Length, chunkSize);
+            long fileLength = new FileInfo(fullPath).Length;
+            int totalParts = OtaChunker.CountChunks(fileLength, chunkSize);
             string sha256 = firmware.Sha256;
+
+            await using var image = new FileStream(
+                fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: chunkSize, useAsync: true);
+            var chunkBuffer = new byte[chunkSize];
 
             int startChunk = Math.Max(1, device.OtaLastChunkSent + 1);
             _logger.LogInformation(
@@ -779,14 +832,22 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                     return;
                 }
 
-                int offset = (partIndex - 1) * chunkSize;
-                int bytesToSend = Math.Min(chunkSize, firmwareBytes.Length - offset);
+                long offset = (long)(partIndex - 1) * chunkSize;
+                image.Position = offset;
+                int bytesToSend = await image.ReadAsync(chunkBuffer.AsMemory(0, (int)Math.Min(chunkSize, fileLength - offset)), ct);
+                if (bytesToSend <= 0)
+                {
+                    _logger.LogError(
+                        "Transmision OTA de {ChipId} abortada: no se pudieron leer los bytes del trozo {Part}/{Total}.",
+                        device.ChipId, partIndex, totalParts);
+                    return;
+                }
 
                 string payload = OtaChunker.BuildChunkPayload(
                     firmwareVersion: firmware.FirmwareVersion,
                     partIndex: partIndex,
                     totalParts: totalParts,
-                    chunk: firmwareBytes.AsSpan(offset, bytesToSend),
+                    chunk: chunkBuffer.AsSpan(0, bytesToSend),
                     sha256Hex: sha256,
                     timestampUtc: DateTime.UtcNow);
 

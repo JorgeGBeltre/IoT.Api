@@ -55,6 +55,9 @@ public static class DependencyInjection
         services.AddScoped<ITenantSettingsRepository, TenantSettingsRepository>();
         services.AddScoped<IFirmwareVersionRecordRepository, FirmwareVersionRecordRepository>();
         services.AddScoped<IFirmwareOtaService, Services.FirmwareOtaService>();
+        // Limitador de transmisiones OTA simultaneas. Singleton a proposito: el limite es del
+        // PROCESO, no de la peticion que origino el rollout.
+        services.AddSingleton<Services.OtaTransmissionThrottle>();
 
         // Security & Communication Services
         services.AddSingleton<IPasswordHasher, Security.BCryptPasswordHasher>();
@@ -118,6 +121,9 @@ public static class DependencyInjection
     /// </summary>
     public static IServiceCollection AddDeviceFacingGateways(this IServiceCollection services)
     {
+        // Cierra las campanas OTA que quedaron a medias por un reinicio del proceso. Va aqui
+        // porque la transmision vive en este mismo proceso.
+        services.AddHostedService<Services.OtaStartupReconciliationService>();
         services.AddHostedService(sp => sp.GetRequiredService<EmbeddedMqttBroker>());
         services.AddHostedService(sp => sp.GetRequiredService<Tcp.MultiProtocolTcpGatewayService>());
         return services;

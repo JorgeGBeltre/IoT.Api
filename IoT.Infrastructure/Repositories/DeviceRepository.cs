@@ -53,6 +53,24 @@ public sealed class DeviceRepository : IDeviceRepository
             .AnyAsync(d => d.ChipId == chipId, cancellationToken);
     }
 
+    /// <summary>
+    /// Deliberadamente SIN filtro de tenant y sin Include: lo usa la reconciliacion de
+    /// arranque, que es una tarea del proceso y no de una peticion, y solo necesita el estado
+    /// OTA de cada equipo.
+    /// </summary>
+    public async Task<IReadOnlyList<Device>> GetDevicesWithOtaInProgressAsync(CancellationToken cancellationToken = default)
+    {
+        // IgnoreQueryFilters es IMPRESCINDIBLE aqui: el DbContext aplica un filtro global
+        // TenantId == CurrentTenantId a toda entidad con tenant, y esta consulta corre al
+        // ARRANCAR el proceso, cuando no hay tenant ambiental. Sin esto devolvia vacio EN
+        // SILENCIO y la reconciliacion no cerraba ninguna campana (comprobado en vivo: el
+        // equipo seguia marcado como "actualizando" tras reiniciar el servicio).
+        return await _context.Devices
+            .IgnoreQueryFilters()
+            .Where(d => d.OtaInProgress)
+            .ToListAsync(cancellationToken);
+    }
+
     public async Task<IReadOnlyList<Device>> GetByTenantAsync(Guid tenantId, DeviceOperationalStatus? status = null, CancellationToken cancellationToken = default)
     {
         var query = _context.Devices

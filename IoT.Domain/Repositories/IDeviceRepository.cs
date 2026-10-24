@@ -13,6 +13,13 @@ public interface IDeviceRepository
     Task<bool> ExistsByChipIdGlobalAsync(string chipId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Device>> GetByTenantAsync(Guid tenantId, DeviceOperationalStatus? status = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Device>> GetByGroupIdAsync(Guid tenantId, Guid groupId, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Dispositivos marcados como "actualizacion en curso". Lo usa la reconciliacion de
+    /// arranque: si el proceso se reinicio a mitad de un rollout, la bomba que lo enviaba
+    /// murio con el y el equipo queda en ese estado para siempre, sin aborto ni reanudacion.
+    /// </summary>
+    Task<IReadOnlyList<Device>> GetDevicesWithOtaInProgressAsync(CancellationToken cancellationToken = default);
+
     Task AddAsync(Device device, CancellationToken cancellationToken = default);
     void Update(Device device);
     void Delete(Device device);

@@ -13,18 +13,21 @@ public interface IFirmwareOtaService
         string? targetModel = null,
         string? featureDescription = null,
         string? updatedFromIp = null,
+        string? actor = null,
         CancellationToken cancellationToken = default);
 
     Task<Result> StartDeviceOtaAsync(
         Guid tenantId,
         Guid deviceId,
         string version,
+        string? actor = null,
         CancellationToken cancellationToken = default);
 
     Task<Result> StartGroupOtaAsync(
         Guid tenantId,
         Guid groupId,
         string version,
+        string? actor = null,
         CancellationToken cancellationToken = default);
 
     Task<Result> RollbackDeviceOtaAsync(
@@ -32,6 +35,7 @@ public interface IFirmwareOtaService
         Guid deviceId,
         Guid? firmwareRecordId = null,
         string? targetVersion = null,
+        string? actor = null,
         CancellationToken cancellationToken = default);
 
     Task<Result<IReadOnlyList<FirmwareVersionRecordDto>>> GetFirmwareRecordsAsync(

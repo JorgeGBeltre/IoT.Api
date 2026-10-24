@@ -95,6 +95,7 @@ public sealed class FirmwareController : ControllerBase
             targetModel: model,
             featureDescription: description,
             updatedFromIp: ip,
+            actor: User.Identity?.Name,
             cancellationToken: cancellationToken);
 
         if (uploadResult.IsFailure)
@@ -103,13 +104,11 @@ public sealed class FirmwareController : ControllerBase
         // Si se indicó un DeviceId o GroupId, arrancar OTA en background automáticamente
         if (legacyParams?.DeviceId.HasValue == true && legacyParams.DeviceId.Value != Guid.Empty)
         {
-            await _firmwareOtaService.StartDeviceOtaAsync(
-                _tenantContext.TenantId, legacyParams.DeviceId.Value, version, cancellationToken);
+            await _firmwareOtaService.StartDeviceOtaAsync(_tenantContext.TenantId, legacyParams.DeviceId.Value, version, User.Identity?.Name, cancellationToken);
         }
         else if (legacyParams?.GroupId.HasValue == true && legacyParams.GroupId.Value != Guid.Empty)
         {
-            await _firmwareOtaService.StartGroupOtaAsync(
-                _tenantContext.TenantId, legacyParams.GroupId.Value, version, cancellationToken);
+            await _firmwareOtaService.StartGroupOtaAsync(_tenantContext.TenantId, legacyParams.GroupId.Value, version, User.Identity?.Name, cancellationToken);
         }
 
         return Accepted(uploadResult.Value);
@@ -131,8 +130,7 @@ public sealed class FirmwareController : ControllerBase
         if (string.IsNullOrWhiteSpace(request?.FirmwareVersion))
             return BadRequest(new { error = "FirmwareVersion es obligatoria." });
 
-        var result = await _firmwareOtaService.StartDeviceOtaAsync(
-            _tenantContext.TenantId, deviceId, request.FirmwareVersion, cancellationToken);
+        var result = await _firmwareOtaService.StartDeviceOtaAsync(_tenantContext.TenantId, deviceId, request.FirmwareVersion, User.Identity?.Name, cancellationToken);
 
         if (result.IsFailure)
             return BadRequest(new { error = result.Error.Message });
@@ -156,8 +154,7 @@ public sealed class FirmwareController : ControllerBase
         if (string.IsNullOrWhiteSpace(request?.FirmwareVersion))
             return BadRequest(new { error = "FirmwareVersion es obligatoria." });
 
-        var result = await _firmwareOtaService.StartGroupOtaAsync(
-            _tenantContext.TenantId, groupId, request.FirmwareVersion, cancellationToken);
+        var result = await _firmwareOtaService.StartGroupOtaAsync(_tenantContext.TenantId, groupId, request.FirmwareVersion, User.Identity?.Name, cancellationToken);
 
         if (result.IsFailure)
             return BadRequest(new { error = result.Error.Message });
@@ -188,8 +185,7 @@ public sealed class FirmwareController : ControllerBase
         var recordId = request?.FirmwareRecordId ?? legacyParams?.FirmwareRecordId;
         var version = request?.TargetVersion ?? legacyParams?.FirmwareVersion;
 
-        var result = await _firmwareOtaService.RollbackDeviceOtaAsync(
-            _tenantContext.TenantId, targetDeviceId.Value, recordId, version, cancellationToken);
+        var result = await _firmwareOtaService.RollbackDeviceOtaAsync(_tenantContext.TenantId, targetDeviceId.Value, recordId, version, User.Identity?.Name, cancellationToken);
 
         if (result.IsFailure)
             return BadRequest(new { error = result.Error.Message });

@@ -119,17 +119,27 @@ public sealed class OtaDeviceAdapter : IDeviceProtocolAdapter
                     attributes["ota_state_name"] = sName.GetString() ?? string.Empty;
                 }
 
-                // Timestamp
-                if (root.TryGetProperty("ts", out var tsElem) && tsElem.TryGetInt64(out var tsLong))
+                // "ts" NO es un epoch: la librería del dispositivo publica millis(), es decir
+                // los milisegundos desde que ARRANCÓ (MQTTOTAv5.cpp:1037,1064,1091,1111).
+                // Interpretarlo como epoch daba fechas de 1970, y como el pipeline usa
+                // RecordedAt para `device.RecordTelemetry(...)`, CADA reporte OTA mandaba el
+                // last-seen del equipo a 1970 y la UI lo mostraba como no visto mientras se
+                // estaba actualizando; además ensuciaba el histórico con registros de 1970.
+                // Se conserva como métrica, que es información útil de verdad, y la fecha del
+                // evento es la de recepción.
+                if (root.TryGetProperty("ts", out var tsElem) && tsElem.TryGetInt64(out var uptimeMs) && uptimeMs >= 0)
                 {
-                    recordedAt = DateTimeOffset.FromUnixTimeMilliseconds(tsLong).UtcDateTime;
+                    metrics["device_uptime_ms"] = uptimeMs;
                 }
             }
 
             attributes["ota_action"] = action;
 
-            if (string.IsNullOrEmpty(chipId))
-                chipId = "UNKNOWN-OTA-DEVICE";
+            // Sin identidad NO se inventa un marcador: "UNKNOWN-OTA-DEVICE" creaba un
+            // dispositivo fantasma y una fila de auditoría por reporte. Se deja vacío para que
+            // mande la identidad autenticada de la conexión, y si no hay ninguna el pipeline
+            // rechaza la trama.
+
 
             return new NormalizedTelemetryEvent
             {
@@ -147,15 +157,15 @@ public sealed class OtaDeviceAdapter : IDeviceProtocolAdapter
         }
     }
 
-    private static string ExtractChipId(string topic)
-    {
-        var parts = topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length >= 2 && parts[0].Equals("ota", StringComparison.OrdinalIgnoreCase))
-        {
-            return parts[1];
-        }
-        return string.Empty;
-    }
+    /// <summary>
+    /// Identidad del equipo tomada del tópico. Se delega en <see cref="TopicIdentity"/>, que
+    /// salta las palabras de protocolo: este adaptador devolvía parts[1] a secas, así que de
+    /// un "ota/progress" sacaba "progress" como ChipId y creaba un dispositivo fantasma.
+    /// Devuelve cadena vacía si el tópico no lleva identidad, para que mande la autenticada
+    /// de la conexión.
+    /// </summary>
+    private static string ExtractChipId(string topic) =>
+        Routing.TopicIdentity.ExtractDeviceId(topic) ?? string.Empty;
 
     private static string DetermineAction(string topic)
     {

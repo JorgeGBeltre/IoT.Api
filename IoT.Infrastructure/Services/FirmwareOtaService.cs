@@ -61,6 +61,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         string? targetModel = null,
         string? featureDescription = null,
         string? updatedFromIp = null,
+        string? actor = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(version))
@@ -171,7 +172,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             return await PersistFirmwareRecordAsync(
                 tenantId, normalizedVersion, relativeFilePath, absoluteFilePath,
                 totalBytes, sha256, totalChunks, targetModel, featureDescription, updatedFromIp,
-                cancellationToken);
+                actor, cancellationToken);
         }
         finally
         {
@@ -201,6 +202,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         string? targetModel,
         string? featureDescription,
         string? updatedFromIp,
+        string? actor,
         CancellationToken cancellationToken)
     {
         try
@@ -278,6 +280,10 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 "Firmware {Version} subido exitosamente para tenant {TenantId}. Tamaño: {Bytes} bytes, Chunks: {Chunks}",
                 normalizedVersion, tenantId, fileSizeBytes, totalChunks);
 
+            await AuditAsync(tenantId, actor, "FirmwareUploaded",
+                $"Versión {normalizedVersion} subida ({fileSizeBytes} bytes, sha256 {sha256}, {totalChunks} trozos).",
+                updatedFromIp, cancellationToken);
+
             return Result<FirmwareVersionRecordDto>.Success(MapToDto(record));
         }
         catch (Exception)
@@ -298,6 +304,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         Guid tenantId,
         Guid deviceId,
         string version,
+        string? actor = null,
         CancellationToken cancellationToken = default)
     {
         var device = await _deviceRepository.GetByIdAsync(deviceId, cancellationToken);
@@ -351,6 +358,11 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             status: "Starting",
             cancellationToken: cancellationToken);
 
+        await AuditAsync(tenantId, actor, "FirmwareRolloutStarted",
+            $"Actualización de {device.ChipId} a la versión {normalizedVersion} " +
+            $"({firmware.TotalChunks} trozos, sha256 {firmware.Sha256}).",
+            null, cancellationToken);
+
         // Lanzar transmisión en background
         _ = Task.Run(() => DispatchOtaTransmissionAsync(tenantId, device.Id, firmware.Id, CancellationToken.None));
 
@@ -361,6 +373,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         Guid tenantId,
         Guid groupId,
         string version,
+        string? actor = null,
         CancellationToken cancellationToken = default)
     {
         var devices = await _deviceRepository.GetByGroupIdAsync(tenantId, groupId, cancellationToken);
@@ -370,9 +383,13 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         int startedCount = 0;
         foreach (var device in devices)
         {
-            var res = await StartDeviceOtaAsync(tenantId, device.Id, version, cancellationToken);
+            var res = await StartDeviceOtaAsync(tenantId, device.Id, version, actor, cancellationToken);
             if (res.IsSuccess) startedCount++;
         }
+
+        await AuditAsync(tenantId, actor, "FirmwareGroupRolloutStarted",
+            $"Actualización del grupo {groupId} a la versión {version}: {startedCount} de {devices.Count} dispositivos iniciados.",
+            null, cancellationToken);
 
         _logger.LogInformation("Actualización OTA grupal iniciada para {Count} de {Total} dispositivos en grupo {GroupId}",
             startedCount, devices.Count, groupId);
@@ -385,6 +402,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         Guid deviceId,
         Guid? firmwareRecordId = null,
         string? targetVersion = null,
+        string? actor = null,
         CancellationToken cancellationToken = default)
     {
         FirmwareVersionRecord? targetRecord = null;
@@ -450,7 +468,11 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         _logger.LogInformation("Ejecutando rollback de firmware para dispositivo {DeviceId} a versión {Version}",
             deviceId, targetRecord.FirmwareVersion);
 
-        return await StartDeviceOtaAsync(tenantId, deviceId, targetRecord.FirmwareVersion, cancellationToken);
+        await AuditAsync(tenantId, actor, "FirmwareRollbackRequested",
+            $"Reversión del dispositivo {deviceId} a la versión {targetRecord.FirmwareVersion}.",
+            null, cancellationToken);
+
+        return await StartDeviceOtaAsync(tenantId, deviceId, targetRecord.FirmwareVersion, actor, cancellationToken);
     }
 
     public async Task<Result<IReadOnlyList<FirmwareVersionRecordDto>>> GetFirmwareRecordsAsync(
@@ -582,8 +604,37 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 catch (JsonException) { }
             }
 
-            if (reportedVer != null &&
-                device.OtaTargetVersion != null &&
+            // PRUEBA OBLIGATORIA de lo que se instaló. Antes la comprobación era vacua si el
+            // reporte OMITÍA el campo "version": `reportedVer` quedaba null, la rama de
+            // desajuste se saltaba y la campaña se cerraba como COMPLETADA sin que el equipo
+            // hubiera demostrado nada. La librería real siempre incluye la versión
+            // (MQTTOTAv5: {"device","version","success","bytes","ts"}), así que exigirla no
+            // rompe ningún equipo legítimo y cierra el hueco para uno malicioso.
+            if (reportedVer is null)
+            {
+                const string sinVersion =
+                    "El dispositivo reportó éxito sin indicar la versión instalada: no se puede dar la campaña por completada.";
+                _logger.LogError("OTA de {ChipId} marcada fallida: {Detalle}", chipId, sinVersion);
+
+                device.FailOta(sinVersion);
+                _deviceRepository.Update(device);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                await _notificationService.NotifyOtaProgressAsync(
+                    tenantId: device.TenantId,
+                    deviceId: device.Id,
+                    chipId: device.ChipId,
+                    version: device.OtaTargetVersion ?? "unknown",
+                    currentChunk: device.OtaLastChunkSent,
+                    totalChunks: device.OtaTotalChunks,
+                    percentage: 0,
+                    status: "Failed",
+                    errorMessage: sinVersion,
+                    cancellationToken: cancellationToken);
+                return;
+            }
+
+            if (device.OtaTargetVersion != null &&
                 !VersionsMatch(reportedVer, device.OtaTargetVersion))
             {
                 string mismatch =
@@ -796,6 +847,49 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             catch { }
         }
     }
+    /// <summary>
+    /// Deja rastro de QUIÉN hizo qué sobre el firmware. El repositorio de auditoría estaba
+    /// inyectado en este servicio y NO se usaba en ninguna línea: flashear un equipo —una
+    /// operación irreversible sobre hardware ajeno— no dejaba ningún registro de autoría.
+    ///
+    /// Nunca propaga una excepción: un fallo al auditar no debe tumbar la operación que se
+    /// acaba de hacer, pero sí queda en el log.
+    /// </summary>
+    private async Task AuditAsync(
+        Guid tenantId,
+        string? actor,
+        string action,
+        string details,
+        string? ipAddress,
+        CancellationToken cancellationToken)
+    {
+        if (_auditLogRepository is null) return;
+
+        try
+        {
+            var entry = new AuditLog(
+                id: Guid.NewGuid(),
+                tenantId: tenantId,
+                userId: null,
+                username: string.IsNullOrWhiteSpace(actor) ? "(desconocido)" : actor!,
+                action: action,
+                details: Truncate(details, MaxAuditDetailsLength) ?? string.Empty,
+                ipAddress: ipAddress,
+                userAgent: "IoT.Api/Firmware");
+
+            await _auditLogRepository.AddAsync(entry, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "No se pudo registrar la auditoría de '{Action}' para el tenant {TenantId}", action, tenantId);
+        }
+    }
+
+    /// <summary>Cota del detalle de auditoría; la columna no es ilimitada.</summary>
+    private const int MaxAuditDetailsLength = 1000;
+
     /// <summary>Cotas de las cadenas que escribe el DISPOSITIVO y que se persisten.</summary>
     private const int MaxVersionLength = 64;
     private const int MaxErrorLength = 500;

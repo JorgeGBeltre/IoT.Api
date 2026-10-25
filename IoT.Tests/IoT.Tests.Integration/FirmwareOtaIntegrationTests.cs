@@ -4,6 +4,7 @@ using IoT.Application.Common.Interfaces;
 using IoT.Domain.Entities;
 using IoT.Domain.Repositories;
 using IoT.Infrastructure.Services;
+using IoT.Protocols.Ota;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -198,5 +199,134 @@ public sealed class FirmwareOtaIntegrationTests
         device.OtaCompleted.Should().BeTrue();
         device.FirmwareVersion.Should().Be("1.1.0");
         device.OtaErrorMessage.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task FirmwareOtaService_HandleDeviceOtaReport_IgnoresReportsWithNoCampaignInProgress()
+    {
+        // Test NEGATIVO de la guarda `if (!device.OtaInProgress) return;`. Sin él, un equipo
+        // (o un reporte forjado) podía marcar como COMPLETADA una OTA que nadie lanzó y dejar
+        // registrada una versión de firmware que nunca se le envió. El otro test siempre
+        // relanzaba la campaña antes del reporte, así que la guarda nunca corría en negativo:
+        // comentarla no rompía nada. Aquí el dispositivo NO tiene campaña en curso.
+        var tenantId = Guid.NewGuid();
+        var device = Device.Create(tenantId, "NOCAMP_CHIP", "11:22:33:44:55:77", "Sin campaña", "ESP32", "Espressif", "1.0.0").Value;
+        device.OtaInProgress.Should().BeFalse("el dispositivo no tiene ninguna OTA en curso");
+
+        var devRepoMock = new Mock<IDeviceRepository>();
+        devRepoMock.Setup(r => r.GetByChipIdGlobalAsync("NOCAMP_CHIP", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(device);
+        var uowMock = new Mock<IUnitOfWork>();
+
+        var service = new FirmwareOtaService(
+            new Mock<IFirmwareVersionRecordRepository>().Object,
+            devRepoMock.Object,
+            uowMock.Object,
+            new Mock<IMqttPublisher>().Object,
+            new Mock<IFleetNotificationService>().Object,
+            new Mock<IServiceScopeFactory>().Object,
+            new Mock<ILogger<FirmwareOtaService>>().Object);
+
+        // Un "success" (con versión ajena) sin campaña en curso NO debe tocar el estado.
+        await service.HandleDeviceOtaReportAsync("NOCAMP_CHIP", "success", "{\"version\":\"9.9.9\",\"success\":true}");
+
+        device.OtaCompleted.Should().BeFalse("un success sin campaña no completa nada");
+        device.FirmwareVersion.Should().Be("1.0.0", "no se registra una versión que nadie envió");
+        // Y nada se persiste.
+        devRepoMock.Verify(r => r.Update(It.IsAny<Device>()), Times.Never);
+        uowMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task FirmwareOtaService_Pump_PublishesEachChunkToTheDeviceOtaTopicWithExpiry()
+    {
+        // La bomba corre en Task.Run con un IServiceScopeFactory. Antes el test la construía
+        // con un Mock<IServiceScopeFactory> SIN Setup, así que CreateScope() devolvía null, la
+        // bomba moría con NullReferenceException dentro del Task.Run sin observador, y el test
+        // pasaba igual: no había NINGUNA prueba de que un trozo llegara a ota/{chipId}. Aquí se
+        // usa un ServiceProvider REAL y se verifica la entrega (y la caducidad de MEDIUM-7).
+        var tenantId = Guid.NewGuid();
+        var deviceId = Guid.NewGuid();
+        var device = Device.Create(tenantId, "CHUNK_CHIP", "AA:BB:CC:11:22:88", "D", "ESP32", "x").Value;
+        // En curso con la versión objetivo que publicará la bomba: el re-check por trozo exige
+        // que current.OtaTargetVersion coincida con firmware.FirmwareVersion (la toma atómica
+        // está mockeada y no muta esta instancia, así que se pone en curso a mano).
+        device.StartOta("1.4.0", 3);
+
+        string relativeSrc = System.IO.Path.Combine(
+            FirmwareStorage.RootFolder, FirmwareStorage.FirmwareFolder, tenantId.ToString(), "1.4.0", "fw.bin");
+        string fullPath = System.IO.Path.Combine(AppContext.BaseDirectory, relativeSrc);
+        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(fullPath)!);
+        var bytes = new byte[5000];
+        bytes[0] = 0xE9;
+        await System.IO.File.WriteAllBytesAsync(fullPath, bytes);
+
+        try
+        {
+            var firmware = FirmwareVersionRecord.Create(tenantId, "1.4.0", relativeSrc, bytes.Length, "sha", 3).Value;
+            // Mismo cálculo que la bomba, para no acoplar el esperado a un tamaño de chunk fijo.
+            int chunkSize = firmware.ChunkSizeBytes > 0 ? firmware.ChunkSizeBytes : OtaChunker.DefaultChunkSizeBytes;
+            int expectedChunks = OtaChunker.CountChunks(bytes.Length, chunkSize);
+            expectedChunks.Should().BeGreaterThan(1, "el test necesita varios trozos para ser significativo");
+
+            var devRepoMock = new Mock<IDeviceRepository>();
+            devRepoMock.Setup(r => r.GetByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>())).ReturnsAsync(device);
+            devRepoMock.Setup(r => r.TryStartOtaCampaignAsync(
+                    It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            var fwRepoMock = new Mock<IFirmwareVersionRecordRepository>();
+            fwRepoMock.Setup(r => r.GetByVersionAsync(tenantId, "1.4.0", It.IsAny<CancellationToken>())).ReturnsAsync(firmware);
+            fwRepoMock.Setup(r => r.GetByIdAsync(firmware.Id, It.IsAny<CancellationToken>())).ReturnsAsync(firmware);
+            var uowMock = new Mock<IUnitOfWork>();
+            var notifMock = new Mock<IFleetNotificationService>();
+
+            int published = 0;
+            var seenOptions = new System.Collections.Concurrent.ConcurrentBag<MqttPublishOptions>();
+            var mqttMock = new Mock<IMqttPublisher>();
+            mqttMock.Setup(p => p.PublishAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<MqttPublishOptions>(), It.IsAny<CancellationToken>()))
+                .Callback<string, string, MqttPublishOptions, CancellationToken>((t, pl, o, c) =>
+                {
+                    seenOptions.Add(o);
+                    System.Threading.Interlocked.Increment(ref published);
+                })
+                .Returns(Task.CompletedTask);
+
+            var services = new ServiceCollection();
+            services.AddSingleton<IDeviceRepository>(devRepoMock.Object);
+            services.AddSingleton<IFirmwareVersionRecordRepository>(fwRepoMock.Object);
+            services.AddSingleton<IUnitOfWork>(uowMock.Object);
+            services.AddSingleton<IMqttPublisher>(mqttMock.Object);
+            services.AddSingleton<IFleetNotificationService>(notifMock.Object);
+            using var sp = services.BuildServiceProvider();
+
+            var service = new FirmwareOtaService(
+                fwRepoMock.Object, devRepoMock.Object, uowMock.Object, mqttMock.Object,
+                notifMock.Object, sp.GetRequiredService<IServiceScopeFactory>(),
+                new Mock<ILogger<FirmwareOtaService>>().Object);
+
+            var start = await service.StartDeviceOtaAsync(tenantId, deviceId, "1.4.0");
+            start.IsSuccess.Should().BeTrue();
+
+            // La bomba corre en background; esperar a que publique todos los trozos (250 ms/trozo).
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (published < expectedChunks && DateTime.UtcNow < deadline)
+                await Task.Delay(50);
+
+            mqttMock.Verify(p => p.PublishAsync("ota/CHUNK_CHIP", It.IsAny<string>(), It.IsAny<MqttPublishOptions>(), It.IsAny<CancellationToken>()),
+                Times.Exactly(expectedChunks));
+            // MEDIUM-7: todos los trozos llevan caducidad para no reinyectarse al reconectar.
+            seenOptions.Should().OnlyContain(o => o.MessageExpiryInterval != null && o.MessageExpiryInterval > 0);
+        }
+        finally
+        {
+            // La bomba mantiene abierto el FileStream hasta que termina el último trozo (tras
+            // su retardo de 250 ms); el borrado se reintenta hasta que lo suelta. Best-effort:
+            // es un fichero temporal del test.
+            for (int i = 0; i < 20 && System.IO.File.Exists(fullPath); i++)
+            {
+                try { System.IO.File.Delete(fullPath); break; }
+                catch (System.IO.IOException) { await Task.Delay(100); }
+            }
+        }
     }
 }

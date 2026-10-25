@@ -170,16 +170,22 @@ public class MqttTopicAclTests
     // frontera de aislamiento entre tenants. Esa frontera vive en la INGESTA
     // (IngestTelemetryCommand: rechaza la trama si el dispositivo resuelto es de otro tenant
     // que el de la credencial), probada en BootstrapCredentialTenantScopeTests. Que estos
-    // casos den Allow aquí NO es un permiso para inyectar entre tenants (MEDIUM-2): ese
+    // casos no sean Deny aquí NO es un permiso para inyectar entre tenants (MEDIUM-2): ese
     // rechazo ocurre aguas abajo.
-    [InlineData("telemetry")]
-    [InlineData("glp/telemetria/GLP-TANK01")]
-    [InlineData("relay/telemetria/RELAY-CTRL01")]
-    [InlineData("devices/FFEEDDCCBBAA/telemetry")]
-    public void TheBootstrapCredentialMayPublishTelemetryForAnyDevice(string topic)
+    //
+    // Se afirma la decisión EXACTA, no "cualquiera de las dos permisivas": un tópico con dueño
+    // reconocido (devices/<id>, glp/<sub>/<id>) da Allow, y uno sin identificador (telemetry
+    // pelado, relay/... cuyo prefijo no es de ámbito) da AllowSharedLegacy. Un BeOneOf(Allow,
+    // AllowSharedLegacy) pasaba con cualquiera de las dos semánticas y no fijaba ninguna, así
+    // que no habría cazado un trasvase silencioso entre ellas.
+    [InlineData("telemetry", MqttTopicAcl.Decision.AllowSharedLegacy)]
+    [InlineData("glp/telemetria/GLP-TANK01", MqttTopicAcl.Decision.Allow)]
+    [InlineData("relay/telemetria/RELAY-CTRL01", MqttTopicAcl.Decision.AllowSharedLegacy)]
+    [InlineData("devices/FFEEDDCCBBAA/telemetry", MqttTopicAcl.Decision.Allow)]
+    public void TheBootstrapCredentialMayPublishTelemetryForAnyDevice(string topic, MqttTopicAcl.Decision expected)
     {
-        var decision = MqttTopicAcl.CanPublish(topic, isServerOrigin: false, null, isBootstrapCredential: true);
-        decision.Should().BeOneOf(MqttTopicAcl.Decision.Allow, MqttTopicAcl.Decision.AllowSharedLegacy);
+        MqttTopicAcl.CanPublish(topic, isServerOrigin: false, null, isBootstrapCredential: true)
+            .Should().Be(expected);
     }
 
     [Theory]
@@ -215,6 +221,11 @@ public class MqttTopicAclTests
     // el relé de un equipo ajeno.
     [InlineData("devices/A1B2C3D4E5F6/device_switch1/command")]
     [InlineData("devices/A1B2C3D4E5F6/device_switch1/state")]
+    // El relé se suscribe al "<base>_state" (guion bajo): el servidor fija ahí el estado
+    // deseado y el firmware OBEDECE. Es la bajada que, clasificada como subida, dejaba
+    // accionar físicamente el relé de un equipo ajeno (CRÍTICO-1). Debe ser servidor-only,
+    // incluida la credencial global publicando en el "_state" de OTRO equipo.
+    [InlineData("devices/A1B2C3D4E5F6/device_switch1_state")]
     // El GLP se suscribe a su canal de configuración.
     [InlineData("glp/config/GLP-001")]
     public void DownlinkTopicsOutsideTheFirstSegmentAreServerOnly(string topic)
@@ -320,11 +331,14 @@ public class MqttTopicAclTests
     }
 
     [Fact]
-    public void TheServerIdentityIsAConstantTheBrokerRefusesOnConnect()
+    public void TheServerClientIdIsTheExpectedConstant()
     {
-        // El nombre sigue existiendo porque es el que el broker usa al inyectar, pero la
-        // defensa real es doble: OnValidatingConnection rechaza ese ClientId en el CONNECT
-        // (ClientIdentifierNotValid) y el ACL exige origen en proceso.
+        // ESTE test sólo fija el VALOR de la constante (es el ClientId reservado del servidor).
+        // NO comprueba el rechazo en el CONNECT: eso vive en OnValidatingConnection del broker
+        // y se ejercita de verdad en EmbeddedMqttBrokerIntegrationTests, con un cliente MQTT
+        // real conectándose como "internal-server". (Antes este test se llamaba
+        // "...TheBrokerRefusesOnConnect" y su comentario afirmaba cubrir ese rechazo, cuando
+        // el cuerpo sólo compara una cadena: pasaba aunque se quitara el rechazo del broker.)
         MqttTopicAcl.ServerClientId.Should().Be("internal-server");
     }
 

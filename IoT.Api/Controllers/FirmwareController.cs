@@ -194,6 +194,51 @@ public sealed class FirmwareController : ControllerBase
     }
 
     /// <summary>
+    /// Borra una versión de firmware: marca el registro y desenlaza el binario del disco.
+    /// </summary>
+    // Toca el almacén y el inventario de firmware: exige rol de gestión.
+    [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
+    [HttpDelete("versions/{version}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> DeleteFirmwareVersion(
+        string version,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+            return BadRequest(new { error = "La versión es obligatoria." });
+
+        var result = await _firmwareOtaService.DeleteFirmwareVersionAsync(
+            _tenantContext.TenantId, version, User.Identity?.Name, cancellationToken);
+
+        if (result.IsFailure)
+            return BadRequest(new { error = result.Error.Message });
+
+        return Ok(new { message = $"Versión de firmware '{version}' borrada." });
+    }
+
+    /// <summary>
+    /// Cancela la actualización OTA en curso de un dispositivo (lo saca de "actualizando").
+    /// </summary>
+    // Cambia el estado de una campaña en hardware real: exige rol de gestión.
+    [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
+    [HttpPost("devices/{deviceId:guid}/cancel-ota")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> CancelDeviceOta(
+        Guid deviceId,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await _firmwareOtaService.CancelDeviceOtaAsync(
+            _tenantContext.TenantId, deviceId, User.Identity?.Name, cancellationToken);
+
+        if (result.IsFailure)
+            return BadRequest(new { error = result.Error.Message });
+
+        return Ok(new { message = "Actualización cancelada." });
+    }
+
+    /// <summary>
     /// Obtiene el estado actual de la actualización OTA de un dispositivo.
     /// </summary>
     [HttpGet("devices/{deviceId:guid}/status")]

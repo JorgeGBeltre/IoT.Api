@@ -227,6 +227,17 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 totalBytes, sha256, totalChunks, targetModel, featureDescription, updatedFromIp,
                 actor, cancellationToken);
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Disco lleno o almacén no escribible (p.ej. permisos del volumen): sin esto el
+            // IOException salía del servicio como excepción no controlada y el controlador
+            // devolvía un 500 opaco. Ahora es un fallo con mensaje para el operador.
+            _logger.LogError(ex,
+                "No se pudo escribir el binario de firmware del tenant {TenantId} en el almacén.", tenantId);
+            return Result<FirmwareVersionRecordDto>.Failure(new Error(
+                "Firmware.StorageUnavailable",
+                "No se pudo guardar el firmware en el servidor (almacén lleno o no escribible). Inténtalo más tarde."));
+        }
         finally
         {
             // Si se abortó por tamaño, por validación o por un error, el temporal no debe
@@ -495,6 +506,109 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 $"Ningún dispositivo del grupo pudo iniciar la actualización (0 de {uniqueDeviceIds.Length}): " +
                 "puede que ya tuvieran una campaña en curso."));
         }
+
+        return Result.Success();
+    }
+
+    public async Task<Result> DeleteFirmwareVersionAsync(
+        Guid tenantId,
+        string version,
+        string? actor = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!FirmwareStorage.TryNormalizeVersion(version, out string normalizedVersion))
+            return Result.Failure(new Error("Firmware.InvalidVersion", "Versión de firmware inválida."));
+
+        var record = await _firmwareRepository.GetByVersionAsync(tenantId, normalizedVersion, cancellationToken);
+        if (record is null)
+            return Result.Failure(new Error("Firmware.NotFound", $"Versión de firmware '{normalizedVersion}' no encontrada."));
+
+        // No se le quita el binario a una campaña viva: si algún equipo del tenant está
+        // actualizándose a ESTA versión, la bomba lo lee del disco trozo a trozo y borrarlo la
+        // dejaría a medias. El operador debe esperar o cancelar esas campañas primero.
+        var inProgress = await _deviceRepository.GetDevicesWithOtaInProgressAsync(cancellationToken);
+        bool inUse = inProgress.Any(d =>
+            d.TenantId == tenantId &&
+            string.Equals(d.OtaTargetVersion, normalizedVersion, StringComparison.OrdinalIgnoreCase));
+        if (inUse)
+        {
+            return Result.Failure(new Error("Firmware.VersionInUse",
+                "No se puede borrar: hay una actualización en curso a esta versión. Espera a que termine o cancélala."));
+        }
+
+        // Desenlaza el binario del disco, SIEMPRE resolviendo dentro del almacén del tenant
+        // (una ruta guardada fuera de él no se toca). Best-effort: si el fichero ya no está o
+        // no se puede borrar, se sigue marcando el registro —el objetivo es no dejar huérfanos
+        // ni filas que apunten a binarios inexistentes—, y queda en el log.
+        if (FirmwareStorage.TryResolveWithinTenant(tenantId, record.Src, out string fullPath))
+        {
+            try
+            {
+                if (File.Exists(fullPath)) File.Delete(fullPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogError(ex,
+                    "No se pudo borrar el binario de firmware {Version} del tenant {TenantId} en {Path}; el registro se marca igualmente.",
+                    normalizedVersion, tenantId, fullPath);
+            }
+        }
+        else
+        {
+            _logger.LogWarning(
+                "La ruta del firmware {Version} del tenant {TenantId} queda fuera del almacén; se marca el registro sin tocar disco: {Src}",
+                normalizedVersion, tenantId, record.Src);
+        }
+
+        _firmwareRepository.Remove(record); // marca IsDeleted
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        await AuditAsync(tenantId, actor, "FirmwareVersionDeleted",
+            $"Versión de firmware '{normalizedVersion}' borrada (sha256 {record.Sha256}).",
+            null, cancellationToken);
+
+        _logger.LogInformation("Versión de firmware {Version} del tenant {TenantId} borrada por {Actor}.",
+            normalizedVersion, tenantId, actor ?? "(desconocido)");
+
+        return Result.Success();
+    }
+
+    public async Task<Result> CancelDeviceOtaAsync(
+        Guid tenantId,
+        Guid deviceId,
+        string? actor = null,
+        CancellationToken cancellationToken = default)
+    {
+        var device = await _deviceRepository.GetByIdAsync(deviceId, cancellationToken);
+        if (device is null || device.TenantId != tenantId)
+            return Result.Failure(new Error("Device.NotFound", "Dispositivo no encontrado."));
+
+        // Idempotente: cancelar algo que ya no corre no es un error.
+        if (!device.OtaInProgress)
+            return Result.Success();
+
+        string targetVersion = device.OtaTargetVersion ?? "(desconocida)";
+        // FailOta (no ResetOta) para dejar rastro de que fue una cancelación del operador. La
+        // bomba en vuelo lo ve en su relectura por trozo (!OtaInProgress) y abandona.
+        device.FailOta("Actualización cancelada por el operador.");
+        _deviceRepository.Update(device);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        await AuditAsync(tenantId, actor, "FirmwareRolloutCancelled",
+            $"Actualización de {device.ChipId} a la versión {targetVersion} cancelada por el operador.",
+            null, cancellationToken);
+
+        await _notificationService.NotifyOtaProgressAsync(
+            tenantId: device.TenantId,
+            deviceId: device.Id,
+            chipId: device.ChipId,
+            version: targetVersion,
+            currentChunk: device.OtaLastChunkSent,
+            totalChunks: device.OtaTotalChunks,
+            percentage: 0,
+            status: "Failed",
+            errorMessage: "Cancelada por el operador.",
+            cancellationToken: cancellationToken);
 
         return Result.Success();
     }

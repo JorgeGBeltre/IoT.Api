@@ -2,6 +2,7 @@ using IoT.Api.Common;
 using IoT.Infrastructure.Services;
 using IoT.Application.Common.Interfaces;
 using IoT.Application.Firmware;
+using IoT.Domain.Common;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -101,14 +102,30 @@ public sealed class FirmwareController : ControllerBase
         if (uploadResult.IsFailure)
             return BadRequest(new { error = uploadResult.Error.Message });
 
-        // Si se indicó un DeviceId o GroupId, arrancar OTA en background automáticamente
+        // Si se indicó un DeviceId o GroupId, arrancar OTA en background automáticamente. El
+        // Result del arranque ya NO se descarta: antes, aunque el dispositivo no existiera,
+        // fuera de otro tenant o ya tuviera una campaña en curso, el operador recibía 202 y
+        // creía que la flota se estaba actualizando (MEDIUM-16).
+        Result? rollout = null;
         if (legacyParams?.DeviceId.HasValue == true && legacyParams.DeviceId.Value != Guid.Empty)
         {
-            await _firmwareOtaService.StartDeviceOtaAsync(_tenantContext.TenantId, legacyParams.DeviceId.Value, version, User.Identity?.Name, cancellationToken);
+            rollout = await _firmwareOtaService.StartDeviceOtaAsync(_tenantContext.TenantId, legacyParams.DeviceId.Value, version, User.Identity?.Name, cancellationToken);
         }
         else if (legacyParams?.GroupId.HasValue == true && legacyParams.GroupId.Value != Guid.Empty)
         {
-            await _firmwareOtaService.StartGroupOtaAsync(_tenantContext.TenantId, legacyParams.GroupId.Value, version, User.Identity?.Name, cancellationToken);
+            rollout = await _firmwareOtaService.StartGroupOtaAsync(_tenantContext.TenantId, legacyParams.GroupId.Value, version, User.Identity?.Name, cancellationToken);
+        }
+
+        // La subida sí tuvo éxito (el binario quedó almacenado), de ahí el 202; pero si se pidió
+        // un arranque automático, el cuerpo dice honestamente si prendió y por qué no.
+        if (rollout is not null)
+        {
+            return Accepted(new
+            {
+                firmware = uploadResult.Value,
+                rolloutStarted = rollout.IsSuccess,
+                rolloutError = rollout.IsFailure ? rollout.Error.Message : null
+            });
         }
 
         return Accepted(uploadResult.Value);
@@ -169,7 +186,9 @@ public sealed class FirmwareController : ControllerBase
     [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
     [HttpPost("devices/{deviceId:guid}/rollback")]
     [HttpPost("/api/MqttBroker/Firmware/RollbackFirmwareVersion")]
-    [HttpGet("/api/MqttBroker/Firmware/RollbackFirmwareVersion")]
+    // El HttpGet legacy de esta ruta se eliminó: es una operación que FLASHEA equipos, así que
+    // un GET la dejaba en el log de acceso y el historial del navegador y la hacía reintentable
+    // como si fuese idempotente (MEDIUM-16). El frontend ya la invoca por POST.
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> RollbackFirmware(

@@ -100,7 +100,15 @@ services:
       # Cada cuanto se re-validan las sesiones MQTT YA abiertas. Sin esto, suspender un
       # equipo o rotarle la ApiKey no le cerraba la sesion: seguia dentro hasta reconectar.
       - MqttBroker__AuthRecheckSeconds=${MQTT_AUTH_RECHECK_SECONDS:-60}
-      - MqttBroker__ApiKeys__0=${MQTT_API_KEY:?MQTT_API_KEY es obligatorio}
+      # Credenciales de bootstrap POR TENANT (reemplazan la antigua clave global unica para
+      # todos los tenants, MEDIUM-2). Cada clave esta acotada a su tenant: filtrar una no
+      # permite inyectar en otro. El seeder las hashea en la entidad Tenant por su codigo.
+      - MqttBroker__BootstrapCredentials__0__TenantCode=CARIBE-LOG
+      - MqttBroker__BootstrapCredentials__0__ApiKey=${MQTT_BOOTSTRAP_KEY_CARIBE:?MQTT_BOOTSTRAP_KEY_CARIBE es obligatorio}
+      - MqttBroker__BootstrapCredentials__1__TenantCode=DOM-GLP
+      - MqttBroker__BootstrapCredentials__1__ApiKey=${MQTT_BOOTSTRAP_KEY_GLP:?MQTT_BOOTSTRAP_KEY_GLP es obligatorio}
+      - MqttBroker__BootstrapCredentials__2__TenantCode=SMART-ACT
+      - MqttBroker__BootstrapCredentials__2__ApiKey=${MQTT_BOOTSTRAP_KEY_SMART:?MQTT_BOOTSTRAP_KEY_SMART es obligatorio}
       # Gateway TCP binario para trackers GPS
       - TcpGateway__Enabled=true
       - TcpGateway__Port=5023
@@ -196,10 +204,18 @@ services:
         condition: service_healthy
     environment:
       - DOTNET_ENVIRONMENT=Development
-      # El simulador es un CLIENTE MQTT que se conecta al broker embebido de iot-api.
+      # El simulador es un CLIENTE MQTT que se conecta al broker embebido de iot-api. Abre
+      # una conexion POR TENANT con la credencial de bootstrap de ese tenant: una credencial
+      # acotada a un tenant ya no puede publicar como equipos de otro (MEDIUM-2). Las mismas
+      # claves que el broker hashea en cada Tenant.
       - Mqtt__Host=iot-backend-api
       - Mqtt__Port=1883
-      - Mqtt__ApiKey=${MQTT_API_KEY:?MQTT_API_KEY es obligatorio}
+      - MqttBroker__BootstrapCredentials__0__TenantCode=CARIBE-LOG
+      - MqttBroker__BootstrapCredentials__0__ApiKey=${MQTT_BOOTSTRAP_KEY_CARIBE:?MQTT_BOOTSTRAP_KEY_CARIBE es obligatorio}
+      - MqttBroker__BootstrapCredentials__1__TenantCode=DOM-GLP
+      - MqttBroker__BootstrapCredentials__1__ApiKey=${MQTT_BOOTSTRAP_KEY_GLP:?MQTT_BOOTSTRAP_KEY_GLP es obligatorio}
+      - MqttBroker__BootstrapCredentials__2__TenantCode=SMART-ACT
+      - MqttBroker__BootstrapCredentials__2__ApiKey=${MQTT_BOOTSTRAP_KEY_SMART:?MQTT_BOOTSTRAP_KEY_SMART es obligatorio}
       - Simulator__IntervalSeconds=4
     networks:
       - iot-network

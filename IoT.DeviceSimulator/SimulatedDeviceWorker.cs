@@ -1,5 +1,4 @@
 using System.Text.Json;
-using IoT.Application.Common.Interfaces;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -8,16 +7,23 @@ namespace IoT.DeviceSimulator;
 
 public sealed class SimulatedDeviceWorker : BackgroundService
 {
-    private readonly IMqttPublisher _mqttPublisher;
+    // Cada equipo simulado pertenece a un tenant; se publica por la conexión de ESE tenant,
+    // porque la plataforma rechaza publicar como un equipo de otro tenant (MEDIUM-2). Los
+    // códigos coinciden con los sembrados en DatabaseSeeder.
+    private const string TenantCaribe = "CARIBE-LOG";  // GPS-DEMO01, GPS-DEMO02
+    private const string TenantGlp = "DOM-GLP";         // GLP-TANK01
+    private const string TenantSmart = "SMART-ACT";     // RELAY-CTRL01
+
+    private readonly TenantMqttFleet _fleet;
     private readonly IConfiguration _configuration;
     private readonly ILogger<SimulatedDeviceWorker> _logger;
 
     public SimulatedDeviceWorker(
-        IMqttPublisher mqttPublisher,
+        TenantMqttFleet fleet,
         IConfiguration configuration,
         ILogger<SimulatedDeviceWorker> logger)
     {
-        _mqttPublisher = mqttPublisher;
+        _fleet = fleet;
         _configuration = configuration;
         _logger = logger;
     }
@@ -27,6 +33,13 @@ public sealed class SimulatedDeviceWorker : BackgroundService
         _logger.LogInformation("Dedicated Device Simulator starting... (Publishing external MQTT traffic marked as source: simulated)");
 
         int intervalSeconds = _configuration.GetValue<int>("Simulator:IntervalSeconds", 4);
+
+        await _fleet.ConnectAllAsync(stoppingToken);
+        if (_fleet.ConnectedTenants.Count == 0)
+        {
+            _logger.LogError("El simulador no logró conectar a ningún tenant; no hay nada que publicar.");
+            return;
+        }
 
         var waypoints = new (double Lat, double Lng, float Heading)[]
         {
@@ -77,7 +90,7 @@ public sealed class SimulatedDeviceWorker : BackgroundService
                     }
                 };
 
-                await PublishSimulatedAsync("telemetry", JsonSerializer.Serialize(gpsPayload), stoppingToken);
+                await PublishSimulatedAsync(TenantCaribe, "telemetry", JsonSerializer.Serialize(gpsPayload), stoppingToken);
 
                 // 2. Simulate GPS Unit 2 (Furgón Logístico)
                 var gps2Payload = new
@@ -101,7 +114,7 @@ public sealed class SimulatedDeviceWorker : BackgroundService
                         }
                     }
                 };
-                await PublishSimulatedAsync("telemetry", JsonSerializer.Serialize(gps2Payload), stoppingToken);
+                await PublishSimulatedAsync(TenantCaribe, "telemetry", JsonSerializer.Serialize(gps2Payload), stoppingToken);
 
                 // 3. Simulate GLP Tank Monitor
                 currentGlpPressure += (Random.Shared.NextDouble() - 0.5) * 0.08;
@@ -138,7 +151,7 @@ public sealed class SimulatedDeviceWorker : BackgroundService
                         uptime = 7200
                     }
                 };
-                await PublishSimulatedAsync("glp/telemetria/GLP-TANK01", JsonSerializer.Serialize(glpPayload), stoppingToken);
+                await PublishSimulatedAsync(TenantGlp, "glp/telemetria/GLP-TANK01", JsonSerializer.Serialize(glpPayload), stoppingToken);
 
                 // 4. Simulate WiFi Relay Actuator
                 var relayPayload = new
@@ -157,7 +170,7 @@ public sealed class SimulatedDeviceWorker : BackgroundService
                         }
                     }
                 };
-                await PublishSimulatedAsync("relay/telemetria/RELAY-CTRL01", JsonSerializer.Serialize(relayPayload), stoppingToken);
+                await PublishSimulatedAsync(TenantSmart, "relay/telemetria/RELAY-CTRL01", JsonSerializer.Serialize(relayPayload), stoppingToken);
 
                 _logger.LogInformation("Dedicated Simulator: Published telemetry frames for GPS01, GPS02, GLP Tank, Relay Ctrl via MQTT.");
             }
@@ -174,20 +187,13 @@ public sealed class SimulatedDeviceWorker : BackgroundService
         }
     }
 
-    private async Task PublishSimulatedAsync(string topic, string payload, CancellationToken cancellationToken)
-    {
-        var options = new MqttPublishOptions
+    private static readonly IReadOnlyDictionary<string, string> SimulatedUserProperties =
+        new Dictionary<string, string>
         {
-            Qos = 1,
-            Retain = false,
-            ContentType = "application/json",
-            UserProperties = new Dictionary<string, string>
-            {
-                ["source"] = "simulated",
-                ["simulator_version"] = "2.0"
-            }
+            ["source"] = "simulated",
+            ["simulator_version"] = "3.0"
         };
 
-        await _mqttPublisher.PublishAsync(topic, payload, options, cancellationToken);
-    }
+    private Task PublishSimulatedAsync(string tenantCode, string topic, string payload, CancellationToken cancellationToken)
+        => _fleet.PublishAsync(tenantCode, topic, payload, SimulatedUserProperties, cancellationToken);
 }

@@ -24,6 +24,17 @@ public sealed class TenantRepository : ITenantRepository
         return await _context.Tenants.FirstOrDefaultAsync(t => t.Code == code.ToUpperInvariant(), cancellationToken);
     }
 
+    public async Task<Tenant?> GetByBootstrapApiKeyHashAsync(string bootstrapApiKeyHash, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(bootstrapApiKeyHash))
+            return null;
+
+        // Tenant no es ITenantScoped, así que no hay filtro global que esquivar; la consulta
+        // es una igualdad exacta sobre el índice único filtrado de BootstrapApiKeyHash.
+        return await _context.Tenants
+            .FirstOrDefaultAsync(t => t.BootstrapApiKeyHash == bootstrapApiKeyHash, cancellationToken);
+    }
+
     public async Task AddAsync(Tenant tenant, CancellationToken cancellationToken = default)
     {
         await _context.Tenants.AddAsync(tenant, cancellationToken);

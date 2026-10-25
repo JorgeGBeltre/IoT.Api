@@ -13,4 +13,14 @@ public interface IDeviceApiKeyService
 
     /// <summary>Verifica (comparación en tiempo constante) una ApiKey presentada contra un hash almacenado.</summary>
     bool Verify(string plainKey, string hash);
+
+    /// <summary>
+    /// Calcula el hash de una clave para BUSCARLA por él (lectura indexada). Se expone,
+    /// frente a <see cref="Verify"/>, para resolver qué tenant posee una credencial de
+    /// bootstrap sin barrer todos los tenants. Es seguro porque la clave es un secreto
+    /// aleatorio de alta entropía: el hash no es atacable por fuerza bruta y una igualdad
+    /// exacta por hash no abre un oráculo de temporización como sí lo haría comparar
+    /// secretos de baja entropía. Para validar una clave YA conocida, usar Verify.
+    /// </summary>
+    string ComputeHash(string plainKey);
 }

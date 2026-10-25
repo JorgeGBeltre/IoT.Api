@@ -13,6 +13,7 @@ public sealed class DatabaseSeeder
 {
     private readonly ApplicationDbContext _context;
     private readonly IPasswordHasher _passwordHasher;
+    private readonly IDeviceApiKeyService _apiKeyService;
     private readonly IConfiguration _configuration;
     private readonly IHostEnvironment _environment;
     private readonly ILogger<DatabaseSeeder> _logger;
@@ -20,12 +21,14 @@ public sealed class DatabaseSeeder
     public DatabaseSeeder(
         ApplicationDbContext context,
         IPasswordHasher passwordHasher,
+        IDeviceApiKeyService apiKeyService,
         IConfiguration configuration,
         IHostEnvironment environment,
         ILogger<DatabaseSeeder> logger)
     {
         _context = context;
         _passwordHasher = passwordHasher;
+        _apiKeyService = apiKeyService;
         _configuration = configuration;
         _environment = environment;
         _logger = logger;
@@ -140,6 +143,13 @@ public sealed class DatabaseSeeder
                 await _context.SaveChangesAsync(cancellationToken);
             }
 
+            // 4. Credenciales de bootstrap por tenant (reemplazan la antigua clave global
+            //    única para todos los tenants — MEDIUM-2). Idempotente y FUERA del bloque de
+            //    siembra de tenants: la migración añade las columnas a una base ya existente,
+            //    donde los tenants ya están creados, así que hay que poder fijar/rotar la
+            //    credencial en cada arranque sin depender de que sea la primera siembra.
+            await SeedTenantBootstrapCredentialsAsync(cancellationToken);
+
             _logger.LogInformation("Inicialización y sembrado de base de datos completado.");
         }
         catch (Exception ex)
@@ -147,6 +157,65 @@ public sealed class DatabaseSeeder
             _logger.LogError(ex, "Error durante la inicialización de la base de datos.");
             throw;
         }
+    }
+
+    /// <summary>
+    /// Fija (o rota) la credencial de bootstrap MQTT de cada tenant a partir de la
+    /// configuración <c>MqttBroker:BootstrapCredentials</c> (lista de {TenantCode, ApiKey}).
+    /// Se guarda sólo el hash; el texto plano vive en la configuración porque es la única
+    /// forma de que un publicador multi-equipo (el simulador, herramientas del operador) la
+    /// presente. Cada clave está ACOTADA a su tenant: a diferencia de la antigua clave global,
+    /// filtrar una no permite inyectar en otro tenant. Es idempotente: si el hash ya coincide
+    /// no reescribe; si cambia la clave en configuración, la rota en el siguiente arranque.
+    /// Sin credenciales configuradas no hace nada (no hay publicadores multi-equipo).
+    /// </summary>
+    private async Task SeedTenantBootstrapCredentialsAsync(CancellationToken cancellationToken)
+    {
+        var configured = _configuration
+            .GetSection("MqttBroker:BootstrapCredentials")
+            .Get<List<BootstrapCredentialConfig>>() ?? new List<BootstrapCredentialConfig>();
+
+        if (configured.Count == 0)
+            return;
+
+        foreach (var cred in configured)
+        {
+            if (string.IsNullOrWhiteSpace(cred.TenantCode) || string.IsNullOrWhiteSpace(cred.ApiKey))
+            {
+                _logger.LogWarning(
+                    "Credencial de bootstrap mal configurada (falta TenantCode o ApiKey); se omite.");
+                continue;
+            }
+
+            string code = cred.TenantCode.Trim().ToUpperInvariant();
+            var tenant = await _context.Tenants.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(t => t.Code == code, cancellationToken);
+            if (tenant is null)
+            {
+                _logger.LogWarning(
+                    "Credencial de bootstrap para el tenant '{Code}', que no existe; se omite.", code);
+                continue;
+            }
+
+            string hash = _apiKeyService.ComputeHash(cred.ApiKey);
+            if (string.Equals(tenant.BootstrapApiKeyHash, hash, StringComparison.Ordinal))
+                continue; // ya está puesta: idempotente
+
+            string fingerprint = hash[..8];
+            tenant.SetBootstrapApiKey(hash, fingerprint, "DatabaseSeeder");
+            _context.Tenants.Update(tenant);
+            await _context.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation(
+                "Credencial de bootstrap sembrada/rotada para el tenant {Code} (huella {Fingerprint}).",
+                tenant.Code, fingerprint);
+        }
+    }
+
+    /// <summary>Forma de cada entrada de <c>MqttBroker:BootstrapCredentials</c>.</summary>
+    private sealed class BootstrapCredentialConfig
+    {
+        public string? TenantCode { get; set; }
+        public string? ApiKey { get; set; }
     }
 
     /// <summary>

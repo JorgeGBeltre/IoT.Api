@@ -36,7 +36,7 @@ public sealed class DeviceApiKeyService : IDeviceApiKeyService
             Encoding.ASCII.GetBytes(hash));
     }
 
-    private static string ComputeHash(string plainKey)
+    public string ComputeHash(string plainKey)
     {
         byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(plainKey));
         return Convert.ToHexString(digest).ToLowerInvariant();

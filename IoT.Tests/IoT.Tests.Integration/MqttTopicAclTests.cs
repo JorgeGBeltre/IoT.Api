@@ -165,7 +165,13 @@ public class MqttTopicAclTests
     // ---------------------------------------------------------------------
 
     [Theory]
-    // El simulador publica telemetría en nombre de varios equipos: es su función.
+    // El simulador publica telemetría en nombre de varios equipos: es su función. El ACL lo
+    // PERMITE a propósito y NO comprueba el tenant: es una clase estática sin BD y NO es la
+    // frontera de aislamiento entre tenants. Esa frontera vive en la INGESTA
+    // (IngestTelemetryCommand: rechaza la trama si el dispositivo resuelto es de otro tenant
+    // que el de la credencial), probada en BootstrapCredentialTenantScopeTests. Que estos
+    // casos den Allow aquí NO es un permiso para inyectar entre tenants (MEDIUM-2): ese
+    // rechazo ocurre aguas abajo.
     [InlineData("telemetry")]
     [InlineData("glp/telemetria/GLP-TANK01")]
     [InlineData("relay/telemetria/RELAY-CTRL01")]

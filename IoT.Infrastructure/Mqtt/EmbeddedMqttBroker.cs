@@ -39,7 +39,6 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
             FullMode = BoundedChannelFullMode.Wait
         });
 
-    private readonly string[] _apiKeys;
     private readonly bool _allowAnonymous;
     private readonly int _port;
 
@@ -67,11 +66,22 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _authenticatedChipIds = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Clientes conectados con la ApiKey GLOBAL de bootstrap (simulador y herramientas del
+    /// Clientes conectados con una credencial de bootstrap (simulador y herramientas del
     /// operador). No representan a un equipo concreto: pueden publicar telemetría en nombre
-    /// de varios, pero no leer el canal de bajada de ninguno.
+    /// de varios, pero no leer el canal de bajada de ninguno. En modo anónimo también se
+    /// marca aquí (sin tenant: ver <see cref="_bootstrapTenantIds"/>).
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _bootstrapClientIds = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// ClientId → tenant al que está ACOTADA la credencial de bootstrap de esa sesión. Es lo
+    /// que cierra MEDIUM-2: la credencial de bootstrap ya no es una lista global igual para
+    /// todos los tenants, sino una por tenant (colgada de la entidad Tenant), y aquí se
+    /// recuerda a qué tenant pertenece la sesión para que la ingesta rechace toda trama cuyo
+    /// dispositivo resuelto sea de OTRO tenant. Una sesión anónima NO entra aquí (queda sin
+    /// tenant): asignarle uno abriría una vía de inyección sin credencial.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Guid> _bootstrapTenantIds = new(StringComparer.Ordinal);
 
     /// <summary>
     /// ClientIds de sesiones EXTERNAS aceptadas. Sirve para distinguir una publicación del
@@ -103,7 +113,8 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         string Payload,
         string? MessageId,
         string ClientId,
-        string? AuthenticatedChipId);
+        string? AuthenticatedChipId,
+        Guid? CredentialTenantId);
 
     public EmbeddedMqttBroker(
         IConfiguration configuration,
@@ -118,7 +129,6 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
 
         _port = int.TryParse(configuration["MqttBroker:Port"], out var p) ? p : 1883;
         _allowAnonymous = bool.TryParse(configuration["MqttBroker:AllowAnonymous"], out var anon) && anon;
-        _apiKeys = configuration.GetSection("MqttBroker:ApiKeys").Get<string[]>() ?? Array.Empty<string>();
 
         // Por defecto 7 días: muy por encima de cualquier intervalo de reconexión real de un
         // tracker (keepalive en minutos), así que no caduca mapeos vivos, pero garantiza que
@@ -167,8 +177,8 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 "Sólo para desarrollo; en producción MqttBroker:AllowAnonymous debe ser false.");
         }
         _logger.LogInformation(
-            "Broker MQTT embebido iniciado en puerto {Port}. Anónimo={Anon}, ApiKeys configuradas={KeyCount}",
-            _port, _allowAnonymous, _apiKeys.Length);
+            "Broker MQTT embebido iniciado en puerto {Port}. Anónimo={Anon}. Las credenciales de bootstrap se resuelven por tenant contra la base de datos.",
+            _port, _allowAnonymous);
 
         // El bucle de re-validación corre en paralelo al consumidor del canal. Cuelga de su
         // PROPIO token enlazado: si el consumidor termina por una razón distinta a la
@@ -351,7 +361,8 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                     msg.Payload,
                     "real",
                     TransportDeviceIdentifier: msg.AuthenticatedChipId,
-                    TransportMessageId: msg.MessageId),
+                    TransportMessageId: msg.MessageId,
+                    CredentialTenantId: msg.CredentialTenantId),
                 ct);
         }
         catch (Exception ex)
@@ -389,6 +400,10 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         // en ese caso el ChipId queda probado y puede propagarse al pipeline.
         bool authenticatedPerDevice = false;
         string? deviceKeyFingerprint = null;
+        // Tenant al que acota la credencial de bootstrap, si la conexión entró por esa vía.
+        // Se declara aquí para poder leerlo en la asignación de estado tras el bloque de
+        // validación (que vive dentro de if (!_allowAnonymous)).
+        Guid? bootstrapTenantId = null;
 
         if (e.ProtocolVersion == MQTTnet.Formatter.MqttProtocolVersion.V500)
         {
@@ -428,21 +443,24 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 return;
             }
 
-            // (a) ApiKey global de bootstrap (p.ej. simulador/dev), o
-            // (b) ApiKey por dispositivo: el ChipId debe estar REGISTRADO y la clave
-            //     coincidir con el hash almacenado. Un ChipId no registrado se rechaza
-            //     (modelo de adopción: la plataforma no "ve" dispositivos no provisionados).
-            bool isGlobalKey = _apiKeys.Length > 0 && apiKeyCandidates.Any(k => _apiKeys.Contains(k));
+            // Dos credenciales posibles, resueltas contra la BASE DE DATOS (ya no hay lista
+            // global en configuración, que era igual para todos los tenants — MEDIUM-2):
+            // (a) ApiKey POR DISPOSITIVO: el ChipId debe estar REGISTRADO y la clave coincidir
+            //     con el hash almacenado. Un ChipId no registrado se rechaza (modelo de
+            //     adopción: la plataforma no "ve" dispositivos no provisionados).
+            // (b) Credencial de BOOTSTRAP de un tenant: publicador multi-equipo (simulador,
+            //     herramientas del operador), ACOTADO a ese tenant.
             bool isDeviceKey = false;
 
-            if (!isGlobalKey)
+            using (var scope = _scopeFactory.CreateScope())
             {
+                var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
+                var apiKeySvc = scope.ServiceProvider.GetRequiredService<IDeviceApiKeyService>();
+
+                // (a) por dispositivo
                 string lookupChip = !string.IsNullOrWhiteSpace(chipId) ? chipId! : e.ClientId;
                 if (!string.IsNullOrWhiteSpace(lookupChip))
                 {
-                    using var scope = _scopeFactory.CreateScope();
-                    var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
-                    var apiKeySvc = scope.ServiceProvider.GetRequiredService<IDeviceApiKeyService>();
                     var device = await deviceRepo.GetByChipIdGlobalAsync(lookupChip);
                     if (device is not null && device.HasMqttApiKey &&
                         apiKeyCandidates.Any(k => apiKeySvc.Verify(k!, device.MqttApiKeyHash!)))
@@ -486,9 +504,33 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                         deviceKeyFingerprint = device.MqttApiKeyFingerprint;
                     }
                 }
+
+                // (b) credencial de bootstrap de un tenant. Se busca por el HASH de la clave
+                // (lectura indexada), no se barre: el tenant resultante acota la sesión.
+                if (!isDeviceKey)
+                {
+                    var tenantRepo = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
+                    foreach (var k in apiKeyCandidates)
+                    {
+                        var tenant = await tenantRepo.GetByBootstrapApiKeyHashAsync(apiKeySvc.ComputeHash(k!));
+                        if (tenant is null) continue;
+
+                        if (!tenant.IsActive)
+                        {
+                            _logger.LogWarning(
+                                "Conexión rechazada ({ClientId}): credencial de bootstrap del tenant {TenantId}, que está inactivo.",
+                                e.ClientId, tenant.Id);
+                            e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
+                            return;
+                        }
+
+                        bootstrapTenantId = tenant.Id;
+                        break;
+                    }
+                }
             }
 
-            if (!isGlobalKey && !isDeviceKey)
+            if (!isDeviceKey && bootstrapTenantId is null)
             {
                 _logger.LogWarning(
                     "Conexión rechazada ({ClientId}): credencial inválida o dispositivo no registrado.",
@@ -501,10 +543,15 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         if (string.IsNullOrWhiteSpace(chipId))
             chipId = e.ClientId;
 
+        // Todas las escrituras de estado por sesión usan el patrón SET-O-REMOVE INCONDICIONAL
+        // en las DOS ramas, porque el ClientId se reutiliza por diseño (ClientId == ChipId ==
+        // IMEI): si una rama que no acota a un tenant NO borrara la entrada del otro caso, una
+        // sesión nueva heredaría el tenant o la identidad de la que ocupó antes ese ClientId.
         if (authenticatedPerDevice)
         {
             _authenticatedChipIds[e.ClientId] = chipId;
             _bootstrapClientIds.TryRemove(e.ClientId, out _);
+            _bootstrapTenantIds.TryRemove(e.ClientId, out _);
             if (!string.IsNullOrEmpty(deviceKeyFingerprint))
                 _sessionKeyFingerprints[e.ClientId] = deviceKeyFingerprint!;
             else
@@ -512,16 +559,23 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         }
         else
         {
-            // En modo anónimo tampoco hay identidad por dispositivo, pero SÍ hay que poder
-            // publicar: si no, el ACL denegaba toda publicación con ámbito y el entorno de
-            // desarrollo quedaba roto en silencio. Se trata como credencial global: puede
-            // publicar en nombre de varios equipos, nunca leer el canal de ninguno ni
-            // escribir en un canal de bajada.
+            // Credencial de bootstrap o modo anónimo. En anónimo no hay identidad por
+            // dispositivo pero SÍ hay que poder publicar (si no, el ACL denegaba toda
+            // publicación con ámbito y el entorno de desarrollo quedaba roto en silencio): se
+            // trata como bootstrap, que puede publicar en nombre de varios equipos pero nunca
+            // leer el canal de bajada de ninguno.
             _bootstrapClientIds[e.ClientId] = 1;
-            // ApiKey global o anónimo: no hay identidad única por conexión. Se limpia
-            // cualquier resto de una conexión anterior con el mismo ClientId.
+            // No hay identidad por dispositivo: se limpia cualquier resto de una conexión
+            // anterior con el mismo ClientId.
             _authenticatedChipIds.TryRemove(e.ClientId, out _);
             _sessionKeyFingerprints.TryRemove(e.ClientId, out _);
+            // El tenant que acota la sesión: presente para una credencial de bootstrap de un
+            // tenant, AUSENTE en modo anónimo (nunca se le asigna uno — eso abriría inyección
+            // sin credencial). Set-o-remove para no heredar el tenant de una sesión previa.
+            if (bootstrapTenantId.HasValue)
+                _bootstrapTenantIds[e.ClientId] = bootstrapTenantId.Value;
+            else
+                _bootstrapTenantIds.TryRemove(e.ClientId, out _);
         }
 
         // El mapeo es para push dirigido y presencia: útil, pero NO es parte de la
@@ -641,8 +695,12 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 // TryWrite devuelve false y la trama se descarta: hay que loguearlo para tener
                 // visibilidad del backpressure en vez de perder telemetría en silencio.
                 _authenticatedChipIds.TryGetValue(e.ClientId, out var authenticatedChipId);
+                // Tenant que acota la credencial de bootstrap de esta sesión, si la hay: la
+                // ingesta rechaza la trama si el dispositivo resuelto es de otro tenant.
+                Guid? credentialTenantId =
+                    _bootstrapTenantIds.TryGetValue(e.ClientId, out var btid) ? btid : null;
 
-                if (!_channel.Writer.TryWrite(new InboundMessage(topic, payload, messageId, e.ClientId, authenticatedChipId)))
+                if (!_channel.Writer.TryWrite(new InboundMessage(topic, payload, messageId, e.ClientId, authenticatedChipId, credentialTenantId)))
                 {
                     _logger.LogWarning(
                         "Canal de ingesta MQTT lleno (cap {Capacity}); se descartó una trama de {ClientId} (tópico {Topic}). Backpressure.",
@@ -689,6 +747,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         _bootstrapClientIds.TryRemove(e.ClientId, out _);
         _connectedClientIds.TryRemove(e.ClientId, out _);
         _sessionKeyFingerprints.TryRemove(e.ClientId, out _);
+        _bootstrapTenantIds.TryRemove(e.ClientId, out _);
 
         var chipId = await _clientMap.GetChipIdByClientIdAsync(e.ClientId);
         if (!string.IsNullOrEmpty(chipId))

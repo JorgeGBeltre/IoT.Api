@@ -59,7 +59,16 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             builder.HasKey(t => t.Id);
             builder.Property(t => t.Name).HasMaxLength(150).IsRequired();
             builder.Property(t => t.Code).HasMaxLength(50).IsRequired();
+            builder.Property(t => t.BootstrapApiKeyHash).HasMaxLength(128);
+            builder.Property(t => t.BootstrapApiKeyFingerprint).HasMaxLength(32);
+            builder.Property(t => t.BootstrapApiKeyIssuedBy).HasMaxLength(200);
             builder.HasIndex(t => t.Code).IsUnique();
+            // Índice para resolver la credencial de bootstrap por su hash en el CONNECT
+            // (una lectura indexada, no un barrido). Único y FILTRADO a filas con hash: dos
+            // tenants no pueden compartir credencial, pero varios pueden tenerla a null.
+            builder.HasIndex(t => t.BootstrapApiKeyHash)
+                .IsUnique()
+                .HasFilter("\"BootstrapApiKeyHash\" IS NOT NULL");
         });
 
         // DeviceGroup Configuration

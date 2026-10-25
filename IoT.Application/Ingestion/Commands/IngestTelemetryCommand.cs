@@ -26,13 +26,25 @@ namespace IoT.Application.Ingestion.Commands;
 /// dispositivo inventado a partir del último segmento del tópico y se rechazaba por "no
 /// aprovisionado", perdiendo la trama aunque la plataforma SÍ conocía al emisor.
 /// </summary>
+/// <remarks>
+/// <paramref name="CredentialTenantId"/>: el tenant al que está ACOTADA la credencial del
+/// transporte, cuando la hay. Sólo lo informa el broker MQTT para una credencial de
+/// bootstrap (multi-equipo) resuelta contra el tenant dueño; una credencial POR DISPOSITIVO
+/// no lo necesita, porque <paramref name="TransportDeviceIdentifier"/> ya fija la identidad
+/// exacta. Cuando viene informado, la ingesta RECHAZA toda trama cuyo dispositivo resuelto
+/// pertenezca a otro tenant (cierra MEDIUM-2: con la antigua clave global, sin tenant, se
+/// inyectaba telemetría atribuida a equipos de cualquier tenant). null = sin acotar por
+/// credencial (HTTP, webhook, gateways TCP, worker), que tienen su propia identidad y no
+/// deben verse afectados por esta comprobación.
+/// </remarks>
 public sealed record IngestTelemetryCommand(
     string Topic,
     string Payload,
     string Source = "real",
     string? TransportProtocol = null,
     string? TransportDeviceIdentifier = null,
-    string? TransportMessageId = null) : IRequest<Result>;
+    string? TransportMessageId = null,
+    Guid? CredentialTenantId = null) : IRequest<Result>;
 
 public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTelemetryCommand, Result>
 {
@@ -187,6 +199,23 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
                 await _auditLogRepository.AddAsync(auditLog, cancellationToken);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
             }
+
+            return Result.Failure(new Error("Ingestion.DeviceNotProvisioned",
+                $"Device with ChipId '{ev.DeviceIdentifier}' is not provisioned in the system. Telemetry rejected."));
+        }
+
+        // MEDIUM-2: si la trama llegó con una credencial ACOTADA A UN TENANT (credencial de
+        // bootstrap MQTT), el dispositivo resuelto TIENE que ser de ese tenant. Va AQUÍ, antes
+        // de fijar el contexto de tenant unas líneas más abajo: si se comprobara después, se
+        // compararía el tenant de la víctima contra sí mismo y pasaría siempre. No se escribe
+        // NADA (ni auditoría ni SaveChanges) para no reabrir la amplificación de escritura, y
+        // el mensaje externo es el MISMO que el de "no aprovisionado" para no dar un oráculo de
+        // qué dispositivos existen en otros tenants; el código interno y el log sí distinguen.
+        if (request.CredentialTenantId.HasValue && device.TenantId != request.CredentialTenantId.Value)
+        {
+            _logger.LogWarning(
+                "Trama RECHAZADA por tenant cruzado: credencial del tenant {CredentialTenant} intentó publicar como el dispositivo {ChipId} del tenant {DeviceTenant}.",
+                request.CredentialTenantId.Value, device.ChipId, device.TenantId);
 
             return Result.Failure(new Error("Ingestion.DeviceNotProvisioned",
                 $"Device with ChipId '{ev.DeviceIdentifier}' is not provisioned in the system. Telemetry rejected."));

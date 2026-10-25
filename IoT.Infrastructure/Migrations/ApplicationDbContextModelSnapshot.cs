@@ -596,6 +596,21 @@ namespace IoT.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("BootstrapApiKeyFingerprint")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("BootstrapApiKeyHash")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTime?>("BootstrapApiKeyIssuedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("BootstrapApiKeyIssuedBy")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
                     b.Property<string>("Code")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -616,6 +631,10 @@ namespace IoT.Infrastructure.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("BootstrapApiKeyHash")
+                        .IsUnique()
+                        .HasFilter("\"BootstrapApiKeyHash\" IS NOT NULL");
 
                     b.HasIndex("Code")
                         .IsUnique();

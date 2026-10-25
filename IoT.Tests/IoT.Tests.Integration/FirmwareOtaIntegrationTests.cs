@@ -105,6 +105,16 @@ public sealed class FirmwareOtaIntegrationTests
                 .ReturnsAsync(device);
             fwRepoMock.Setup(r => r.GetByVersionAsync(tenantId, "1.2.0", It.IsAny<CancellationToken>()))
                 .ReturnsAsync(firmware);
+            // La toma de la campaña es ahora una escritura condicional ATÓMICA en el
+            // repositorio (no muta el objeto Device en memoria). Devolver true = la campaña se
+            // tomó. Antes el test afirmaba device.OtaInProgress sobre la instancia en memoria,
+            // que el servicio mutaba con StartOta; eso ya no ocurre, así que se verifica el
+            // contrato del claim en su lugar.
+            // El servicio reclama por device.Id (la identidad de la entidad resuelta), que en
+            // este fixture NO es el mismo Guid que deviceId.
+            devRepoMock.Setup(r => r.TryStartOtaCampaignAsync(
+                    tenantId, device.Id, "1.2.0", 1, It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
 
             var service = new FirmwareOtaService(
                 fwRepoMock.Object,
@@ -118,9 +128,9 @@ public sealed class FirmwareOtaIntegrationTests
             var startResult = await service.StartDeviceOtaAsync(tenantId, deviceId, "1.2.0");
 
             startResult.IsSuccess.Should().BeTrue();
-            device.OtaInProgress.Should().BeTrue();
-            device.OtaTargetVersion.Should().Be("1.2.0");
-            device.OtaTotalChunks.Should().Be(1);
+            // El estado se tomó de forma atómica, con la versión y el nº de trozos correctos.
+            devRepoMock.Verify(r => r.TryStartOtaCampaignAsync(
+                tenantId, device.Id, "1.2.0", 1, It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()), Times.Once);
 
             notifMock.Verify(n => n.NotifyOtaProgressAsync(
                 tenantId,

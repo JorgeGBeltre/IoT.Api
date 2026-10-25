@@ -58,6 +58,42 @@ public sealed class DeviceRepository : IDeviceRepository
     /// arranque, que es una tarea del proceso y no de una peticion, y solo necesita el estado
     /// OTA de cada equipo.
     /// </summary>
+    public async Task<bool> TryStartOtaCampaignAsync(
+        Guid tenantId,
+        Guid deviceId,
+        string targetVersion,
+        int totalChunks,
+        TimeSpan staleAfter,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var staleCutoff = now - staleAfter;
+        string normalized = targetVersion?.Trim() ?? string.Empty;
+
+        // IgnoreQueryFilters + filtro EXPLÍCITO por tenant: la reclamación no depende del
+        // tenant ambiental, y aun así no puede tomar un dispositivo de otro tenant. La
+        // condición (no en curso, o en curso pero rancio) va DENTRO del UPDATE: es lo que
+        // hace que dos peticiones concurrentes no tomen la misma campaña. Espeja los campos
+        // de Device.StartOta; si aquélla cambia, actualizar esto.
+        int affected = await _context.Devices
+            .IgnoreQueryFilters()
+            .Where(d => d.Id == deviceId
+                     && d.TenantId == tenantId
+                     && (!d.OtaInProgress || d.OtaUpdatedAt == null || d.OtaUpdatedAt < staleCutoff))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.OtaInProgress, true)
+                .SetProperty(d => d.OtaCompleted, false)
+                .SetProperty(d => d.OtaTargetVersion, normalized)
+                .SetProperty(d => d.OtaTotalChunks, totalChunks)
+                .SetProperty(d => d.OtaLastChunkSent, 0)
+                .SetProperty(d => d.OtaErrorMessage, (string?)null)
+                .SetProperty(d => d.OtaUpdatedAt, now)
+                .SetProperty(d => d.UpdatedAt, now),
+                cancellationToken);
+
+        return affected == 1;
+    }
+
     public async Task<IReadOnlyList<Device>> GetDevicesWithOtaInProgressAsync(CancellationToken cancellationToken = default)
     {
         // IgnoreQueryFilters es IMPRESCINDIBLE aqui: el DbContext aplica un filtro global

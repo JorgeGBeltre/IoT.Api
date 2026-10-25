@@ -58,6 +58,10 @@ public static class DependencyInjection
         // Limitador de transmisiones OTA simultaneas. Singleton a proposito: el limite es del
         // PROCESO, no de la peticion que origino el rollout.
         services.AddSingleton<Services.OtaTransmissionThrottle>();
+        // Registro de campanas OTA vivas: como mucho UNA bomba por dispositivo. Singleton por
+        // la misma razon que el limitador; el servicio OTA es scoped y no puede guardar este
+        // estado de proceso.
+        services.AddSingleton<Services.OtaCampaignRegistry>();
 
         // Security & Communication Services
         services.AddSingleton<IPasswordHasher, Security.BCryptPasswordHasher>();

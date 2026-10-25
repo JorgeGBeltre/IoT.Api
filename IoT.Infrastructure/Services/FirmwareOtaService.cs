@@ -42,7 +42,18 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
     /// seguia publicando trozos contra un broker que ya se estaba parando.
     /// </summary>
     private readonly Microsoft.Extensions.Hosting.IHostApplicationLifetime? _appLifetime;
+
+    /// <summary>
+    /// Registro de campañas vivas: garantiza como mucho UNA bomba por dispositivo. Opcional
+    /// para no romper los tests que ya construían el servicio; si falta, la reclamación
+    /// atómica sigue impidiendo el doble arranque concurrente, pero no se cancela una bomba
+    /// vieja colgada al rearrancar tras la ventana de rescate.
+    /// </summary>
+    private readonly OtaCampaignRegistry? _campaignRegistry;
     private readonly ILogger<FirmwareOtaService> _logger;
+
+    /// <summary>Ventana de rescate: una campaña sin avanzar más de esto se considera muerta.</summary>
+    private static readonly TimeSpan StaleCampaignAfter = TimeSpan.FromMinutes(15);
 
     public FirmwareOtaService(
         IFirmwareVersionRecordRepository firmwareRepository,
@@ -55,7 +66,8 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         IAuditLogRepository? auditLogRepository = null,
         Microsoft.Extensions.Configuration.IConfiguration? configuration = null,
         OtaTransmissionThrottle? throttle = null,
-        Microsoft.Extensions.Hosting.IHostApplicationLifetime? appLifetime = null)
+        Microsoft.Extensions.Hosting.IHostApplicationLifetime? appLifetime = null,
+        OtaCampaignRegistry? campaignRegistry = null)
     {
         _firmwareRepository = firmwareRepository;
         _deviceRepository = deviceRepository;
@@ -68,6 +80,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         _configuration = configuration;
         _throttle = throttle;
         _appLifetime = appLifetime;
+        _campaignRegistry = campaignRegistry;
     }
 
     public async Task<Result<FirmwareVersionRecordDto>> UploadFirmwareAsync(
@@ -356,18 +369,17 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         if (!File.Exists(fullPath))
             return Result.Failure(new Error("Firmware.FileNotFound", "El archivo de firmware físico no existe en el servidor."));
 
-        if (device.OtaInProgress)
+        // Toma de la campaña ATÓMICA: una escritura condicional en la base, no un
+        // leer-luego-escribir. Si otra petición concurrente (doble clic, reintento, o el
+        // start-ota que dispara el upload) ya la tomó, ésta no afecta ninguna fila y se
+        // rechaza SIN lanzar una segunda bomba sobre el mismo tópico (MEDIUM-6/LOW-1/LOW-4).
+        // El guard de los 15 minutos es ahora la CONDICIÓN del propio UPDATE.
+        bool claimed = await _deviceRepository.TryStartOtaCampaignAsync(
+            tenantId, device.Id, normalizedVersion, firmware.TotalChunks, StaleCampaignAfter, cancellationToken);
+        if (!claimed)
         {
-            // Si tiene más de 15 minutos en progreso sin actualizarse, permitir reinicio
-            if (device.OtaUpdatedAt.HasValue && DateTime.UtcNow - device.OtaUpdatedAt.Value < TimeSpan.FromMinutes(15))
-            {
-                return Result.Failure(new Error("OTA.AlreadyInProgress", "Ya hay una actualización OTA en curso para este dispositivo."));
-            }
+            return Result.Failure(new Error("OTA.AlreadyInProgress", "Ya hay una actualización OTA en curso para este dispositivo."));
         }
-
-        device.StartOta(normalizedVersion, firmware.TotalChunks);
-        _deviceRepository.Update(device);
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         // Notificar inicio en tiempo real
         await _notificationService.NotifyOtaProgressAsync(
@@ -386,12 +398,16 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             $"({firmware.TotalChunks} trozos, sha256 {firmware.Sha256}).",
             null, cancellationToken);
 
-        // Lanzar transmisión en background
+        // Lanzar transmisión en background.
         // Token del apagado ordenado, no CancellationToken.None: asi un Ctrl+C o un
         // "docker compose stop" detienen la transmision en vez de dejarla publicando contra
-        // un broker que ya se esta cerrando.
-        var backgroundToken = _appLifetime?.ApplicationStopping ?? CancellationToken.None;
-        _ = Task.Run(() => DispatchOtaTransmissionAsync(tenantId, device.Id, firmware.Id, backgroundToken), backgroundToken);
+        // un broker que ya se esta cerrando. El registro de campañas lo envuelve para
+        // garantizar como mucho UNA bomba por dispositivo: si quedara una vieja colgada de una
+        // campaña caducada, arrancar ésta la cancela.
+        var shutdownToken = _appLifetime?.ApplicationStopping ?? CancellationToken.None;
+        var backgroundToken = _campaignRegistry?.StartCampaign(device.Id, shutdownToken) ?? shutdownToken;
+        var deviceId2 = device.Id;
+        _ = Task.Run(() => DispatchOtaTransmissionAsync(tenantId, deviceId2, firmware.Id, backgroundToken), backgroundToken);
 
         return Result.Success();
     }
@@ -407,19 +423,33 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         if (devices.Count == 0)
             return Result.Failure(new Error("Group.Empty", "El grupo no contiene dispositivos para actualizar."));
 
+        // Deduplicar por Id: un dispositivo que esté repetido (o que pertenezca al grupo por
+        // dos vías) no debe recibir dos arranques en la misma llamada.
+        var uniqueDeviceIds = devices.Select(d => d.Id).Distinct().ToArray();
+
         int startedCount = 0;
-        foreach (var device in devices)
+        foreach (var deviceId in uniqueDeviceIds)
         {
-            var res = await StartDeviceOtaAsync(tenantId, device.Id, version, actor, cancellationToken);
+            var res = await StartDeviceOtaAsync(tenantId, deviceId, version, actor, cancellationToken);
             if (res.IsSuccess) startedCount++;
         }
 
         await AuditAsync(tenantId, actor, "FirmwareGroupRolloutStarted",
-            $"Actualización del grupo {groupId} a la versión {version}: {startedCount} de {devices.Count} dispositivos iniciados.",
+            $"Actualización del grupo {groupId} a la versión {version}: {startedCount} de {uniqueDeviceIds.Length} dispositivos iniciados.",
             null, cancellationToken);
 
         _logger.LogInformation("Actualización OTA grupal iniciada para {Count} de {Total} dispositivos en grupo {GroupId}",
-            startedCount, devices.Count, groupId);
+            startedCount, uniqueDeviceIds.Length, groupId);
+
+        // Antes devolvía Success incondicional: un grupo donde TODOS estaban ocupados (o
+        // fallaron) respondía 200 "OTA iniciada" con cero arrancados. Si no arrancó ninguno,
+        // es un fallo y el operador debe verlo.
+        if (startedCount == 0)
+        {
+            return Result.Failure(new Error("Group.NoneStarted",
+                $"Ningún dispositivo del grupo pudo iniciar la actualización (0 de {uniqueDeviceIds.Length}): " +
+                "puede que ya tuvieran una campaña en curso."));
+        }
 
         return Result.Success();
     }
@@ -915,6 +945,13 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 }
             }
             catch { }
+        }
+        finally
+        {
+            // La bomba terminó (completa, abandonada o con error): se retira del registro para
+            // no dejar su CancellationTokenSource colgado. EndCampaign sólo la quita si sigue
+            // siendo la suya, así que no pisa una campaña posterior que ya la sustituyó.
+            _campaignRegistry?.EndCampaign(deviceId, ct);
         }
     }
     /// <summary>

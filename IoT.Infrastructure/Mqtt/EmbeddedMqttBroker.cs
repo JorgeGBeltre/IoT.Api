@@ -134,7 +134,8 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         string? MessageId,
         string ClientId,
         string? AuthenticatedChipId,
-        Guid? CredentialTenantId);
+        Guid? CredentialTenantId,
+        string Source);
 
     public EmbeddedMqttBroker(
         IConfiguration configuration,
@@ -404,7 +405,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 new IngestTelemetryCommand(
                     msg.Topic,
                     msg.Payload,
-                    "real",
+                    msg.Source,
                     TransportDeviceIdentifier: msg.AuthenticatedChipId,
                     TransportMessageId: msg.MessageId,
                     CredentialTenantId: msg.CredentialTenantId),
@@ -733,6 +734,21 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
             string? messageId = e.ApplicationMessage.UserProperties?
                 .FirstOrDefault(pp => string.Equals(pp.Name, "message-id", StringComparison.OrdinalIgnoreCase))?.Value;
 
+            // Etiqueta de origen de la trama. La user property "source=simulated" sólo se honra
+            // desde un publicador de BOOTSTRAP (el simulador y las herramientas de operador, que
+            // publican por VARIOS equipos con la credencial de bootstrap del tenant). Un equipo
+            // real, autenticado con ApiKey POR DISPOSITIVO, NO puede autodeclararse "simulated"
+            // para esconder su telemetría de los tableros y consultas de datos reales: es el mismo
+            // criterio de no confiar en lo que declara el dispositivo que ya aplica la ingesta con
+            // TransportDeviceIdentifier. Cualquier otro caso cae a "real".
+            bool isBootstrapPublisher = _bootstrapClientIds.ContainsKey(e.ClientId);
+            string? declaredSource = e.ApplicationMessage.UserProperties?
+                .FirstOrDefault(pp => string.Equals(pp.Name, "source", StringComparison.OrdinalIgnoreCase))?.Value;
+            string source = isBootstrapPublisher
+                && string.Equals(declaredSource, "simulated", StringComparison.OrdinalIgnoreCase)
+                ? "simulated"
+                : "real";
+
             // No encolar mensajes server-originated (push de comandos/OTA).
             if (!string.Equals(e.ClientId, MqttTopicAcl.ServerClientId, StringComparison.Ordinal))
             {
@@ -745,7 +761,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 Guid? credentialTenantId =
                     _bootstrapTenantIds.TryGetValue(e.ClientId, out var btid) ? btid : null;
 
-                var inbound = new InboundMessage(topic, payload, messageId, e.ClientId, authenticatedChipId, credentialTenantId);
+                var inbound = new InboundMessage(topic, payload, messageId, e.ClientId, authenticatedChipId, credentialTenantId, source);
 
                 // Los reportes de CIERRE de campaña (success/error) van por el canal de
                 // prioridad: cierran la OTA, viajan en QoS 0 (sin reintento) y no pueden

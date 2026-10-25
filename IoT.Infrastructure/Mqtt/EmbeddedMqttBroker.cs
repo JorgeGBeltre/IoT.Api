@@ -33,8 +33,28 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     private readonly ILogger<EmbeddedMqttBroker> _logger;
 
     private MqttServer? _server;
+
+    /// <summary>
+    /// Canal de telemetría de VOLUMEN. Se escribe con TryWrite (no se bloquea el pipeline del
+    /// broker esperando a una base lenta): si está lleno, la trama se descarta con un warning.
+    /// Para la telemetría eso es aceptable —llega otra en segundos—, pero NO para los reportes
+    /// que cierran una campaña OTA, que van por <see cref="_controlChannel"/> aparte.
+    /// </summary>
     private readonly Channel<InboundMessage> _channel =
         Channel.CreateBounded<InboundMessage>(new BoundedChannelOptions(500)
+        {
+            FullMode = BoundedChannelFullMode.Wait
+        });
+
+    /// <summary>
+    /// Canal de PRIORIDAD para los reportes de control OTA (<c>ota/&lt;id&gt;/success|error</c>),
+    /// que son los únicos que cierran una campaña y que el firmware publica en QoS 0 (sin
+    /// reintento): si se perdieran en el canal de volumen, el equipo quedaría "actualizando"
+    /// aunque hubiera terminado (MEDIUM-15). Tráfico escaso (uno por campaña), consumidor
+    /// propio, así que una ráfaga de telemetría no puede desplazarlos.
+    /// </summary>
+    private readonly Channel<InboundMessage> _controlChannel =
+        Channel.CreateBounded<InboundMessage>(new BoundedChannelOptions(1000)
         {
             FullMode = BoundedChannelFullMode.Wait
         });
@@ -186,13 +206,14 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         using var recheckCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var recheckLoop = RunAuthRecheckLoopAsync(recheckCts.Token);
 
-        // Consumidor del canal → pipeline de ingesta
+        // Consumidor del canal de PRIORIDAD (reportes de cierre OTA) en paralelo al de volumen:
+        // así un backlog de telemetría no retrasa el procesado de un success/error.
+        var controlConsumer = ConsumeChannelAsync(_controlChannel, stoppingToken);
+
+        // Consumidor del canal de volumen → pipeline de ingesta
         try
         {
-            await foreach (var msg in _channel.Reader.ReadAllAsync(stoppingToken))
-            {
-                await DispatchToPipelineAsync(msg, stoppingToken);
-            }
+            await ConsumeChannelAsync(_channel, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -200,10 +221,11 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         }
         finally
         {
-            // Se para y se espera el bucle para no dejar una tarea huérfana tocando el
-            // servidor mientras se detiene. Nunca lanza: tiene su propio catch.
+            // Se para y se esperan los bucles para no dejar tareas huérfanas tocando el
+            // servidor mientras se detiene. Ninguno lanza fuera de la cancelación.
             recheckCts.Cancel();
             await recheckLoop;
+            try { await controlConsumer; } catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
 
             if (_server is not null)
             {
@@ -211,6 +233,29 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 _logger.LogInformation("Broker MQTT embebido detenido.");
             }
         }
+    }
+
+    private async Task ConsumeChannelAsync(Channel<InboundMessage> channel, CancellationToken stoppingToken)
+    {
+        await foreach (var msg in channel.Reader.ReadAllAsync(stoppingToken))
+        {
+            await DispatchToPipelineAsync(msg, stoppingToken);
+        }
+    }
+
+    /// <summary>
+    /// ¿Es un reporte de CIERRE de campaña del dispositivo (<c>ota/&lt;id&gt;/success|error</c>)?
+    /// Son los únicos que cierran una OTA y viajan en QoS 0; van por el canal de prioridad para
+    /// que una ráfaga de telemetría no los descarte. El progreso y el estado intermedio NO
+    /// entran aquí: perder uno sólo omite una actualización de la UI.
+    /// </summary>
+    public static bool IsOtaClosingReport(string topic)
+    {
+        var parts = topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 3 &&
+               parts[0].Equals("ota", StringComparison.OrdinalIgnoreCase) &&
+               (parts[^1].Equals("success", StringComparison.OrdinalIgnoreCase) ||
+                parts[^1].Equals("error", StringComparison.OrdinalIgnoreCase));
     }
 
     // =========================================================================
@@ -700,8 +745,26 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 Guid? credentialTenantId =
                     _bootstrapTenantIds.TryGetValue(e.ClientId, out var btid) ? btid : null;
 
-                if (!_channel.Writer.TryWrite(new InboundMessage(topic, payload, messageId, e.ClientId, authenticatedChipId, credentialTenantId)))
+                var inbound = new InboundMessage(topic, payload, messageId, e.ClientId, authenticatedChipId, credentialTenantId);
+
+                // Los reportes de CIERRE de campaña (success/error) van por el canal de
+                // prioridad: cierran la OTA, viajan en QoS 0 (sin reintento) y no pueden
+                // perderse por un pico de telemetría. Su descarte, si ocurriera, es un ERROR
+                // (no un warning): es un reporte crítico que no vuelve.
+                if (IsOtaClosingReport(topic))
                 {
+                    if (!_controlChannel.Writer.TryWrite(inbound))
+                    {
+                        _logger.LogError(
+                            "Canal de control OTA lleno; se descartó un reporte de cierre de {ClientId} (tópico {Topic}). El equipo podría quedar marcado como 'actualizando' hasta que el vigilante lo cierre.",
+                            e.ClientId, topic);
+                    }
+                }
+                else if (!_channel.Writer.TryWrite(inbound))
+                {
+                    // El canal de volumen es acotado (500). Si está lleno (pico de reconexión /
+                    // BD lenta), TryWrite devuelve false y la trama se descarta: se loguea para
+                    // tener visibilidad del backpressure en vez de perder telemetría en silencio.
                     _logger.LogWarning(
                         "Canal de ingesta MQTT lleno (cap {Capacity}); se descartó una trama de {ClientId} (tópico {Topic}). Backpressure.",
                         500, e.ClientId, topic);

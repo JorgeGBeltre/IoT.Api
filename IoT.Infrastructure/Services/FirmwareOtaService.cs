@@ -50,10 +50,25 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
     /// vieja colgada al rearrancar tras la ventana de rescate.
     /// </summary>
     private readonly OtaCampaignRegistry? _campaignRegistry;
+
+    /// <summary>
+    /// Mapa de presencia ChipId↔ClientId (Redis). Opcional para no romper los tests que ya
+    /// construían el servicio; si falta, no se comprueba presencia (comportamiento anterior).
+    /// </summary>
+    private readonly IMqttClientMap? _clientMap;
     private readonly ILogger<FirmwareOtaService> _logger;
 
     /// <summary>Ventana de rescate: una campaña sin avanzar más de esto se considera muerta.</summary>
     private static readonly TimeSpan StaleCampaignAfter = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Caducidad de cada trozo OTA en el broker, en segundos. Sin ella, si la sesión del
+    /// equipo persiste (GLP y Relay usan cleanStart=false), los trozos QoS 1 se encolaban y se
+    /// reinyectaban en ráfaga al reconectar —trozos de una campaña ya olvidada—. Con caducidad,
+    /// ningún trozo sobrevive a su campaña. Configurable con <c>Firmware:ChunkExpirySeconds</c>.
+    /// </summary>
+    private uint ChunkExpirySeconds =>
+        uint.TryParse(_configuration?["Firmware:ChunkExpirySeconds"], out var s) && s > 0 ? s : 420u;
 
     public FirmwareOtaService(
         IFirmwareVersionRecordRepository firmwareRepository,
@@ -67,7 +82,8 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         Microsoft.Extensions.Configuration.IConfiguration? configuration = null,
         OtaTransmissionThrottle? throttle = null,
         Microsoft.Extensions.Hosting.IHostApplicationLifetime? appLifetime = null,
-        OtaCampaignRegistry? campaignRegistry = null)
+        OtaCampaignRegistry? campaignRegistry = null,
+        IMqttClientMap? clientMap = null)
     {
         _firmwareRepository = firmwareRepository;
         _deviceRepository = deviceRepository;
@@ -81,6 +97,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         _throttle = throttle;
         _appLifetime = appLifetime;
         _campaignRegistry = campaignRegistry;
+        _clientMap = clientMap;
     }
 
     public async Task<Result<FirmwareVersionRecordDto>> UploadFirmwareAsync(
@@ -368,6 +385,34 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
 
         if (!File.Exists(fullPath))
             return Result.Failure(new Error("Firmware.FileNotFound", "El archivo de firmware físico no existe en el servidor."));
+
+        // Presencia: no tiene sentido emitir 512 trozos a un equipo que no está conectado.
+        // Antes se lanzaba igual contra un tracker apagado, se logueaba "todos los trozos
+        // transmitidos" y la campaña quedaba OtaInProgress=true sin nadie al otro lado. Si el
+        // mapa dice que NO está conectado, se rechaza con un error claro para que el operador
+        // reintente cuando vuelva. Es una comprobación de saneamiento, NO de autorización: si
+        // el mapa de Redis falla, se DEGRADA abriendo (se arranca igual) en vez de bloquear
+        // todo el OTA por la salud de Redis; el vigilante y la caducidad de los trozos cubren
+        // el caso de un equipo que se caiga después. Configurable: Firmware:RequireDeviceOnline.
+        bool requireOnline = !bool.TryParse(_configuration?["Firmware:RequireDeviceOnline"], out var ro) || ro;
+        if (requireOnline && _clientMap is not null)
+        {
+            try
+            {
+                var clientId = await _clientMap.GetClientIdAsync(device.ChipId, cancellationToken);
+                if (string.IsNullOrEmpty(clientId))
+                {
+                    return Result.Failure(new Error("OTA.DeviceOffline",
+                        "El dispositivo no está conectado al broker. Lanza la actualización cuando esté en línea."));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "No se pudo comprobar la presencia de {ChipId} (Redis); se arranca la OTA igualmente y el vigilante cubrirá un equipo caído.",
+                    device.ChipId);
+            }
+        }
 
         // Toma de la campaña ATÓMICA: una escritura condicional en la base, no un
         // leer-luego-escribir. Si otra petición concurrente (doble clic, reintento, o el
@@ -745,6 +790,13 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 catch { }
             }
 
+            // Señal de vida: refresca la marca de actividad para que el vigilante no cierre
+            // como "sin respuesta" una actualización que el equipo está procesando (un flasheo
+            // de 16 MB tarda minutos y va reportando progreso).
+            device.TouchOtaActivity();
+            _deviceRepository.Update(device);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
             await _notificationService.NotifyOtaProgressAsync(
                 tenantId: device.TenantId,
                 deviceId: device.Id,
@@ -755,6 +807,20 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 percentage: reportedPct,
                 status: "InProgress",
                 cancellationToken: cancellationToken);
+        }
+        else
+        {
+            // Cualquier otro reporte durante una campaña en curso (ack de trozo, estado
+            // intermedio, "status"...) NO cambia el estado contable, pero SÍ es señal de vida:
+            // antes caía en un hueco sin rama else y se descartaba en silencio, de modo que un
+            // equipo que sólo mandaba acks podía acabar cerrado por el vigilante pese a estar
+            // vivo. Se refresca la actividad y se deja rastro en depuración.
+            _logger.LogDebug(
+                "Reporte OTA '{Action}' de {ChipId} tratado como señal de vida (no cambia el estado de la campaña).",
+                action, chipId);
+            device.TouchOtaActivity();
+            _deviceRepository.Update(device);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
     }
 
@@ -887,8 +953,12 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                     sha256Hex: sha256,
                     timestampUtc: DateTime.UtcNow);
 
-                // Publicar con QoS 1 a ota/{chipId}, el tópico al que el firmware está suscrito.
-                await publisher.PublishAsync(otaTopic, payload, qos: 1, retain: false, cancellationToken: ct);
+                // Publicar con QoS 1 a ota/{chipId}, el tópico al que el firmware está suscrito,
+                // CON caducidad: si la sesión del equipo persiste, un trozo que no se entregue
+                // no debe sobrevivir a la campaña y reinyectarse en ráfaga al reconectar.
+                await publisher.PublishAsync(otaTopic, payload,
+                    new MqttPublishOptions { Qos = 1, Retain = false, MessageExpiryInterval = ChunkExpirySeconds },
+                    ct);
 
                 // El progreso se aplica sobre la instancia RECIÉN LEÍDA y se guarda en su
                 // propio ámbito, para no arrastrar un snapshot viejo.

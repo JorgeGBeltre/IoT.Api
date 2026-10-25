@@ -129,6 +129,10 @@ public static class DependencyInjection
         // Cierra las campanas OTA que quedaron a medias por un reinicio del proceso. Va aqui
         // porque la transmision vive en este mismo proceso.
         services.AddHostedService<Services.OtaStartupReconciliationService>();
+        // Vigilante del proceso EN MARCHA: cierra campañas OTA colgadas (equipo que nunca
+        // respondió, o reporte de éxito perdido en QoS 0). La reconciliación de arriba sólo
+        // cubre el reinicio del proceso.
+        services.AddHostedService<Services.OtaCampaignWatchdogService>();
         services.AddHostedService(sp => sp.GetRequiredService<EmbeddedMqttBroker>());
         services.AddHostedService(sp => sp.GetRequiredService<Tcp.MultiProtocolTcpGatewayService>());
         return services;

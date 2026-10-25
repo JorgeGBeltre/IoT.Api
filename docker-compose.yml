@@ -221,6 +221,14 @@ services:
       - iot-network
 
 volumes:
+  # Almacen OTA montado en /app/storage del contenedor iot-api, que corre como appuser
+  # (uid 1000) por el endurecimiento E7. El Dockerfile crea /app/storage/firmware con dueno
+  # appuser para que un volumen NUEVO herede esa propiedad al inicializarse. Un volumen YA
+  # creado por una imagen anterior (sin /app/storage) quedo root:root y NO lo arregla
+  # reconstruir la imagen: Docker solo copia la propiedad al inicializar un volumen vacio.
+  # Al desplegar este arreglo hay que RECREAR el volumen (no hay firmware que perder porque
+  # la subida nunca funciono en el contenedor endurecido):
+  #   docker compose down && docker volume rm iotapi_iot_firmware && docker compose up -d --build
   iot_firmware:
     driver: local
   iot_postgres_data:

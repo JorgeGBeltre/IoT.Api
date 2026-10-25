@@ -240,6 +240,20 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped
         UpdatedAt = DateTime.UtcNow;
     }
 
+    /// <summary>
+    /// Marca que el dispositivo DA SEÑALES DE VIDA durante una actualización (un reporte de
+    /// progreso, un ack de trozo o un estado intermedio) sin cambiar el progreso contable:
+    /// sólo refresca la marca de tiempo. El vigilante de campañas usa esa marca para no
+    /// cerrar como "sin respuesta" una actualización que el equipo está procesando de verdad,
+    /// aunque sea lenta. No hace nada si no hay campaña en curso.
+    /// </summary>
+    public void TouchOtaActivity()
+    {
+        if (!OtaInProgress) return;
+        OtaUpdatedAt = DateTime.UtcNow;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
     public void CompleteOta(string newVersion)
     {
         FirmwareVersion = newVersion?.Trim();

@@ -938,6 +938,25 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         }
     }
 
+    /// <summary>
+    /// SHA-256 (hex minúscula) del fichero, leído en streaming con el mismo formato que usa la
+    /// subida (<c>Convert.ToHexString(...).ToLowerInvariant()</c>), para poder compararlo con
+    /// <c>FirmwareVersionRecord.Sha256</c>.
+    /// </summary>
+    private static async Task<string> ComputeFileSha256Async(string fullPath, int bufferSize, CancellationToken ct)
+    {
+        using var hasher = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        await using var fs = new FileStream(
+            fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: bufferSize > 0 ? bufferSize : 81920, useAsync: true);
+        var buffer = new byte[bufferSize > 0 ? bufferSize : 81920];
+        int read;
+        while ((read = await fs.ReadAsync(buffer, ct)) > 0)
+            hasher.AppendData(buffer, 0, read);
+        return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+    }
+
     private async Task DispatchOtaTransmissionAsync(Guid tenantId, Guid deviceId, Guid firmwareRecordId, CancellationToken ct)
     {
         // Hueco del limitador de concurrencia ANTES de crear el ambito y de tocar la base:
@@ -1003,6 +1022,39 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             // buffer del tamano del chunk.
             int chunkSize = firmware.ChunkSizeBytes > 0 ? firmware.ChunkSizeBytes : OtaChunker.DefaultChunkSizeBytes;
             long fileLength = new FileInfo(fullPath).Length;
+
+            // LOW-5: re-verificar INTEGRIDAD antes de emitir. El sha256 y el tamaño se
+            // calcularon al subir; si el fichero en disco cambió desde entonces (restauración
+            // de backup, copia manual en el volumen), publicar los bytes NUEVOS con el hash
+            // VIEJO haría que el equipo descargue la imagen entera, calcule el SHA, no coincida
+            // y aborte —minutos y megabytes a la basura—. Recalcular aquí (una lectura
+            // secuencial, insignificante frente a los minutos de transmisión con su retardo por
+            // trozo) corta eso en el servidor. NOTA: el sha256 es INTEGRIDAD, no autenticación
+            // (viaja en el mismo mensaje que los datos); el origen verificable exigiría firmar
+            // la imagen (HMAC/ECDSA del firmware, hoy sin usar).
+            if (fileLength != firmware.FileSizeBytes)
+            {
+                _logger.LogError(
+                    "Transmisión OTA abortada: el tamaño del fichero de {Version} ({Actual} B) no coincide con el del registro ({Expected} B).",
+                    firmware.FirmwareVersion, fileLength, firmware.FileSizeBytes);
+                device.FailOta(Truncate("La imagen en disco no coincide con el registro (tamaño). Vuelve a subirla.", MaxErrorLength)!);
+                deviceRepo.Update(device);
+                await uow.SaveChangesAsync(ct);
+                return;
+            }
+
+            string actualSha = await ComputeFileSha256Async(fullPath, chunkSize, ct);
+            if (!string.Equals(actualSha, firmware.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogError(
+                    "Transmisión OTA abortada: el sha256 del fichero de {Version} no coincide con el del registro.",
+                    firmware.FirmwareVersion);
+                device.FailOta(Truncate("La imagen en disco no coincide con el registro (sha256). Vuelve a subirla.", MaxErrorLength)!);
+                deviceRepo.Update(device);
+                await uow.SaveChangesAsync(ct);
+                return;
+            }
+
             int totalParts = OtaChunker.CountChunks(fileLength, chunkSize);
             string sha256 = firmware.Sha256;
 

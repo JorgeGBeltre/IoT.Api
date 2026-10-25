@@ -62,6 +62,9 @@ public static class DependencyInjection
         // la misma razon que el limitador; el servicio OTA es scoped y no puede guardar este
         // estado de proceso.
         services.AddSingleton<Services.OtaCampaignRegistry>();
+        // Cortafuegos de auditoría de equipos no aprovisionados: una fila por identificador y
+        // por ventana, no una por trama. Singleton (estado de proceso), como el resto.
+        services.AddSingleton<IUnprovisionedDeviceAuditThrottle, Services.UnprovisionedDeviceAuditThrottle>();
 
         // Security & Communication Services
         services.AddSingleton<IPasswordHasher, Security.BCryptPasswordHasher>();

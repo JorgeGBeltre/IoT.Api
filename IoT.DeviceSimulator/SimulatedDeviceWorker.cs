@@ -35,11 +35,14 @@ public sealed class SimulatedDeviceWorker : BackgroundService
         int intervalSeconds = _configuration.GetValue<int>("Simulator:IntervalSeconds", 4);
 
         await _fleet.ConnectAllAsync(stoppingToken);
-        if (_fleet.ConnectedTenants.Count == 0)
+        if (_fleet.ConfiguredTenantCount == 0)
         {
-            _logger.LogError("El simulador no logró conectar a ningún tenant; no hay nada que publicar.");
+            _logger.LogError("El simulador no tiene ningún tenant configurado; no hay nada que publicar.");
             return;
         }
+        // Si el broker aún no está arriba, no nos rendimos: los tenants están configurados y el
+        // fleet reintenta la conexión en segundo plano; las publicaciones se omiten hasta que
+        // reconecte. Antes se abortaba aquí y el simulador quedaba inerte si el broker tardaba.
 
         var waypoints = new (double Lat, double Lng, float Heading)[]
         {

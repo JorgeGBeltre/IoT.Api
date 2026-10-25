@@ -260,10 +260,14 @@ public sealed class FirmwareOtaIntegrationTests
         var bytes = new byte[5000];
         bytes[0] = 0xE9;
         await System.IO.File.WriteAllBytesAsync(fullPath, bytes);
+        // LOW-5: la bomba re-verifica sha256 y tamaño contra el registro antes de emitir, así
+        // que el registro debe llevar el hash REAL del fichero (antes bastaba uno ficticio).
+        string realSha = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
 
         try
         {
-            var firmware = FirmwareVersionRecord.Create(tenantId, "1.4.0", relativeSrc, bytes.Length, "sha", 3).Value;
+            var firmware = FirmwareVersionRecord.Create(tenantId, "1.4.0", relativeSrc, bytes.Length, realSha, 3).Value;
             // Mismo cálculo que la bomba, para no acoplar el esperado a un tamaño de chunk fijo.
             int chunkSize = firmware.ChunkSizeBytes > 0 ? firmware.ChunkSizeBytes : OtaChunker.DefaultChunkSizeBytes;
             int expectedChunks = OtaChunker.CountChunks(bytes.Length, chunkSize);
@@ -327,6 +331,79 @@ public sealed class FirmwareOtaIntegrationTests
                 try { System.IO.File.Delete(fullPath); break; }
                 catch (System.IO.IOException) { await Task.Delay(100); }
             }
+        }
+    }
+
+    [Fact]
+    public async Task FirmwareOtaService_Pump_AbortsWhenTheDiskImageDoesNotMatchTheRecordSha()
+    {
+        // LOW-5: si el fichero en disco cambió desde la subida, su sha256 ya no coincide con el
+        // del registro. La bomba debe ABORTAR en el servidor (FailOta) en vez de emitir los
+        // bytes nuevos con el hash viejo y hacer que el equipo descargue la imagen entera para
+        // nada. Se registra un sha DISTINTO del contenido real del fichero.
+        var tenantId = Guid.NewGuid();
+        var deviceId = Guid.NewGuid();
+        var device = Device.Create(tenantId, "SHA_CHIP", "AA:BB:CC:11:22:C0", "D", "ESP32", "x").Value;
+        device.StartOta("1.4.0", 3);
+
+        string relativeSrc = System.IO.Path.Combine(
+            FirmwareStorage.RootFolder, FirmwareStorage.FirmwareFolder, tenantId.ToString(), "1.4.0", "fw.bin");
+        string fullPath = System.IO.Path.Combine(AppContext.BaseDirectory, relativeSrc);
+        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(fullPath)!);
+        var bytes = new byte[5000];
+        bytes[0] = 0xE9;
+        await System.IO.File.WriteAllBytesAsync(fullPath, bytes);
+
+        try
+        {
+            // Sha del registro distinto del real + tamaño correcto (para que falle por SHA,
+            // no por tamaño).
+            var firmware = FirmwareVersionRecord.Create(
+                tenantId, "1.4.0", relativeSrc, bytes.Length, "sha-que-no-corresponde", 3).Value;
+
+            var devRepoMock = new Mock<IDeviceRepository>();
+            devRepoMock.Setup(r => r.GetByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>())).ReturnsAsync(device);
+            devRepoMock.Setup(r => r.TryStartOtaCampaignAsync(
+                    It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            var fwRepoMock = new Mock<IFirmwareVersionRecordRepository>();
+            fwRepoMock.Setup(r => r.GetByVersionAsync(tenantId, "1.4.0", It.IsAny<CancellationToken>())).ReturnsAsync(firmware);
+            fwRepoMock.Setup(r => r.GetByIdAsync(firmware.Id, It.IsAny<CancellationToken>())).ReturnsAsync(firmware);
+            var uowMock = new Mock<IUnitOfWork>();
+            var notifMock = new Mock<IFleetNotificationService>();
+            int published = 0;
+            var mqttMock = new Mock<IMqttPublisher>();
+            mqttMock.Setup(p => p.PublishAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<MqttPublishOptions>(), It.IsAny<CancellationToken>()))
+                .Callback(() => System.Threading.Interlocked.Increment(ref published))
+                .Returns(Task.CompletedTask);
+
+            var services = new ServiceCollection();
+            services.AddSingleton<IDeviceRepository>(devRepoMock.Object);
+            services.AddSingleton<IFirmwareVersionRecordRepository>(fwRepoMock.Object);
+            services.AddSingleton<IUnitOfWork>(uowMock.Object);
+            services.AddSingleton<IMqttPublisher>(mqttMock.Object);
+            services.AddSingleton<IFleetNotificationService>(notifMock.Object);
+            using var sp = services.BuildServiceProvider();
+
+            var service = new FirmwareOtaService(
+                fwRepoMock.Object, devRepoMock.Object, uowMock.Object, mqttMock.Object,
+                notifMock.Object, sp.GetRequiredService<IServiceScopeFactory>(),
+                new Mock<ILogger<FirmwareOtaService>>().Object);
+
+            await service.StartDeviceOtaAsync(tenantId, deviceId, "1.4.0");
+
+            // Dar tiempo a la bomba a arrancar, re-verificar y abortar.
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (device.OtaInProgress && DateTime.UtcNow < deadline)
+                await Task.Delay(50);
+
+            device.OtaInProgress.Should().BeFalse("la campaña se marca fallida por sha que no coincide");
+            device.OtaErrorMessage.Should().Contain("no coincide");
+            published.Should().Be(0, "no se emite ni un trozo si la imagen en disco no es la registrada");
+        }
+        finally
+        {
+            if (System.IO.File.Exists(fullPath)) System.IO.File.Delete(fullPath);
         }
     }
 }

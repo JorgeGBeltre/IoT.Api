@@ -16,9 +16,11 @@ namespace IoT.Protocols.Ota;
 ///    NO está suscrita: por eso su OTA nunca llegaba al manejador del dispositivo.
 ///  - Sobre: <c>EventType</c> (si viene debe ser exactamente "UpdateFirmwareDevice"),
 ///    <c>Timestamp</c> (el equipo lo ignora) y <c>Details</c> (si falta, se usa la raíz).
-///  - Claves de <c>Details</c> por orden de preferencia del parser: se emiten las PRIMERAS
-///    de cada lista — <c>firmware_version</c>, <c>part_index</c>, <c>total_parts</c>,
-///    <c>base64</c>, <c>sha256</c> (MQTTOTAv5.cpp:304-328).
+///  - Claves de <c>Details</c>: se emiten las DOS grafías de cada una —snake_case
+///    (<c>firmware_version</c>, <c>part_index</c>, <c>total_parts</c>) y PascalCase
+///    (<c>FirmwareVersion</c>, <c>PartIndex</c>, <c>TotalParts</c>)— por compatibilidad: el
+///    parser del firmware acepta cualquiera (MQTTOTAv5.cpp:304-328), y distintas versiones del
+///    firmware han preferido una u otra. <c>base64</c> y <c>sha256</c> van en una sola grafía.
 ///  - Índices 1-BASED e inclusivos: <c>part_index == 1</c> arranca la actualización y
 ///    <c>part_index == total_parts</c> la cierra.
 ///  - Se trocea PRIMERO en bytes y se codifica en base64 DESPUÉS, chunk a chunk. Base64

@@ -60,6 +60,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
     private readonly IAuditLogRepository? _auditLogRepository;
     private readonly IFirmwareOtaService? _firmwareOtaService;
     private readonly IDeviceCommandRepository? _commandRepository;
+    private readonly IUnprovisionedDeviceAuditThrottle? _unprovisionedAuditThrottle;
 
     public IngestTelemetryCommandHandler(
         ICompositeProtocolAdapter protocolAdapter,
@@ -73,7 +74,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         ITenantContext? tenantContext = null,
         IAuditLogRepository? auditLogRepository = null,
         IFirmwareOtaService? firmwareOtaService = null,
-        IDeviceCommandRepository? commandRepository = null)
+        IDeviceCommandRepository? commandRepository = null,
+        IUnprovisionedDeviceAuditThrottle? unprovisionedAuditThrottle = null)
     {
         _protocolAdapter = protocolAdapter;
         _deviceRepository = deviceRepository;
@@ -87,6 +89,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         _auditLogRepository = auditLogRepository;
         _firmwareOtaService = firmwareOtaService;
         _commandRepository = commandRepository;
+        _unprovisionedAuditThrottle = unprovisionedAuditThrottle;
     }
 
     public async Task<Result> Handle(IngestTelemetryCommand request, CancellationToken cancellationToken)
@@ -183,8 +186,13 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
             _logger.LogWarning("Telemetry received from unprovisioned device '{DeviceIdentifier}' on topic '{Topic}'.",
                 ev.DeviceIdentifier, request.Topic);
 
-            // E2-05: Audit unknown device discovery without creating silent fake tenants
-            if (_auditLogRepository != null)
+            // E2-05: Audit unknown device discovery without creating silent fake tenants.
+            // LOW-3: una fila por trama era amplificación de escritura (una conexión sin
+            // identidad de transporte podía llenar la tabla y presionar PostgreSQL). Se
+            // audita como mucho una vez por identificador y por ventana; si no hay throttle
+            // (tests antiguos), se conserva el comportamiento de auditar.
+            bool shouldAudit = _unprovisionedAuditThrottle?.ShouldAudit(ev.DeviceIdentifier) ?? true;
+            if (_auditLogRepository != null && shouldAudit)
             {
                 var auditLog = new AuditLog(
                     id: Guid.NewGuid(),
@@ -423,7 +431,14 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
     private static bool IsPlaceholderIdentifier(string identifier) =>
         identifier.Equals("unknown-device", StringComparison.OrdinalIgnoreCase) ||
         identifier.Equals("unknown", StringComparison.OrdinalIgnoreCase) ||
-        identifier.Equals("unidentified", StringComparison.OrdinalIgnoreCase);
+        identifier.Equals("unidentified", StringComparison.OrdinalIgnoreCase) ||
+        // Rellenos que fabrican los adaptadores cuando el payload no trae identidad: sin
+        // reconocerlos aquí, una trama sin identidad de transporte (credencial de bootstrap o
+        // modo anónimo) recorría todo el pipeline hasta resolver un equipo inexistente y
+        // escribir una fila de AuditLog por trama (LOW-3). Reconocidos, se descartan temprano.
+        identifier.Equals("MQTTV5-DEVICE", StringComparison.OrdinalIgnoreCase) ||
+        identifier.Equals("TICKET-VALIDATOR-UNKNOWN", StringComparison.OrdinalIgnoreCase) ||
+        identifier.Equals("UNKNOWN-OTA-DEVICE", StringComparison.OrdinalIgnoreCase);
 
     private static string ComputeCryptographicMessageId(string deviceId, DateTime recordedAt, string? rawPayload)
     {

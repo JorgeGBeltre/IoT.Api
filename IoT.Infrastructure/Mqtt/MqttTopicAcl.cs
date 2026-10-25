@@ -42,6 +42,17 @@ public static class MqttTopicAcl
     private static readonly string[] DownlinkPrefixes = { "ota", "event", "commands", "command", "config" };
 
     /// <summary>
+    /// Sufijos de los reportes que el firmware publica bajo su propia rama OTA
+    /// (<c>ota/&lt;yo&gt;/&lt;sufijo&gt;</c>). Es la ÚNICA bajada que un dispositivo puede
+    /// publicar, y sólo con estos sufijos exactos: cualquier otro <c>ota/&lt;yo&gt;/x</c> se
+    /// deniega (antes se admitía cualquier cosa, LOW-6).
+    /// </summary>
+    private static readonly HashSet<string> OtaReportSuffixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "progress", "error", "success", "state", "ack"
+    };
+
+    /// <summary>
     /// Tópicos FIJOS, sin identificador, en los que Fligo y Toour publicaban sus reportes.
     /// Esos firmwares YA se migraron a devices/{chipId}/{ticket-validation,config-validation,
     /// ota-error}, así que esta lista sólo cubre la TRANSICIÓN: los equipos que aún no se han
@@ -212,15 +223,22 @@ public static class MqttTopicAcl
         if (owner is not null && IsDownlink(topic))
         {
             // Bajada: es del servidor. La ÚNICA excepción son los reportes que el propio
-            // dispositivo publica bajo su rama de OTA (ota/<yo>/progress|error|success|state),
-            // que es lo que la librería del firmware emite. Cualquier otro tópico de bajada
-            // se deniega a todo cliente que no sea el servidor —incluida la credencial
-            // global—: antes, un `glp/config/<yo>` o un `devices/<yo>/x/command` se colaban
-            // por ser "del propio equipo", lo que le permitía darse órdenes a sí mismo.
+            // dispositivo publica bajo su rama de OTA, con sufijo EXACTO
+            // (ota/<yo>/{progress|error|success|state|ack}), que es lo que la librería del
+            // firmware emite. Cualquier otro tópico de bajada se deniega a todo cliente que no
+            // sea el servidor —incluida la credencial global—: antes, un `glp/config/<yo>` o un
+            // `devices/<yo>/x/command` se colaban por ser "del propio equipo", lo que le
+            // permitía darse órdenes a sí mismo.
             var parts = topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            // EXACTAMENTE 3 segmentos (ota/<yo>/<reporte>) y el último uno de los reportes que
+            // la librería del firmware publica. Antes bastaba "prefijo ota + 3+ segmentos +
+            // propiedad", así que el propio equipo podía publicar en ota/<yo>/<cualquier-cosa>
+            // y cada trama recorría el pipeline y escribía histórico con acción "unknown"
+            // (LOW-6). Ahora sólo pasan los sufijos conocidos.
             bool isOwnOtaReport =
-                parts.Length >= 3 &&
+                parts.Length == 3 &&
                 parts[0].Equals("ota", StringComparison.OrdinalIgnoreCase) &&
+                OtaReportSuffixes.Contains(parts[2]) &&
                 Owns(authenticatedChipId, owner);
 
             return isOwnOtaReport ? Decision.Allow : Decision.Deny;

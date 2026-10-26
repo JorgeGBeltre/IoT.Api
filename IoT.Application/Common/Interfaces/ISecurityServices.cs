@@ -50,7 +50,10 @@ public sealed record AuthTokenResult(
     string Email,
     string Role,
     bool MustChangePassword,
-    DateTime ExpiresAt);
+    DateTime ExpiresAt)
+{
+    public string RoleName => Role;
+}
 
 public interface IJwtTokenGenerator
 {

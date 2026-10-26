@@ -150,4 +150,27 @@ public sealed class SignalRFleetNotificationService : IFleetNotificationService
         await _hubContext.Clients.Group(tenantGroup).SendAsync("DeviceOtaProgressUpdated", payload, cancellationToken);
         await _hubContext.Clients.Group(deviceGroup).SendAsync("DeviceOtaProgressUpdated", payload, cancellationToken);
     }
+
+    public async Task NotifyDeviceStatusChangedAsync(
+        Guid tenantId,
+        Guid deviceId,
+        string chipId,
+        string status,
+        DateTime timestamp,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = new
+        {
+            deviceId,
+            chipId,
+            status,
+            timestamp
+        };
+
+        string tenantGroup = $"tenant_{tenantId}";
+        string deviceGroup = $"device_{deviceId}";
+
+        await _hubContext.Clients.Group(tenantGroup).SendAsync("DeviceStatusUpdated", payload, cancellationToken);
+        await _hubContext.Clients.Group(deviceGroup).SendAsync("DeviceStatusUpdated", payload, cancellationToken);
+    }
 }

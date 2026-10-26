@@ -20,6 +20,13 @@ public interface IDeviceRepository
     Task<bool> BelongsToTenantAsync(Guid deviceId, Guid tenantId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Device>> GetByTenantAsync(Guid tenantId, DeviceOperationalStatus? status = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Device>> GetByGroupIdAsync(Guid tenantId, Guid groupId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Obtiene todos los dispositivos con estado Online cuya última comunicación es anterior a <paramref name="cutoffUtc"/>
+    /// (o nunca han comunicado). Utiliza IgnoreQueryFilters para barrer el sistema multi-tenant completo en segundo plano.
+    /// </summary>
+    Task<IReadOnlyList<Device>> GetOnlineDevicesOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Dispositivos marcados como "actualizacion en curso". Lo usa la reconciliacion de
     /// arranque: si el proceso se reinicio a mitad de un rollout, la bomba que lo enviaba

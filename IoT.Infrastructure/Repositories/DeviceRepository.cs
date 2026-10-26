@@ -122,6 +122,15 @@ public sealed class DeviceRepository : IDeviceRepository
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<Device>> GetOnlineDevicesOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+    {
+        return await _context.Devices
+            .IgnoreQueryFilters()
+            .Where(d => d.OperationalStatus == DeviceOperationalStatus.Online &&
+                       (d.LastCommunicationAt == null || d.LastCommunicationAt < cutoffUtc))
+            .ToListAsync(cancellationToken);
+    }
+
     public async Task<IReadOnlyList<Device>> GetByTenantAsync(Guid tenantId, DeviceOperationalStatus? status = null, CancellationToken cancellationToken = default)
     {
         var query = _context.Devices

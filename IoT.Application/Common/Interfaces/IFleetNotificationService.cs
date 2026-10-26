@@ -51,4 +51,12 @@ public interface IFleetNotificationService
         string status,
         string? errorMessage = null,
         CancellationToken cancellationToken = default);
+
+    Task NotifyDeviceStatusChangedAsync(
+        Guid tenantId,
+        Guid deviceId,
+        string chipId,
+        string status,
+        DateTime timestamp,
+        CancellationToken cancellationToken = default);
 }

@@ -179,7 +179,17 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
                 return Result.Success();
             }
 
-        // 3. Resolve device
+        // 3. Resolve device.
+        // La resolución global por ChipId y la auditoría de equipos no aprovisionados corren SIN
+        // tenant (el dispositivo aún no está mapeado a ninguno). Se marca operación de sistema
+        // para que, bajo Platform:Rls:Enforce, el interceptor permita esa lectura/escritura
+        // cross-tenant en vez de bloquear la conexión (ADR-003 D6). Se desactiva en cuanto se
+        // fija el tenant del dispositivo, unas líneas más abajo.
+        if (_tenantContext != null)
+        {
+            _tenantContext.IsSystemOperation = true;
+        }
+
         var device = await _deviceRepository.GetByChipIdGlobalAsync(ev.DeviceIdentifier, cancellationToken);
         if (device is null)
         {
@@ -229,10 +239,13 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
                 $"Device with ChipId '{ev.DeviceIdentifier}' is not provisioned in the system. Telemetry rejected."));
         }
 
-        // E1-04: Bind the resolved device's tenant to the ambient tenant context
+        // E1-04: Bind the resolved device's tenant to the ambient tenant context.
+        // Desde aquí las escrituras (telemetría, posiciones, comandos) quedan RLS-scoped al
+        // tenant del dispositivo: se desactiva la operación de sistema abierta para la resolución.
         if (_tenantContext != null)
         {
             _tenantContext.TenantId = device.TenantId;
+            _tenantContext.IsSystemOperation = false;
         }
 
         if (device.AdminStatus != DeviceAdminStatus.Active)

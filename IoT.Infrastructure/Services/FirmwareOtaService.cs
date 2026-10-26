@@ -4,6 +4,7 @@ using IoT.Application.Firmware;
 using IoT.Domain.Common;
 using IoT.Domain.Entities;
 using IoT.Domain.Repositories;
+using IoT.Infrastructure.Persistence;
 using IoT.Protocols.Ota;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -981,7 +982,10 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         }
 
         using var _throttleSlotHolder = throttleSlot;
-        using var scope = _scopeFactory.CreateScope();
+        // La transmisión corre en una tarea de fondo (sin tenant ambiental) pero opera sobre UN
+        // solo tenant conocido: se fija el tenant del scope para que RLS siga aislando a ese
+        // tenant (y bajo Platform:Rls:Enforce no se bloquee por falta de tenant). ADR-003.
+        using var scope = _scopeFactory.CreateTenantScope(tenantId);
         var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
         var firmwareRepo = scope.ServiceProvider.GetRequiredService<IFirmwareVersionRecordRepository>();
         var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
@@ -1084,7 +1088,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
                 // viejo, BORRANDO el fallo recién registrado y siguiendo a la vez enviando
                 // trozos a un equipo que ya había abortado.
                 Device? current;
-                using (var checkScope = _scopeFactory.CreateScope())
+                using (var checkScope = _scopeFactory.CreateTenantScope(tenantId))
                 {
                     var checkRepo = checkScope.ServiceProvider.GetRequiredService<IDeviceRepository>();
                     current = await checkRepo.GetByIdAsync(deviceId, ct);
@@ -1128,7 +1132,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
 
                 // El progreso se aplica sobre la instancia RECIÉN LEÍDA y se guarda en su
                 // propio ámbito, para no arrastrar un snapshot viejo.
-                using (var saveScope = _scopeFactory.CreateScope())
+                using (var saveScope = _scopeFactory.CreateTenantScope(tenantId))
                 {
                     var saveRepo = saveScope.ServiceProvider.GetRequiredService<IDeviceRepository>();
                     var saveUow = saveScope.ServiceProvider.GetRequiredService<IUnitOfWork>();

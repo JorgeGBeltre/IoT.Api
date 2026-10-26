@@ -87,7 +87,10 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:5000
-      - ConnectionStrings__Postgres=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${POSTGRES_USER:?POSTGRES_USER es obligatorio};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
+      # Runtime: rol de aplicación iot_app (NOBYPASSRLS) → la Row-Level Security por tenant es EFECTIVA (ADR-003 D4).
+      - ConnectionStrings__Postgres=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${APP_DB_USER:-iot_app};Password=${APP_DB_PASSWORD:?APP_DB_PASSWORD es obligatorio}
+      # Admin: migraciones, seeding y aprovisionamiento del rol iot_app (iot_admin, superusuario/BYPASSRLS).
+      - ConnectionStrings__PostgresAdmin=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${POSTGRES_USER:?POSTGRES_USER es obligatorio};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
       - ConnectionStrings__Redis=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
       - Redis__ConnectionString=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
       # Broker MQTT embebido (en proceso). En producción exige ApiKey por dispositivo.

@@ -4,6 +4,7 @@ using IoT.Application.Common.Interfaces;
 using IoT.Application.Ingestion.Commands;
 using IoT.Domain.Enums;
 using IoT.Domain.Repositories;
+using IoT.Infrastructure.Persistence;
 using MediatR;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -318,7 +319,9 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         var sessions = _authenticatedChipIds.ToArray();
         if (sessions.Length == 0) return;
 
-        using var scope = _scopeFactory.CreateScope();
+        // Revalidación de sesiones (sin tenant): operación de sistema para que bajo
+        // Platform:Rls:Enforce la lectura global por ChipId no sea bloqueada (ADR-003 D6).
+        using var scope = _scopeFactory.CreateSystemScope();
         var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
 
         foreach (var (clientId, chipId) in sessions)
@@ -498,7 +501,9 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
             //     herramientas del operador), ACOTADO a ese tenant.
             bool isDeviceKey = false;
 
-            using (var scope = _scopeFactory.CreateScope())
+            // Autenticación en CONNECT (sin tenant aún): operación de sistema para resolver el
+            // dispositivo/credencial por ChipId bajo Platform:Rls:Enforce sin bloqueo (ADR-003 D6).
+            using (var scope = _scopeFactory.CreateSystemScope())
             {
                 var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
                 var apiKeySvc = scope.ServiceProvider.GetRequiredService<IDeviceApiKeyService>();

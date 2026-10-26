@@ -7,6 +7,9 @@ namespace IoT.Api.Common;
 public sealed class TenantContext : ITenantContext
 {
     public Guid TenantId { get; set; } = Guid.Empty;
+
+    /// <summary>Operación de sistema (cross-tenant autorizada). Ver <see cref="ITenantContext"/>.</summary>
+    public bool IsSystemOperation { get; set; }
 }
 
 public sealed class TenantResolutionMiddleware

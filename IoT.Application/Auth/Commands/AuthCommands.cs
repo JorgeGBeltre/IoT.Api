@@ -23,6 +23,7 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
     private readonly IAuditLogRepository _auditLogRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ILogger<LoginCommandHandler> _logger;
+    private readonly ITenantContext? _tenantContext;
 
     public LoginCommandHandler(
         IUserRepository userRepository,
@@ -30,7 +31,8 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
         IJwtTokenGenerator jwtTokenGenerator,
         IAuditLogRepository auditLogRepository,
         IUnitOfWork unitOfWork,
-        ILogger<LoginCommandHandler> logger)
+        ILogger<LoginCommandHandler> logger,
+        ITenantContext? tenantContext = null)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
@@ -38,10 +40,16 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
         _auditLogRepository = auditLogRepository;
         _unitOfWork = unitOfWork;
         _logger = logger;
+        _tenantContext = tenantContext;
     }
 
     public async Task<Result<AuthTokenResult>> Handle(LoginCommand request, CancellationToken cancellationToken)
     {
+        // Login anónimo: sin tenant ambiental. Operación de sistema para que bajo
+        // Platform:Rls:Enforce el lookup (global o por tenant con IgnoreQueryFilters) y la
+        // auditoría no sean bloqueados por el interceptor RLS (ADR-003 D6).
+        if (_tenantContext != null) _tenantContext.IsSystemOperation = true;
+
         User? user = null;
         if (request.TenantId.HasValue && request.TenantId.Value != Guid.Empty)
         {
@@ -102,23 +110,29 @@ public sealed class ForgotPasswordCommandHandler : IRequestHandler<ForgotPasswor
     private readonly IEmailService _emailService;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ILogger<ForgotPasswordCommandHandler> _logger;
+    private readonly ITenantContext? _tenantContext;
 
     public ForgotPasswordCommandHandler(
         IUserRepository userRepository,
         IOtpRepository otpRepository,
         IEmailService emailService,
         IUnitOfWork unitOfWork,
-        ILogger<ForgotPasswordCommandHandler> logger)
+        ILogger<ForgotPasswordCommandHandler> logger,
+        ITenantContext? tenantContext = null)
     {
         _userRepository = userRepository;
         _otpRepository = otpRepository;
         _emailService = emailService;
         _unitOfWork = unitOfWork;
         _logger = logger;
+        _tenantContext = tenantContext;
     }
 
     public async Task<Result<string>> Handle(ForgotPasswordCommand request, CancellationToken cancellationToken)
     {
+        // Recuperación anónima: sin tenant ambiental. Operación de sistema (ADR-003 D6).
+        if (_tenantContext != null) _tenantContext.IsSystemOperation = true;
+
         var user = await _userRepository.GetByEmailAsync(request.TenantId, request.Email, cancellationToken);
         if (user is null || !user.IsActive)
         {
@@ -147,16 +161,21 @@ public sealed class VerifyOtpCommandHandler : IRequestHandler<VerifyOtpCommand, 
     private readonly IOtpRepository _otpRepository;
     private readonly IUserRepository _userRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly ITenantContext? _tenantContext;
 
-    public VerifyOtpCommandHandler(IOtpRepository otpRepository, IUserRepository userRepository, IUnitOfWork unitOfWork)
+    public VerifyOtpCommandHandler(IOtpRepository otpRepository, IUserRepository userRepository, IUnitOfWork unitOfWork, ITenantContext? tenantContext = null)
     {
         _otpRepository = otpRepository;
         _userRepository = userRepository;
         _unitOfWork = unitOfWork;
+        _tenantContext = tenantContext;
     }
 
     public async Task<Result<string>> Handle(VerifyOtpCommand request, CancellationToken cancellationToken)
     {
+        // Verificación anónima de OTP: sin tenant ambiental. Operación de sistema (ADR-003 D6).
+        if (_tenantContext != null) _tenantContext.IsSystemOperation = true;
+
         var activeOtp = await _otpRepository.GetActiveOtpAsync(request.TenantId, request.Email, OtpPurpose.PasswordReset, cancellationToken);
         if (activeOtp is null)
         {
@@ -194,6 +213,7 @@ public sealed class ResetPasswordCommandHandler : IRequestHandler<ResetPasswordC
     private readonly IEmailService _emailService;
     private readonly IAuditLogRepository _auditLogRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly ITenantContext? _tenantContext;
 
     public ResetPasswordCommandHandler(
         IUserRepository userRepository,
@@ -201,7 +221,8 @@ public sealed class ResetPasswordCommandHandler : IRequestHandler<ResetPasswordC
         IPasswordHasher passwordHasher,
         IEmailService emailService,
         IAuditLogRepository auditLogRepository,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        ITenantContext? tenantContext = null)
     {
         _userRepository = userRepository;
         _otpRepository = otpRepository;
@@ -209,10 +230,14 @@ public sealed class ResetPasswordCommandHandler : IRequestHandler<ResetPasswordC
         _emailService = emailService;
         _auditLogRepository = auditLogRepository;
         _unitOfWork = unitOfWork;
+        _tenantContext = tenantContext;
     }
 
     public async Task<Result<string>> Handle(ResetPasswordCommand request, CancellationToken cancellationToken)
     {
+        // Reset anónimo con token: sin tenant ambiental. Operación de sistema (ADR-003 D6).
+        if (_tenantContext != null) _tenantContext.IsSystemOperation = true;
+
         var user = await _userRepository.GetByEmailAsync(request.TenantId, request.Email, cancellationToken);
         if (user is null)
             return Result<string>.Failure(new Error("User.NotFound", "Usuario no encontrado."));
@@ -261,23 +286,29 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
     private readonly IJwtTokenGenerator _jwtTokenGenerator;
     private readonly IAuditLogRepository _auditLogRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly ITenantContext? _tenantContext;
 
     public ChangeTemporaryPasswordCommandHandler(
         IUserRepository userRepository,
         IPasswordHasher passwordHasher,
         IJwtTokenGenerator jwtTokenGenerator,
         IAuditLogRepository auditLogRepository,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        ITenantContext? tenantContext = null)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
         _jwtTokenGenerator = jwtTokenGenerator;
         _auditLogRepository = auditLogRepository;
         _unitOfWork = unitOfWork;
+        _tenantContext = tenantContext;
     }
 
     public async Task<Result<AuthTokenResult>> Handle(ChangeTemporaryPasswordCommand request, CancellationToken cancellationToken)
     {
+        // Cambio de clave temporal (pre-sesión): sin tenant ambiental. Operación de sistema (ADR-003 D6).
+        if (_tenantContext != null) _tenantContext.IsSystemOperation = true;
+
         User? user = request.TenantId != Guid.Empty
             ? await _userRepository.GetByUsernameAsync(request.TenantId, request.Username, cancellationToken)
             : await _userRepository.FindByUsernameOrEmailGlobalAsync(request.Username, cancellationToken);

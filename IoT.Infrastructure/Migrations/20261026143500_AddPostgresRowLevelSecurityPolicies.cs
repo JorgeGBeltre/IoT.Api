@@ -10,24 +10,12 @@ namespace IoT.Infrastructure.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            // 1. Create app role 'iot_app' and grant required permissions (ADR-003 & ADR-010)
-            migrationBuilder.Sql(@"
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'iot_app') THEN
-        CREATE ROLE iot_app WITH LOGIN PASSWORD 'IoT_App_Password_2026!' NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
-    END IF;
-END $$;
-
-GRANT CONNECT ON DATABASE iot_platform_db TO iot_app;
-GRANT USAGE, CREATE ON SCHEMA public TO iot_app;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO iot_app;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO iot_app;
-GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO iot_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO iot_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO iot_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON FUNCTIONS TO iot_app;
-");
+            // 1. El rol de aplicación (iot_app, NOBYPASSRLS) y sus GRANTs ya NO se crean aquí.
+            //    Llevaban una contraseña literal versionada (secreto en el repo) e idéntica en
+            //    todos los despliegues. Ahora los provisiona RlsRoleBootstrapper al arrancar,
+            //    como admin y tras migrar, tomando usuario/clave de ConnectionStrings:Postgres
+            //    (fuente única). Esta migración conserva sólo el esquema y las políticas RLS,
+            //    que sí son fuente de verdad del esquema (ADR-010). Ver RlsRoleBootstrapper.
 
             // 2. Ensure missing tables exist if not previously migrated
             migrationBuilder.Sql(@"

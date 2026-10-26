@@ -5,6 +5,7 @@ using IoT.Application.Common.Interfaces;
 using IoT.Application.Ingestion.Commands;
 using IoT.Domain.Enums;
 using IoT.Domain.Repositories;
+using IoT.Infrastructure.Persistence;
 using IoT.Protocols.Tcp;
 using MediatR;
 using Microsoft.Extensions.Configuration;
@@ -282,7 +283,9 @@ public sealed class MultiProtocolTcpGatewayService : BackgroundService, ITcpComm
         {
             if (string.IsNullOrEmpty(session.Imei))
             {
-                using var scope = _scopeFactory.CreateScope();
+                // Resolución global del dispositivo (sin tenant): sesión de sistema para que
+                // bajo Platform:Rls:Enforce la lectura cross-tenant no sea bloqueada (ADR-003 D6).
+                using var scope = _scopeFactory.CreateSystemScope();
                 var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
                 var device = await deviceRepo.GetByChipIdGlobalAsync(outcome.SessionImei, cancellationToken);
                 if (device is null || device.AdminStatus != DeviceAdminStatus.Active)
@@ -325,7 +328,7 @@ public sealed class MultiProtocolTcpGatewayService : BackgroundService, ITcpComm
         //     dejar de recibir ACK y comandos (no esperar al idle timeout).
         if (DateTime.UtcNow - session.LastAuthCheckUtc > AuthRecheck)
         {
-            using var scope = _scopeFactory.CreateScope();
+            using var scope = _scopeFactory.CreateSystemScope();
             var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
             var current = await deviceRepo.GetByChipIdGlobalAsync(session.Imei, cancellationToken);
             if (current is null || current.AdminStatus != DeviceAdminStatus.Active)

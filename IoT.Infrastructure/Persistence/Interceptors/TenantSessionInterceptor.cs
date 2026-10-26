@@ -8,9 +8,15 @@ namespace IoT.Infrastructure.Persistence.Interceptors;
 
 /// <summary>
 /// Row-Level Security (RLS) Interceptor for PostgreSQL (ADR-003).
-/// Injects the current tenant ID into the PostgreSQL connection session via 'SELECT set_config('app.tenant_id', ...)'
+/// Injects the current tenant ID into the PostgreSQL connection session via 'set_config('app.tenant_id', ...)'
 /// and cleans up session variables upon connection closure to prevent connection pool leakage.
 /// Provides defense-in-depth against SQL injection, Dapper queries, or EF Core query filter omissions.
+///
+/// Reglas de apertura de conexión:
+///  - Hay TenantId resuelto            → app.tenant_id = tenant,  app.is_system_session = false (RLS por tenant).
+///  - Sin TenantId, operación SISTEMA  → app.tenant_id = '',      app.is_system_session = true  (cross-tenant autorizada, ADR-003 D6).
+///  - Sin TenantId ni sistema + enforce → LANZA (nunca se abre una conexión de plano de datos sin tenant, ADR-003 D5).
+///  - Sin TenantId ni sistema sin enforce → sesión de sistema (compatibilidad; RLS sigue efectiva para el plano de datos que SÍ trae tenant).
 /// </summary>
 public sealed class TenantSessionInterceptor : DbConnectionInterceptor
 {
@@ -57,39 +63,59 @@ public sealed class TenantSessionInterceptor : DbConnectionInterceptor
         await ResetSessionAsync(connection);
     }
 
+    private bool RlsEnforce => _configuration.GetValue<bool>("Platform:Rls:Enforce", false);
+
+    /// <summary>
+    /// Decide el SQL de apertura de sesión según el contexto de tenant. Puede LANZAR bajo
+    /// modo estricto (sin tenant ni operación de sistema): esa excepción debe propagar.
+    /// </summary>
+    private string ResolveSessionCommand()
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        if (tenantId != Guid.Empty)
+        {
+            // tenantId es un Guid (no texto controlado por el usuario): su interpolación en el
+            // literal no es inyectable. set_config no admite parámetros enlazados cómodamente
+            // aquí (comando crudo sobre la conexión), y el valor está acotado al formato Guid.
+            return $"SELECT set_config('app.tenant_id', '{tenantId}', false); SELECT set_config('app.is_system_session', 'false', false);";
+        }
+
+        if (_tenantContext.IsSystemOperation)
+        {
+            return "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false);";
+        }
+
+        if (RlsEnforce)
+        {
+            _logger.LogCritical("RLS Violation: intento de conexión sin TenantId resuelto y sin operación de sistema explícita bajo modo estricto.");
+            throw new InvalidOperationException(
+                "Row-Level Security (RLS) Violation: las operaciones requieren un TenantId autenticado o una operación de sistema explícita (ITenantContext.IsSystemOperation).");
+        }
+
+        // Modo no estricto (compatibilidad): sin tenant → sesión de sistema. RLS sigue aislando
+        // todo el plano de datos que SÍ trae tenant; sólo las rutas sin tenant quedan abiertas.
+        return "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false);";
+    }
+
     private void ConfigureSession(DbConnection connection)
     {
         if (!IsPostgreSqlConnection(connection)) return;
 
-        var tenantId = _tenantContext.TenantId;
-        var rlsEnforce = _configuration.GetValue<bool>("Platform:Rls:Enforce", false);
+        // ResolveSessionCommand() puede lanzar bajo enforce: se llama FUERA del try para que la
+        // violación RLS propague y no quede silenciada como un fallo de set_config cualquiera.
+        var sql = ResolveSessionCommand();
 
         try
         {
             using var cmd = connection.CreateCommand();
-            if (tenantId != Guid.Empty)
-            {
-                cmd.CommandText = $"SELECT set_config('app.tenant_id', '{tenantId}', false); SELECT set_config('app.is_system_session', 'false', false);";
-                cmd.ExecuteNonQuery();
-                _logger.LogTrace("RLS Session context app.tenant_id set to {TenantId}", tenantId);
-            }
-            else
-            {
-                if (rlsEnforce)
-                {
-                    _logger.LogCritical("RLS Violation: Attempted database connection without a resolved TenantId under strict mode.");
-                    throw new InvalidOperationException("Row-Level Security (RLS) Violation: Operations require an authenticated TenantId context.");
-                }
-
-                cmd.CommandText = "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false);";
-                cmd.ExecuteNonQuery();
-                _logger.LogTrace("RLS Session context set: is_system_session=true (Guid.Empty / System)");
-            }
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to apply PostgreSQL RLS session setting for TenantId {TenantId}", tenantId);
-            if (rlsEnforce) throw;
+            _logger.LogError(ex, "Failed to apply PostgreSQL RLS session setting.");
+            if (RlsEnforce) throw;
         }
     }
 
@@ -97,35 +123,18 @@ public sealed class TenantSessionInterceptor : DbConnectionInterceptor
     {
         if (!IsPostgreSqlConnection(connection)) return;
 
-        var tenantId = _tenantContext.TenantId;
-        var rlsEnforce = _configuration.GetValue<bool>("Platform:Rls:Enforce", false);
+        var sql = ResolveSessionCommand();
 
         try
         {
             await using var cmd = connection.CreateCommand();
-            if (tenantId != Guid.Empty)
-            {
-                cmd.CommandText = $"SELECT set_config('app.tenant_id', '{tenantId}', false); SELECT set_config('app.is_system_session', 'false', false);";
-                await cmd.ExecuteNonQueryAsync(cancellationToken);
-                _logger.LogTrace("RLS Session context app.tenant_id set to {TenantId}", tenantId);
-            }
-            else
-            {
-                if (rlsEnforce)
-                {
-                    _logger.LogCritical("RLS Violation: Attempted database connection without a resolved TenantId under strict mode.");
-                    throw new InvalidOperationException("Row-Level Security (RLS) Violation: Operations require an authenticated TenantId context.");
-                }
-
-                cmd.CommandText = "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false);";
-                await cmd.ExecuteNonQueryAsync(cancellationToken);
-                _logger.LogTrace("RLS Session context set: is_system_session=true (Guid.Empty / System)");
-            }
+            cmd.CommandText = sql;
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to apply PostgreSQL RLS session setting for TenantId {TenantId}", tenantId);
-            if (rlsEnforce) throw;
+            _logger.LogError(ex, "Failed to apply PostgreSQL RLS session setting.");
+            if (RlsEnforce) throw;
         }
     }
 

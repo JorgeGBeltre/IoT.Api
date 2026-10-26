@@ -1,5 +1,6 @@
 using IoT.Application.Common.Interfaces;
 using IoT.Domain.Repositories;
+using IoT.Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -82,7 +83,9 @@ public sealed class OtaCampaignWatchdogService : BackgroundService
     {
         try
         {
-            using var scope = _scopeFactory.CreateScope();
+            // El vigilante corre sin tenant ambiental y cruza tenants: sesión de sistema para
+            // que bajo Platform:Rls:Enforce no se bloquee la lectura/cierre (ADR-003 D6).
+            using var scope = _scopeFactory.CreateSystemScope();
             var deviceRepository = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
             var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
             var audit = scope.ServiceProvider.GetService<IAuditLogRepository>();

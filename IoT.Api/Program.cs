@@ -9,6 +9,7 @@ using IoT.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
@@ -280,11 +281,50 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
     Predicate = _ => true
 }).AllowAnonymous();
 
-// Automated database schema creation and initial seeding
+// Migraciones + seeding + aprovisionamiento del rol RLS: TODO con la conexión ADMIN
+// (iot_admin / superusuario), porque crear roles, poseer tablas y sembrar datos cross-tenant
+// requieren privilegios que el rol de runtime (iot_app, NOBYPASSRLS) no tiene — ni debe tener.
+// El runtime (ApplicationDbContext inyectado) usa ConnectionStrings:Postgres (iot_app), de modo
+// que las peticiones quedan sujetas a RLS. ADR-003 D4/D6.
 using (var scope = app.Services.CreateScope())
 {
-    var seeder = scope.ServiceProvider.GetRequiredService<IoT.Infrastructure.Persistence.DatabaseSeeder>();
+    var sp = scope.ServiceProvider;
+    var config = sp.GetRequiredService<IConfiguration>();
+
+    var runtimeConn = config.GetConnectionString("Postgres")
+        ?? throw new InvalidOperationException("Critical Configuration Error: 'ConnectionStrings:Postgres' no está configurada.");
+    // Sin una cadena admin separada se reutiliza la de runtime (comportamiento previo, sin split de roles).
+    var adminConn = config.GetConnectionString("PostgresAdmin") ?? runtimeConn;
+
+    var adminOptions = new DbContextOptionsBuilder<IoT.Infrastructure.Persistence.ApplicationDbContext>()
+        .UseNpgsql(adminConn, npgsql =>
+        {
+            npgsql.UseNetTopologySuite();
+            npgsql.MigrationsAssembly(typeof(IoT.Infrastructure.Persistence.ApplicationDbContext).Assembly.FullName);
+        })
+        .Options;
+
+    // Contexto admin SIN el interceptor de tenant: migrar/sembrar no deben tocar los GUC de RLS,
+    // y el admin (superusuario) omite RLS por diseño para el seeding cross-tenant.
+    await using var adminContext = new IoT.Infrastructure.Persistence.ApplicationDbContext(adminOptions, tenantContext: null);
+
+    var seeder = new IoT.Infrastructure.Persistence.DatabaseSeeder(
+        adminContext,
+        sp.GetRequiredService<IPasswordHasher>(),
+        sp.GetRequiredService<IDeviceApiKeyService>(),
+        config,
+        sp.GetRequiredService<IHostEnvironment>(),
+        sp.GetRequiredService<ILogger<IoT.Infrastructure.Persistence.DatabaseSeeder>>());
+
+    // SeedAsync aplica primero las migraciones (incluidas las políticas RLS) y luego siembra.
     await seeder.SeedAsync();
+
+    // Ya migrado (las tablas existen), provisiona/rota el rol de runtime iot_app + sus grants.
+    await IoT.Infrastructure.Persistence.RlsRoleBootstrapper.EnsureAppRoleAsync(
+        adminContext,
+        runtimeConn,
+        adminConn,
+        sp.GetRequiredService<ILoggerFactory>().CreateLogger("IoT.Infrastructure.Persistence.RlsRoleBootstrapper"));
 }
 
 app.Run();

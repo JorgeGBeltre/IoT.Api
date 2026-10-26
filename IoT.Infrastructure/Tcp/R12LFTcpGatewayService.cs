@@ -8,6 +8,7 @@ using IoT.Application.Common.Interfaces;
 using IoT.Application.Ingestion.Commands;
 using IoT.Domain.Enums;
 using IoT.Domain.Repositories;
+using IoT.Infrastructure.Persistence;
 using IoT.Protocols.Binary;
 using MediatR;
 using Microsoft.Extensions.Configuration;
@@ -251,7 +252,9 @@ public sealed class R12LFTcpGatewayService : BackgroundService, ITcpCommandGatew
                 // Compuerta de adopción: el IMEI (== ChipId) debe estar REGISTRADO y Activo.
                 // Espeja EmbeddedMqttBroker.OnValidatingConnection: un equipo no provisionado
                 // NO se adopta (ni sesión ni ACK); la plataforma no debe "verlo".
-                using (var scope = _scopeFactory.CreateScope())
+                // Resolución global del dispositivo (sin tenant): sesión de sistema para que
+                // bajo Platform:Rls:Enforce la lectura cross-tenant no sea bloqueada (ADR-003 D6).
+                using (var scope = _scopeFactory.CreateSystemScope())
                 {
                     var deviceRepo = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
                     var device = await deviceRepo.GetByChipIdGlobalAsync(imei, cancellationToken);

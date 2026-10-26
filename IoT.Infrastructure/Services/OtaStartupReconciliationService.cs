@@ -1,5 +1,6 @@
 using IoT.Application.Common.Interfaces;
 using IoT.Domain.Repositories;
+using IoT.Infrastructure.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -38,7 +39,9 @@ public sealed class OtaStartupReconciliationService : IHostedService
     {
         try
         {
-            using var scope = _scopeFactory.CreateScope();
+            // Reconciliación de arranque sin tenant ambiental, cruza tenants: sesión de sistema
+            // para que bajo Platform:Rls:Enforce no se bloquee la lectura/cierre (ADR-003 D6).
+            using var scope = _scopeFactory.CreateSystemScope();
             var deviceRepository = scope.ServiceProvider.GetRequiredService<IDeviceRepository>();
             var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
 

@@ -12,23 +12,34 @@ public sealed class TelemetryRetentionService : ITelemetryRetentionService
     private readonly IDeviceCommandRepository _commandRepository;
     private readonly ApplicationDbContext? _context;
     private readonly ILogger<TelemetryRetentionService> _logger;
+    private readonly ITenantContext? _tenantContext;
 
     public TelemetryRetentionService(
         ITelemetryStore telemetryStore,
         IDeviceCommandRepository commandRepository,
         ILogger<TelemetryRetentionService> logger,
-        ApplicationDbContext? context = null)
+        ApplicationDbContext? context = null,
+        ITenantContext? tenantContext = null)
     {
         _telemetryStore = telemetryStore;
         _commandRepository = commandRepository;
         _logger = logger;
         _context = context;
+        _tenantContext = tenantContext;
     }
 
     public async Task<RetentionPurgeResult> PurgeExpiredDataAsync(
         RetentionPolicyOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        // La purga es inherentemente cross-tenant (recorre TenantSettings de todos los tenants
+        // y purga datos globales con IgnoreQueryFilters): opera como sesión de sistema para que
+        // bajo Platform:Rls:Enforce el interceptor no bloquee esas consultas sin tenant (ADR-003 D6).
+        if (_tenantContext != null)
+        {
+            _tenantContext.IsSystemOperation = true;
+        }
+
         var opts = options ?? new RetentionPolicyOptions();
         var now = DateTime.UtcNow;
 

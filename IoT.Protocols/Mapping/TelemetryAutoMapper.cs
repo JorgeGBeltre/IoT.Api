@@ -1,35 +1,28 @@
 using System.Globalization;
 using System.Text.Json;
-using AutoMapper;
 using IoT.Protocols.Contracts;
 using IoT.Protocols.Models;
 
 namespace IoT.Protocols.Mapping;
 
 /// <summary>
-/// Motor central de AutoMapper para telemetría y tramas IoT.
+/// Motor central de mapeo y normalización para telemetría y tramas IoT.
+/// Reemplazo estático nativo y de alto rendimiento de AutoMapper (elimina vulnerabilidad GHSA-rvv3-g6hj-g44x).
 /// Traduce dinámicamente cualquier payload JSON, diccionario o DTO a CanonicalDeviceTelemetry
 /// y a NormalizedTelemetryEvent reconociendo todas las métricas posibles y sus alias.
 /// </summary>
 public static class TelemetryAutoMapper
 {
-    private static readonly Lazy<IMapper> LazyMapper = new(() =>
-    {
-        var config = new MapperConfiguration(cfg =>
-        {
-            cfg.AddProfile<TelemetryMappingProfile>();
-        });
-        return config.CreateMapper();
-    });
+    private static readonly SimpleMapper DefaultMapper = new();
 
-    public static IMapper Mapper => LazyMapper.Value;
+    public static ISimpleMapper Mapper => DefaultMapper;
 
     /// <summary>
     /// Mapea un objeto fuente al modelo canónico de telemetría.
     /// </summary>
     public static CanonicalDeviceTelemetry MapToCanonical<TSource>(TSource source) where TSource : class
     {
-        return Mapper.Map<CanonicalDeviceTelemetry>(source);
+        return DefaultMapper.Map<CanonicalDeviceTelemetry>(source);
     }
 
     /// <summary>
@@ -60,7 +53,7 @@ public static class TelemetryAutoMapper
                         var devDto = JsonSerializer.Deserialize<DeviceInfoDto>(devProp.GetRawText(), JsonOptions);
                         if (devDto != null)
                         {
-                            Mapper.Map(devDto, canonical);
+                            MapDeviceInfo(devDto, canonical);
                         }
                     }
                 }
@@ -110,6 +103,61 @@ public static class TelemetryAutoMapper
         }
 
         return canonical;
+    }
+
+    public static void MapDeviceInfo(DeviceInfoDto src, CanonicalDeviceTelemetry dest)
+    {
+        if (src == null || dest == null) return;
+        if (src.ChipId != null) dest.ChipId = src.ChipId;
+        if (src.ChipType != null) dest.ChipType = src.ChipType;
+        if (src.MacAddress != null) dest.MacAddress = src.MacAddress;
+        if (src.ClientID != null) dest.ClientId = src.ClientID;
+        if (src.FirmwareVersion != null) dest.FirmwareVersion = src.FirmwareVersion;
+    }
+
+    public static void MapGpsData(GpsDataDto src, CanonicalDeviceTelemetry dest)
+    {
+        if (src == null || dest == null) return;
+        dest.Latitude = src.Latitude;
+        dest.Longitude = src.Longitude;
+        dest.Altitude = src.Altitude;
+        dest.Speed = src.Speed;
+        dest.Course = src.Course;
+        dest.Satellites = src.Satellites;
+        dest.IsValid = src.IsValid;
+        if (src.Timestamp != null)
+        {
+            var dt = ParseDate(src.Timestamp);
+            if (dt.HasValue) dest.Timestamp = dt.Value;
+        }
+    }
+
+    public static void MapAccidentData(AccidentDataDto src, CanonicalDeviceTelemetry dest)
+    {
+        if (src == null || dest == null) return;
+        dest.ImpactDetected = src.Impact_detected;
+        dest.RolloverDetected = src.Rollover_detected;
+        dest.ImpactMagnitude = src.Impact_magnitude;
+        dest.RollAngle = src.Roll_angle;
+        dest.PitchAngle = src.Pitch_angle;
+        dest.DetectionTime = src.Detection_time;
+    }
+
+    public static void MapMqttDeviceMessage(MqttDeviceMessageDto src, CanonicalDeviceTelemetry dest)
+    {
+        if (src == null || dest == null) return;
+        if (src.Device != null)
+        {
+            MapDeviceInfo(src.Device, dest);
+        }
+        if (!string.IsNullOrWhiteSpace(src.Timestamp) && dest.Timestamp == null)
+        {
+            dest.Timestamp = ParseDate(src.Timestamp);
+        }
+        if (src.Details != null)
+        {
+            PopulateFromDictionary(dest, src.Details);
+        }
     }
 
     /// <summary>
@@ -337,7 +385,7 @@ public static class TelemetryAutoMapper
         return false;
     }
 
-    private static DateTime? ParseDate(string? input)
+    internal static DateTime? ParseDate(string? input)
     {
         if (string.IsNullOrWhiteSpace(input)) return null;
         if (DateTime.TryParse(input, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dt)) return dt;
@@ -354,4 +402,75 @@ public static class TelemetryAutoMapper
     {
         PropertyNameCaseInsensitive = true
     };
+}
+
+/// <summary>
+/// Contrato simple para invocaciones de mapeo compatibles con la firma previa de IMapper.
+/// </summary>
+public interface ISimpleMapper
+{
+    TDest Map<TDest>(object source);
+    void Map(object source, object destination);
+}
+
+internal sealed class SimpleMapper : ISimpleMapper
+{
+    public TDest Map<TDest>(object source)
+    {
+        if (source == null) throw new ArgumentNullException(nameof(source));
+
+        if (typeof(TDest) == typeof(CanonicalDeviceTelemetry))
+        {
+            var target = new CanonicalDeviceTelemetry();
+            Map(source, target);
+            return (TDest)(object)target;
+        }
+
+        if (typeof(TDest) == typeof(NormalizedTelemetryEvent))
+        {
+            if (source is CanonicalDeviceTelemetry canonical)
+            {
+                return (TDest)(object)canonical.ToNormalizedEvent(null, null, null);
+            }
+        }
+
+        throw new NotSupportedException($"Mapping from {source.GetType().Name} to {typeof(TDest).Name} is not supported.");
+    }
+
+    public void Map(object source, object destination)
+    {
+        if (source == null) throw new ArgumentNullException(nameof(source));
+        if (destination == null) throw new ArgumentNullException(nameof(destination));
+
+        if (destination is CanonicalDeviceTelemetry canonical)
+        {
+            if (source is DeviceInfoDto devInfo)
+            {
+                TelemetryAutoMapper.MapDeviceInfo(devInfo, canonical);
+                return;
+            }
+            if (source is GpsDataDto gps)
+            {
+                TelemetryAutoMapper.MapGpsData(gps, canonical);
+                return;
+            }
+            if (source is AccidentDataDto acc)
+            {
+                TelemetryAutoMapper.MapAccidentData(acc, canonical);
+                return;
+            }
+            if (source is MqttDeviceMessageDto msg)
+            {
+                TelemetryAutoMapper.MapMqttDeviceMessage(msg, canonical);
+                return;
+            }
+            if (source is IDictionary<string, object> dict)
+            {
+                TelemetryAutoMapper.PopulateFromDictionary(canonical, dict);
+                return;
+            }
+        }
+
+        throw new NotSupportedException($"Mapping from {source.GetType().Name} to {destination.GetType().Name} is not supported.");
+    }
 }

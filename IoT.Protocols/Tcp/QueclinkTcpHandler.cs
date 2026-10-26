@@ -31,5 +31,11 @@ public sealed class QueclinkTcpHandler : ITcpProtocolHandler
         return true;
     }
 
-    public byte[]? BuildCommand(string commandText, ushort serial) => null;
+    public byte[]? BuildCommand(string commandText, ushort serial)
+    {
+        if (string.IsNullOrWhiteSpace(commandText)) return null;
+        string cmd = commandText.Trim();
+        if (!cmd.EndsWith('$')) cmd += "$";
+        return System.Text.Encoding.ASCII.GetBytes(cmd);
+    }
 }

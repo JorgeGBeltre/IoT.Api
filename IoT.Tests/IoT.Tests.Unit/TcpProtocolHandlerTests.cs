@@ -390,4 +390,52 @@ public sealed class TcpProtocolHandlerTests
         second!.SessionImei.Should().Be("222");
         buf.Should().BeEmpty();
     }
+
+    [Fact]
+    public void Queclink_BuildCommand_AppendsDollarTerminator()
+    {
+        var handler = new QueclinkTcpHandler();
+        var bytes = handler.BuildCommand("AT+GTRTO=gv300,4,,,,,,FFFF", 1);
+        bytes.Should().NotBeNull();
+        Encoding.ASCII.GetString(bytes!).Should().Be("AT+GTRTO=gv300,4,,,,,,FFFF$");
+
+        var bytesAlreadyTerminated = handler.BuildCommand("AT+GTRTO=gv300,4,,,,,,FFFF$", 2);
+        Encoding.ASCII.GetString(bytesAlreadyTerminated!).Should().Be("AT+GTRTO=gv300,4,,,,,,FFFF$");
+    }
+
+    [Fact]
+    public void Jointech_BuildCommand_EnclosesInParentheses()
+    {
+        var handler = new JointechTcpHandler();
+        var bytes = handler.BuildCommand("P35,0,123456,1", 1);
+        bytes.Should().NotBeNull();
+        Encoding.ASCII.GetString(bytes!).Should().Be("(P35,0,123456,1)");
+
+        var bytesAlreadyWrapped = handler.BuildCommand("(P35,0,123456,1)", 2);
+        Encoding.ASCII.GetString(bytesAlreadyWrapped!).Should().Be("(P35,0,123456,1)");
+    }
+
+    [Fact]
+    public void IStartek_BuildCommand_AppendsCrlf()
+    {
+        var handler = new IStartekTcpHandler();
+        var bytes = handler.BuildCommand("&&001147,AA,RELAY,1", 1);
+        bytes.Should().NotBeNull();
+        Encoding.ASCII.GetString(bytes!).Should().Be("&&001147,AA,RELAY,1\r\n");
+
+        var bytesAlreadyTerminated = handler.BuildCommand("&&001147,AA,RELAY,1\r\n", 2);
+        Encoding.ASCII.GetString(bytesAlreadyTerminated!).Should().Be("&&001147,AA,RELAY,1\r\n");
+    }
+
+    [Fact]
+    public void Coban_BuildCommand_AppendsSemicolon()
+    {
+        var handler = new CobanTcpHandler();
+        var bytes = handler.BuildCommand("stop123456", 1);
+        bytes.Should().NotBeNull();
+        Encoding.ASCII.GetString(bytes!).Should().Be("stop123456;");
+
+        var bytesAlreadyTerminated = handler.BuildCommand("stop123456;", 2);
+        Encoding.ASCII.GetString(bytesAlreadyTerminated!).Should().Be("stop123456;");
+    }
 }

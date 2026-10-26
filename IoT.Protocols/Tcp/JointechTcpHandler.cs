@@ -41,5 +41,12 @@ public sealed class JointechTcpHandler : ITcpProtocolHandler
         return true;
     }
 
-    public byte[]? BuildCommand(string commandText, ushort serial) => null;
+    public byte[]? BuildCommand(string commandText, ushort serial)
+    {
+        if (string.IsNullOrWhiteSpace(commandText)) return null;
+        string cmd = commandText.Trim();
+        if (!cmd.StartsWith('(')) cmd = "(" + cmd;
+        if (!cmd.EndsWith(')')) cmd += ")";
+        return Encoding.ASCII.GetBytes(cmd);
+    }
 }

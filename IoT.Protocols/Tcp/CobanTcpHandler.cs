@@ -162,5 +162,11 @@ public sealed class CobanTcpHandler : ITcpProtocolHandler
         return null;
     }
 
-    public byte[]? BuildCommand(string commandText, ushort serial) => null;
+    public byte[]? BuildCommand(string commandText, ushort serial)
+    {
+        if (string.IsNullOrWhiteSpace(commandText)) return null;
+        string cmd = commandText.Trim();
+        if (!cmd.EndsWith(';') && !cmd.EndsWith('\n')) cmd += ";";
+        return Encoding.ASCII.GetBytes(cmd);
+    }
 }

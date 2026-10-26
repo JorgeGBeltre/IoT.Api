@@ -73,6 +73,34 @@ public static class AuthorizationPolicies
         return defaults;
     }
 
+    /// <summary>
+    /// Operaciones de gestión de dispositivos: registrar dispositivos y leer/rotar credenciales.
+    /// Permitido a administradores y operadores de flota.
+    /// </summary>
+    public const string DeviceManage = "DeviceManage";
+
+    /// <summary>
+    /// Roles admitidos por defecto para <see cref="DeviceManage"/>.
+    /// </summary>
+    public static readonly string[] DefaultDeviceManageRoles = { "Admin", "Operator" };
+
+    /// <summary>
+    /// Operaciones administrativas del tenant: configuración general, brokers MQTT,
+    /// usuarios y registro de auditoría. Exclusivo de administradores del tenant.
+    /// </summary>
+    public const string TenantAdmin = "TenantAdmin";
+
+    /// <summary>
+    /// Roles admitidos por defecto para <see cref="TenantAdmin"/>.
+    /// </summary>
+    public static readonly string[] DefaultTenantAdminRoles = { "Admin" };
+
+    public static string[] ResolveDeviceManageRoles(IConfiguration configuration) =>
+        ResolveRoles(configuration, "Authorization:DeviceManageRoles", DefaultDeviceManageRoles);
+
+    public static string[] ResolveTenantAdminRoles(IConfiguration configuration) =>
+        ResolveRoles(configuration, "Authorization:TenantAdminRoles", DefaultTenantAdminRoles);
+
     public static string[] ResolveFirmwareManageRoles(IConfiguration configuration) =>
         ResolveRoles(configuration, "Authorization:FirmwareManageRoles", DefaultFirmwareManageRoles);
 

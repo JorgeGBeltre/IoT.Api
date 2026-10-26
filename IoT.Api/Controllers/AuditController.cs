@@ -10,7 +10,7 @@ namespace IoT.Api.Controllers;
 /// los handlers que realizan operaciones sensibles (login, dispatch de comandos,
 /// reseteo de contraseñas, cambios de configuración).
 /// </summary>
-[Authorize]
+[Authorize(Policy = AuthorizationPolicies.TenantAdmin)]
 [RequireTenantDataPlane]
 [ApiController]
 [Route("api/v1/audit")]

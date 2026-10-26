@@ -158,4 +158,72 @@ public class SecurityAndMultiTenantIntegrationTests
         user.PasswordHash.Should().Be("new_bcrypt_hash_xyz");
         _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    [Fact]
+    public async Task ChangeTemporaryPassword_UserDoesNotRequirePasswordChange_ShouldFailWithInvalidOperation()
+    {
+        var tenantId = Guid.NewGuid();
+        var user = User.Create(tenantId, "regular_user", "reg@caribe-log.com", "hash_01", "Reg User", "Operator", mustChangePassword: false).Value;
+
+        _userRepoMock.Setup(r => r.GetByUsernameAsync(tenantId, "regular_user", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(user);
+
+        var handler = new ChangeTemporaryPasswordCommandHandler(
+            _userRepoMock.Object, _hasherMock.Object, _jwtMock.Object, _auditRepoMock.Object, _unitOfWorkMock.Object);
+
+        var command = new ChangeTemporaryPasswordCommand("regular_user", "CurrentPass123!", "NewStrongPass2026!", tenantId);
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Auth.InvalidOperation");
+    }
+
+    [Fact]
+    public async Task ChangeTemporaryPassword_UserIsLockedOut_ShouldFailWithLockedOut()
+    {
+        var tenantId = Guid.NewGuid();
+        var user = User.Create(tenantId, "locked_user", "locked@caribe-log.com", "hash_01", "Locked User", "Operator", mustChangePassword: true).Value;
+        // Trigger lockout
+        for (int i = 0; i < 5; i++) user.RecordFailedLogin(5, 15);
+        user.IsLockedOut.Should().BeTrue();
+
+        _userRepoMock.Setup(r => r.GetByUsernameAsync(tenantId, "locked_user", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(user);
+
+        var handler = new ChangeTemporaryPasswordCommandHandler(
+            _userRepoMock.Object, _hasherMock.Object, _jwtMock.Object, _auditRepoMock.Object, _unitOfWorkMock.Object);
+
+        var command = new ChangeTemporaryPasswordCommand("locked_user", "TempPass123!", "NewStrongPass2026!", tenantId);
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Auth.LockedOut");
+    }
+
+    [Fact]
+    public async Task ChangeTemporaryPassword_WrongCurrentPassword_ShouldIncrementFailedLoginAttemptsAndSave()
+    {
+        var tenantId = Guid.NewGuid();
+        var user = User.Create(tenantId, "temp_driver", "driver2@caribe-log.com", "hash_01", "Driver Two", "Operator", mustChangePassword: true).Value;
+
+        _userRepoMock.Setup(r => r.GetByUsernameAsync(tenantId, "temp_driver", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(user);
+
+        _hasherMock.Setup(h => h.Verify("WrongPass123!", "hash_01")).Returns(false);
+
+        var handler = new ChangeTemporaryPasswordCommandHandler(
+            _userRepoMock.Object, _hasherMock.Object, _jwtMock.Object, _auditRepoMock.Object, _unitOfWorkMock.Object);
+
+        var command = new ChangeTemporaryPasswordCommand("temp_driver", "WrongPass123!", "NewStrongPass2026!", tenantId);
+
+        var result = await handler.Handle(command, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Auth.InvalidCredentials");
+        user.FailedLoginAttempts.Should().Be(1);
+        _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
 }
+

@@ -278,14 +278,32 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
 
     public async Task<Result<AuthTokenResult>> Handle(ChangeTemporaryPasswordCommand request, CancellationToken cancellationToken)
     {
-        var user = await _userRepository.GetByUsernameAsync(request.TenantId, request.Username, cancellationToken);
+        User? user = request.TenantId != Guid.Empty
+            ? await _userRepository.GetByUsernameAsync(request.TenantId, request.Username, cancellationToken)
+            : await _userRepository.FindByUsernameOrEmailGlobalAsync(request.Username, cancellationToken);
+
         if (user is null || !user.IsActive)
         {
-            return Result<AuthTokenResult>.Failure(new Error("User.NotFound", "Usuario no encontrado."));
+            return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidCredentials", "Credenciales incorrectas o usuario inactivo."));
+        }
+
+        if (user.IsLockedOut)
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.LockedOut", "La cuenta está bloqueada temporalmente por intentos fallidos. Intente más tarde."));
+        }
+
+        if (!user.MustChangePassword)
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidOperation", "El usuario no requiere cambio de contraseña temporal."));
         }
 
         if (!_passwordHasher.Verify(request.CurrentPassword, user.PasswordHash))
         {
+            user.RecordFailedLogin();
+            await _auditLogRepository.AddAsync(new AuditLog(
+                Guid.NewGuid(), user.TenantId, user.Id, user.Username, "ChangeTemporaryPasswordFailed", "Contraseña temporal incorrecta.", request.IpAddress, request.UserAgent), cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
             return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidCredentials", "La contraseña temporal actual no es válida."));
         }
 

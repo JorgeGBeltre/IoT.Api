@@ -60,6 +60,7 @@ public sealed class DevicesController : ControllerBase
         IReadOnlyList<CapabilityType>? Capabilities);
 
     [HttpPost]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
     [ProducesResponseType(StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> RegisterDevice([FromBody] RegisterDeviceRequest request, CancellationToken cancellationToken)
@@ -84,6 +85,7 @@ public sealed class DevicesController : ControllerBase
 
     /// <summary>Credenciales MQTT del dispositivo (datos de conexión + huella de la ApiKey, sin el texto plano).</summary>
     [HttpGet("{id:guid}/credentials")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetDeviceCredentials(Guid id, CancellationToken cancellationToken)
@@ -99,6 +101,7 @@ public sealed class DevicesController : ControllerBase
 
     /// <summary>Genera/rota la ApiKey MQTT del dispositivo. Devuelve el texto plano UNA sola vez.</summary>
     [HttpPost("{id:guid}/credentials/rotate")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> RotateDeviceCredentials(Guid id, CancellationToken cancellationToken)

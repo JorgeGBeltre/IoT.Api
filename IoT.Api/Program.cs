@@ -172,6 +172,20 @@ builder.Services.AddAuthorization(options =>
         policy => policy
             .RequireAuthenticatedUser()
             .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, commandRoles)));
+
+    var deviceManageRoles = IoT.Api.Common.AuthorizationPolicies.ResolveDeviceManageRoles(builder.Configuration);
+    options.AddPolicy(
+        IoT.Api.Common.AuthorizationPolicies.DeviceManage,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, deviceManageRoles)));
+
+    var tenantAdminRoles = IoT.Api.Common.AuthorizationPolicies.ResolveTenantAdminRoles(builder.Configuration);
+    options.AddPolicy(
+        IoT.Api.Common.AuthorizationPolicies.TenantAdmin,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, tenantAdminRoles)));
 });
 
 // 7. Swagger / OpenAPI Documentation

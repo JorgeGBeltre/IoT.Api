@@ -42,6 +42,7 @@ public sealed class TenantSettingsController : ControllerBase
     }
 
     [HttpPut]
+    [Authorize(Policy = AuthorizationPolicies.TenantAdmin)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> Update([FromBody] UpdateTenantSettingsRequest request, CancellationToken ct)

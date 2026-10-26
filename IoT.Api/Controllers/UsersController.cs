@@ -10,7 +10,7 @@ namespace IoT.Api.Controllers;
 /// administrador vía <c>AuthController</c> y flujos de invitación — este endpoint
 /// expone sólo el listado para la vista de administración.
 /// </summary>
-[Authorize]
+[Authorize(Policy = AuthorizationPolicies.TenantAdmin)]
 [RequireTenantDataPlane]
 [ApiController]
 [Route("api/v1/users")]

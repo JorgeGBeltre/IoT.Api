@@ -215,9 +215,10 @@ public sealed class BootstrapCredentialTenantScopeTests
         var bound = config.GetSection("MqttBroker:BootstrapCredentials").Get<List<BindProbe>>();
 
         bound.Should().NotBeNull();
-        bound!.Should().HaveCount(2);
-        bound.Should().OnlyContain(c => !string.IsNullOrWhiteSpace(c.TenantCode) && !string.IsNullOrWhiteSpace(c.ApiKey));
-        bound[0].TenantCode.Should().Be("CARIBE-LOG");
+        var list = bound!;
+        list.Should().HaveCount(2);
+        list.Should().OnlyContain(c => !string.IsNullOrWhiteSpace(c.TenantCode) && !string.IsNullOrWhiteSpace(c.ApiKey));
+        list[0].TenantCode.Should().Be("CARIBE-LOG");
     }
 
     private sealed class BindProbe

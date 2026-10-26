@@ -99,10 +99,10 @@ public class OtaConcurrencyAndLifecycleTests
     }
 
     [Fact]
-    public void ReleasingASlotTwiceDoesNotInflateTheCapacity()
+    public async Task ReleasingASlotTwiceDoesNotInflateTheCapacity()
     {
         using var throttle = new OtaTransmissionThrottle(Config(("Firmware:MaxConcurrentRollouts", "1")));
-        var slot = throttle.AcquireAsync(CancellationToken.None).GetAwaiter().GetResult();
+        var slot = await throttle.AcquireAsync(CancellationToken.None);
 
         slot.Dispose();
         slot.Dispose();   // doble liberación: no debe crear huecos de la nada

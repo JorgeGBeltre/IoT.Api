@@ -69,7 +69,8 @@ public sealed class DeviceCommandRepository : IDeviceCommandRepository
     public async Task<IReadOnlyList<DeviceCommand>> GetPendingCommandsByDeviceAsync(Guid deviceId, CancellationToken cancellationToken = default)
     {
         return await _context.DeviceCommands
-            .Where(c => c.DeviceId == deviceId && c.Status == Domain.Enums.CommandStatus.Pending)
+            .IgnoreQueryFilters()
+            .Where(c => c.DeviceId == deviceId && (c.Status == Domain.Enums.CommandStatus.Pending || c.Status == Domain.Enums.CommandStatus.Sent))
             .OrderBy(c => c.CreatedAt)
             .ToListAsync(cancellationToken);
     }
@@ -84,7 +85,10 @@ public sealed class DeviceCommandRepository : IDeviceCommandRepository
         _context.DeviceCommands.Update(command);
     }
 
-    public async Task<int> PurgeClosedCommandsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+    public Task<int> PurgeClosedCommandsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+        => PurgeClosedCommandsOlderThanAsync(cutoffUtc, null, cancellationToken);
+
+    public async Task<int> PurgeClosedCommandsOlderThanAsync(DateTime cutoffUtc, Guid? tenantId, CancellationToken cancellationToken = default)
     {
         var closedStatuses = new[]
         {
@@ -93,9 +97,16 @@ public sealed class DeviceCommandRepository : IDeviceCommandRepository
             Domain.Enums.CommandStatus.TimedOut
         };
 
-        var expired = await _context.DeviceCommands
-            .Where(c => closedStatuses.Contains(c.Status) && c.CreatedAt < cutoffUtc)
-            .ToListAsync(cancellationToken);
+        var query = _context.DeviceCommands
+            .IgnoreQueryFilters()
+            .Where(c => closedStatuses.Contains(c.Status) && c.CreatedAt < cutoffUtc);
+
+        if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+        {
+            query = query.Where(c => c.TenantId == tenantId.Value);
+        }
+
+        var expired = await query.ToListAsync(cancellationToken);
 
         if (expired.Count > 0)
         {

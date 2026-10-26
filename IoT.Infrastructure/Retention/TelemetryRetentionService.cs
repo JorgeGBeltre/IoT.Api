@@ -40,11 +40,37 @@ public sealed class TelemetryRetentionService : ITelemetryRetentionService
         _logger.LogInformation("Starting telemetry and data retention purge. Positions cutoff: {PosCutoff}, Telemetry cutoff: {TelCutoff}",
             positionsCutoff, telemetryCutoff);
 
-        // 1. Purge Positions older than TTL
-        int deletedPositions = await _telemetryStore.PurgePositionsOlderThanAsync(positionsCutoff, cancellationToken);
+        int deletedPositions = 0;
+        int deletedTelemetry = 0;
 
-        // 2. Purge Telemetry Records older than TTL
-        int deletedTelemetry = await _telemetryStore.PurgeTelemetryRecordsOlderThanAsync(telemetryCutoff, cancellationToken);
+        // 1. Purge per-tenant if TenantSettings specifies custom RetentionDays and context is available
+        if (_context != null)
+        {
+            try
+            {
+                var tenantSettingsList = await _context.TenantSettings
+                    .IgnoreQueryFilters()
+                    .ToListAsync(cancellationToken);
+
+                foreach (var ts in tenantSettingsList)
+                {
+                    if (ts.RetentionDays > 0)
+                    {
+                        var tenantCutoff = now.AddDays(-ts.RetentionDays);
+                        deletedPositions += await _telemetryStore.PurgePositionsOlderThanAsync(tenantCutoff, ts.TenantId, cancellationToken);
+                        deletedTelemetry += await _telemetryStore.PurgeTelemetryRecordsOlderThanAsync(tenantCutoff, ts.TenantId, cancellationToken);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to apply per-tenant retention settings; falling back to global retention TTL.");
+            }
+        }
+
+        // 2. Global purge for records older than default TTL (unconfigured tenants or orphaned data)
+        deletedPositions += await _telemetryStore.PurgePositionsOlderThanAsync(positionsCutoff, cancellationToken);
+        deletedTelemetry += await _telemetryStore.PurgeTelemetryRecordsOlderThanAsync(telemetryCutoff, cancellationToken);
 
         // 3. Purge closed DeviceCommands older than TTL
         int deletedCommands = await _commandRepository.PurgeClosedCommandsOlderThanAsync(commandsCutoff, cancellationToken);
@@ -54,10 +80,12 @@ public sealed class TelemetryRetentionService : ITelemetryRetentionService
         if (_context != null)
         {
             var expiredOtps = await _context.OtpCodes
+                .IgnoreQueryFilters()
                 .Where(o => o.ExpirationUtc < tokensCutoff || o.IsUsed)
                 .ToListAsync(cancellationToken);
 
             var expiredResetTokens = await _context.PasswordResetTokens
+                .IgnoreQueryFilters()
                 .Where(r => r.ExpirationUtc < tokensCutoff || r.IsUsed)
                 .ToListAsync(cancellationToken);
 

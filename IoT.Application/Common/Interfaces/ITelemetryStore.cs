@@ -64,5 +64,7 @@ public interface ITelemetryStore
         CancellationToken cancellationToken = default);
 
     Task<int> PurgePositionsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default);
+    Task<int> PurgePositionsOlderThanAsync(DateTime cutoffUtc, Guid? tenantId, CancellationToken cancellationToken = default);
     Task<int> PurgeTelemetryRecordsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default);
+    Task<int> PurgeTelemetryRecordsOlderThanAsync(DateTime cutoffUtc, Guid? tenantId, CancellationToken cancellationToken = default);
 }

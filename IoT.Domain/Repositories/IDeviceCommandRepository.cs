@@ -11,6 +11,7 @@ public interface IDeviceCommandRepository
     Task AddAsync(DeviceCommand command, CancellationToken cancellationToken = default);
     void Update(DeviceCommand command);
     Task<int> PurgeClosedCommandsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default);
+    Task<int> PurgeClosedCommandsOlderThanAsync(DateTime cutoffUtc, Guid? tenantId, CancellationToken cancellationToken = default);
 }
 
 public interface IUnitOfWork

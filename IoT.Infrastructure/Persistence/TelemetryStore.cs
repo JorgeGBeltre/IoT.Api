@@ -162,20 +162,28 @@ public sealed class TelemetryStore : ITelemetryStore
         return list;
     }
 
-    public async Task<int> PurgePositionsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+    public Task<int> PurgePositionsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+        => PurgePositionsOlderThanAsync(cutoffUtc, null, cancellationToken);
+
+    public async Task<int> PurgePositionsOlderThanAsync(DateTime cutoffUtc, Guid? tenantId, CancellationToken cancellationToken = default)
     {
+        var query = _context.Positions
+            .IgnoreQueryFilters()
+            .Where(p => p.RecordedAt < cutoffUtc);
+
+        if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+        {
+            query = query.Where(p => p.TenantId == tenantId.Value);
+        }
+
         try
         {
-            return await _context.Positions
-                .Where(p => p.RecordedAt < cutoffUtc)
-                .ExecuteDeleteAsync(cancellationToken);
+            return await query.ExecuteDeleteAsync(cancellationToken);
         }
         catch (InvalidOperationException)
         {
             // Fallback for InMemory provider in test environments
-            var expired = await _context.Positions
-                .Where(p => p.RecordedAt < cutoffUtc)
-                .ToListAsync(cancellationToken);
+            var expired = await query.ToListAsync(cancellationToken);
 
             if (expired.Count > 0)
             {
@@ -187,20 +195,28 @@ public sealed class TelemetryStore : ITelemetryStore
         }
     }
 
-    public async Task<int> PurgeTelemetryRecordsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+    public Task<int> PurgeTelemetryRecordsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+        => PurgeTelemetryRecordsOlderThanAsync(cutoffUtc, null, cancellationToken);
+
+    public async Task<int> PurgeTelemetryRecordsOlderThanAsync(DateTime cutoffUtc, Guid? tenantId, CancellationToken cancellationToken = default)
     {
+        var query = _context.TelemetryRecords
+            .IgnoreQueryFilters()
+            .Where(t => t.RecordedAt < cutoffUtc);
+
+        if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+        {
+            query = query.Where(t => t.TenantId == tenantId.Value);
+        }
+
         try
         {
-            return await _context.TelemetryRecords
-                .Where(t => t.RecordedAt < cutoffUtc)
-                .ExecuteDeleteAsync(cancellationToken);
+            return await query.ExecuteDeleteAsync(cancellationToken);
         }
         catch (InvalidOperationException)
         {
             // Fallback for InMemory provider in test environments
-            var expired = await _context.TelemetryRecords
-                .Where(t => t.RecordedAt < cutoffUtc)
-                .ToListAsync(cancellationToken);
+            var expired = await query.ToListAsync(cancellationToken);
 
             if (expired.Count > 0)
             {

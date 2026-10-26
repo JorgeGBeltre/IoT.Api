@@ -11,6 +11,13 @@ public interface IDeviceRepository
 
     /// <summary>¿Existe algún dispositivo con este ChipId en CUALQUIER tenant? (unicidad global de IMEI/ChipId).</summary>
     Task<bool> ExistsByChipIdGlobalAsync(string chipId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// ¿El dispositivo <paramref name="deviceId"/> pertenece al tenant <paramref name="tenantId"/>?
+    /// Usa un filtro de tenant EXPLÍCITO (no el ambiental): lo consumen contextos sin
+    /// <c>ITenantContext</c> resuelto, como las invocaciones del hub SignalR.
+    /// </summary>
+    Task<bool> BelongsToTenantAsync(Guid deviceId, Guid tenantId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Device>> GetByTenantAsync(Guid tenantId, DeviceOperationalStatus? status = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Device>> GetByGroupIdAsync(Guid tenantId, Guid groupId, CancellationToken cancellationToken = default);
     /// <summary>

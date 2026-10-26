@@ -53,6 +53,21 @@ public sealed class DeviceRepository : IDeviceRepository
             .AnyAsync(d => d.ChipId == chipId, cancellationToken);
     }
 
+    public async Task<bool> BelongsToTenantAsync(Guid deviceId, Guid tenantId, CancellationToken cancellationToken = default)
+    {
+        if (deviceId == Guid.Empty || tenantId == Guid.Empty)
+        {
+            return false;
+        }
+
+        // IgnoreQueryFilters + filtro EXPLÍCITO: el filtro global depende del tenant
+        // ambiental, que en una invocación del hub no está resuelto (Guid.Empty) y
+        // negaría también el acceso legítimo. Aquí el tenant viene del claim del JWT.
+        return await _context.Devices
+            .IgnoreQueryFilters()
+            .AnyAsync(d => d.Id == deviceId && d.TenantId == tenantId, cancellationToken);
+    }
+
     /// <summary>
     /// Deliberadamente SIN filtro de tenant y sin Include: lo usa la reconciliacion de
     /// arranque, que es una tarea del proceso y no de una peticion, y solo necesita el estado

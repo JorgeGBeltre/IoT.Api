@@ -152,7 +152,7 @@ public class Phase1Etapa0SecurityAndMitigationTests
     public async Task FleetHub_JoinTenantFleet_CrossTenantAttempt_ThrowsHubException()
     {
         var loggerMock = new Mock<ILogger<FleetHub>>();
-        var hub = new FleetHub(loggerMock.Object);
+        var hub = new FleetHub(Mock.Of<IDeviceRepository>(), loggerMock.Object);
 
         var userTenant = Guid.NewGuid();
         var targetTenant = Guid.NewGuid(); // Different tenant!

@@ -44,12 +44,18 @@ public sealed class DatabaseSeeder
             _logger.LogInformation("Aplicando migraciones de base de datos PostgreSQL...");
             await _context.Database.MigrateAsync(cancellationToken);
 
+            // Datos de DEMOSTRACIÓN (tenants, usuarios y dispositivos de ejemplo) SÓLO en
+            // Development. En Producción el arranque únicamente migra el esquema y aplica las
+            // credenciales de bootstrap configuradas: no se siembran empresas, usuarios ni
+            // equipos demo, para que una base ya limpia siga limpia tras reiniciar el servicio.
+            bool isDevelopment = _environment.IsDevelopment();
+
             var tenant1Id = Guid.Parse("11111111-1111-1111-1111-111111111111");
             var tenant2Id = Guid.Parse("22222222-2222-2222-2222-222222222222");
             var tenant3Id = Guid.Parse("33333333-3333-3333-3333-333333333333");
 
-            // 1. Seed Tenants
-            if (!await _context.Tenants.IgnoreQueryFilters().AnyAsync(cancellationToken))
+            // 1. Seed Tenants (SÓLO Development)
+            if (isDevelopment && !await _context.Tenants.IgnoreQueryFilters().AnyAsync(cancellationToken))
             {
                 _logger.LogInformation("Sembrando tenants de demostración...");
                 var tenants = new List<Tenant>
@@ -62,12 +68,11 @@ public sealed class DatabaseSeeder
                 await _context.SaveChangesAsync(cancellationToken);
             }
 
-            // 2. Seed Users
-            if (!await _context.Users.IgnoreQueryFilters().AnyAsync(cancellationToken))
+            // 2. Seed Users (SÓLO Development)
+            if (isDevelopment && !await _context.Users.IgnoreQueryFilters().AnyAsync(cancellationToken))
             {
                 _logger.LogInformation("Sembrando usuarios administradores iniciales...");
 
-                bool isDevelopment = _environment.IsDevelopment();
                 (string password, bool mustChange) = ResolveSeedAdminPassword(isDevelopment);
                 // Hash POR admin (BCrypt usa sal por hash): aunque compartan contraseña inicial,
                 // los hashes difieren y el cambio obligatorio en prod (mustChange) aísla cada cuenta.
@@ -103,8 +108,8 @@ public sealed class DatabaseSeeder
                 await _context.SaveChangesAsync(cancellationToken);
             }
 
-            // 3. Seed Devices
-            if (!await _context.Devices.IgnoreQueryFilters().AnyAsync(cancellationToken))
+            // 3. Seed Devices (SÓLO Development)
+            if (isDevelopment && !await _context.Devices.IgnoreQueryFilters().AnyAsync(cancellationToken))
             {
                 _logger.LogInformation("Sembrando dispositivos iniciales de flota y sensores...");
                 var dev1 = Device.Create(

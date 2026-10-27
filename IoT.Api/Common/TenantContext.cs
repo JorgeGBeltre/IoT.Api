@@ -1,5 +1,6 @@
 global using IoT.Application.Common.Interfaces;
 
+using IoT.Domain.Repositories;
 using Microsoft.AspNetCore.Mvc;
 
 namespace IoT.Api.Common;
@@ -13,6 +14,9 @@ public sealed class TenantContext : ITenantContext
 
     /// <summary>Path del subárbol visible (ADR-013). Ver <see cref="ITenantContext"/>.</summary>
     public string? CustomerPath { get; set; }
+
+    /// <summary>Ids del subárbol resuelto por request (ADR-013 E8.3b). Ver <see cref="ITenantContext"/>.</summary>
+    public IReadOnlyCollection<Guid>? CustomerSubtreeIds { get; set; }
 
     /// <summary>Operación de sistema (cross-tenant autorizada). Ver <see cref="ITenantContext"/>.</summary>
     public bool IsSystemOperation { get; set; }
@@ -29,7 +33,7 @@ public sealed class TenantResolutionMiddleware
         _logger = logger;
     }
 
-    public async Task InvokeAsync(HttpContext context, ITenantContext tenantContext)
+    public async Task InvokeAsync(HttpContext context, ITenantContext tenantContext, ICustomerRepository customerRepository)
     {
         // 1. Authenticated user: resolve tenant strictly from the cryptographically verified JWT claim
         if (context.User.Identity?.IsAuthenticated == true)
@@ -95,6 +99,14 @@ public sealed class TenantResolutionMiddleware
                     if (pathClaim != null && !string.IsNullOrWhiteSpace(pathClaim.Value))
                     {
                         tenantContext.CustomerPath = pathClaim.Value;
+
+                        // Resolver UNA vez por request el conjunto de descendientes del subárbol
+                        // (ADR-013 E8.3b), de forma ASÍNCRONA y en scope de sistema, para que el
+                        // filtro global de EF lo lea sin ejecutar SQL síncrono reentrante dentro de
+                        // la evaluación del filtro. Raíz / token antiguo (sin path) NO entran aquí →
+                        // CustomerSubtreeIds queda null = sin recorte (NO DISRUPTIVO).
+                        tenantContext.CustomerSubtreeIds =
+                            await customerRepository.GetSubtreeIdsAsync(pathClaim.Value, context.RequestAborted);
                     }
                 }
             }

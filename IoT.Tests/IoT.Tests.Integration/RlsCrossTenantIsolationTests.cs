@@ -178,6 +178,7 @@ public sealed class RlsCrossTenantIsolationTests : IAsyncLifetime
         public Guid TenantId { get; set; } = Guid.Empty;
         public Guid? CustomerId { get; set; }
         public string? CustomerPath { get; set; }
+        public IReadOnlyCollection<Guid>? CustomerSubtreeIds { get; set; }
         public bool IsSystemOperation { get; set; }
     }
 }

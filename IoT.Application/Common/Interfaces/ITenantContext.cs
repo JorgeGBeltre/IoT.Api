@@ -21,6 +21,20 @@ public interface ITenantContext
     string? CustomerPath { get; set; }
 
     /// <summary>
+    /// Conjunto de <c>CustomerId</c> del SUBÁRBOL del usuario (descendientes-o-igual de
+    /// <see cref="CustomerPath"/>), resuelto UNA vez por request en el
+    /// <c>TenantResolutionMiddleware</c> (ADR-013 E8.3b) mediante
+    /// <c>ICustomerRepository.GetSubtreeIdsAsync</c>. Es la fuente del filtro global de EF para las
+    /// entidades <c>ICustomerScoped</c> (defensa en profundidad; la línea dura es la RLS de
+    /// PostgreSQL por <c>app.customer_path</c>). <c>null</c> cuando no hay path resuelto
+    /// (raíz / operación de sistema / token antiguo): en ese caso el filtro NO recorta por subárbol
+    /// (corta antes por <see cref="CustomerPath"/> null/vacío) = comportamiento NO DISRUPTIVO.
+    /// Se resuelve de forma ASÍNCRONA y FUERA de la evaluación del filtro EF, para no ejecutar SQL
+    /// síncrono reentrante dentro de una consulta con un reader abierto (streaming).
+    /// </summary>
+    IReadOnlyCollection<Guid>? CustomerSubtreeIds { get; set; }
+
+    /// <summary>
     /// Marca la operación en curso como de SISTEMA (cross-tenant autorizada, ADR-003 D6). Cuando
     /// no hay <see cref="TenantId"/> resuelto, el interceptor RLS abre la conexión con
     /// <c>app.is_system_session = true</c> en vez de bloquear/lanzar bajo
@@ -44,18 +58,21 @@ public static class TenantContextExtensions
         var previousSystem = tenantContext.IsSystemOperation;
         var previousCustomerId = tenantContext.CustomerId;
         var previousCustomerPath = tenantContext.CustomerPath;
+        var previousSubtreeIds = tenantContext.CustomerSubtreeIds;
         tenantContext.TenantId = Guid.Empty;
         tenantContext.IsSystemOperation = true;
-        // Una operación de sistema no se acota a ningún subárbol: sin path → el filtro EF y la RLS
-        // de customer no restringen (ADR-013).
+        // Una operación de sistema no se acota a ningún subárbol: sin path ni conjunto de
+        // descendientes → el filtro EF y la RLS de customer no restringen (ADR-013).
         tenantContext.CustomerId = null;
         tenantContext.CustomerPath = null;
+        tenantContext.CustomerSubtreeIds = null;
         return new SystemOperationScope(() =>
         {
             tenantContext.TenantId = previousTenant;
             tenantContext.IsSystemOperation = previousSystem;
             tenantContext.CustomerId = previousCustomerId;
             tenantContext.CustomerPath = previousCustomerPath;
+            tenantContext.CustomerSubtreeIds = previousSubtreeIds;
         });
     }
 

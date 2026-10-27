@@ -29,39 +29,20 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     /// </summary>
     public string? CurrentCustomerPath => _tenantContext?.CustomerPath;
 
-    private string? _resolvedSubtreePath;
-    private IReadOnlyCollection<Guid> _customerSubtreeIds = Array.Empty<Guid>();
-
     /// <summary>
-    /// Conjunto de <c>CustomerId</c> del subárbol del usuario, resuelto UNA vez por path (cacheado
-    /// en el contexto, ADR-013). Es DEFENSA EN PROFUNDIDAD del filtro EF; la línea dura es la RLS
-    /// de PostgreSQL por <c>app.customer_path</c>. Bajo la RLS de <c>customers</c> (con el path
-    /// fijado) la consulta ya devuelve exactamente el subárbol; el predicado <c>&lt;@</c> explícito
-    /// lo hace además independiente de la RLS. Devuelve vacío cuando no hay path: en ese caso el
-    /// filtro NO restringe (corta antes por <see cref="CurrentCustomerPath"/> null/vacío), de modo
-    /// que el raíz y los tokens antiguos siguen viendo todo su tenant.
+    /// Conjunto de <c>CustomerId</c> del subárbol del usuario (ADR-013), LEÍDO del
+    /// <see cref="ITenantContext.CustomerSubtreeIds"/> que resolvió una vez por request el
+    /// <c>TenantResolutionMiddleware</c> de forma asíncrona (E8.3b). Antes se ejecutaba aquí un
+    /// <c>SqlQueryRaw</c> SÍNCRONO dentro de la evaluación del filtro global; eso podía reentrar y
+    /// lanzar al materializar en streaming una entidad acotada con un reader abierto, tumbando TODAS
+    /// las consultas de los usuarios acotados. Ahora el filtro sólo lee esta colección ya resuelta.
+    /// Es DEFENSA EN PROFUNDIDAD del filtro EF; la línea dura es la RLS de PostgreSQL por
+    /// <c>app.customer_path</c>. Devuelve vacío cuando no hay subárbol resuelto: en ese caso el
+    /// filtro NO restringe por subárbol porque corta antes por <see cref="CurrentCustomerPath"/>
+    /// null/vacío (raíz / sistema / token antiguo siguen viendo todo su tenant = NO DISRUPTIVO).
     /// </summary>
-    public IReadOnlyCollection<Guid> CustomerSubtreeIds
-    {
-        get
-        {
-            var path = CurrentCustomerPath;
-            if (string.IsNullOrEmpty(path))
-                return Array.Empty<Guid>();
-
-            if (_resolvedSubtreePath == path)
-                return _customerSubtreeIds;
-
-            // Consulta cruda keyless (sin recursión en los filtros de EF). El path se pasa como
-            // parámetro ({0}) → sin inyección. "Id" AS "Value": SqlQueryRaw<Guid> espera la columna
-            // escalar llamada "Value".
-            _customerSubtreeIds = Database
-                .SqlQueryRaw<Guid>(@"SELECT ""Id"" AS ""Value"" FROM customers WHERE ""Path"" <@ {0}::ltree", path)
-                .ToList();
-            _resolvedSubtreePath = path;
-            return _customerSubtreeIds;
-        }
-    }
+    public IReadOnlyCollection<Guid> CustomerSubtreeIds =>
+        _tenantContext?.CustomerSubtreeIds ?? Array.Empty<Guid>();
 
     // Tenant & Devices
     public DbSet<Tenant> Tenants => Set<Tenant>();

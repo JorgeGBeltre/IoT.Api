@@ -16,6 +16,12 @@ public sealed class WorkerTenantContext : ITenantContext
     public string? CustomerPath { get; set; }
 
     /// <summary>
+    /// El worker nunca se acota a un subárbol (corre cross-tenant / como sesión de sistema), así que
+    /// no resuelve descendientes: siempre <c>null</c> → el filtro EF no recorta (ADR-013 E8.3b).
+    /// </summary>
+    public IReadOnlyCollection<Guid>? CustomerSubtreeIds { get; set; }
+
+    /// <summary>
     /// El worker corre tareas de fondo cross-tenant: por defecto opera como sesión de sistema
     /// para que, bajo <c>Platform:Rls:Enforce</c>, sus consultas sin tenant no sean bloqueadas.
     /// </summary>

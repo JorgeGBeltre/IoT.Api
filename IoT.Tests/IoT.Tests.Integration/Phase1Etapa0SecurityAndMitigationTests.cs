@@ -197,7 +197,7 @@ public class Phase1Etapa0SecurityAndMitigationTests
         ], "TestAuth");
         httpContext.User = new ClaimsPrincipal(identity);
 
-        await middleware.InvokeAsync(httpContext, tenantContext);
+        await middleware.InvokeAsync(httpContext, tenantContext, Mock.Of<ICustomerRepository>());
 
         httpContext.Response.StatusCode.Should().Be(StatusCodes.Status403Forbidden);
     }
@@ -216,7 +216,7 @@ public class Phase1Etapa0SecurityAndMitigationTests
         httpContext.Request.Headers["X-Tenant-Id"] = spoofedTenant.ToString();
         // Unauthenticated user (no User principal)
 
-        await middleware.InvokeAsync(httpContext, tenantContext);
+        await middleware.InvokeAsync(httpContext, tenantContext, Mock.Of<ICustomerRepository>());
 
         tenantContext.TenantId.Should().Be(Guid.Empty);
     }

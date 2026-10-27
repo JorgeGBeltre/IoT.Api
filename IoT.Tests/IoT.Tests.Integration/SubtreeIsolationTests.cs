@@ -1,11 +1,14 @@
 using FluentAssertions;
 using IoT.Application.Common.Interfaces;
 using IoT.Domain.Entities;
+using IoT.Domain.Enums;
 using IoT.Infrastructure.Persistence;
+using IoT.Infrastructure.Persistence.Entities;
 using IoT.Infrastructure.Persistence.Interceptors;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using NetTopologySuite.Geometries;
 using Npgsql;
 using Testcontainers.PostgreSql;
 using Xunit;
@@ -51,6 +54,11 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
     private string _pathRoot1 = string.Empty;
     private string _pathA = string.Empty;
 
+    // Ids de los nodos (para construir los conjuntos de subárbol que consume el filtro EF, igual
+    // que hace el middleware en producción) y de los dispositivos (para sembrar sus datos calientes).
+    private Guid _idRoot1, _idA, _idA1, _idB;
+    private Guid _devRoot1, _devA, _devA1, _devB, _devT2;
+
     public async Task InitializeAsync()
     {
         await _postgres.StartAsync();
@@ -84,13 +92,17 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
 
         _pathRoot1 = root1.Path;
         _pathA = custA.Path;
+        _idRoot1 = root1.Id;
+        _idA = custA.Id;
+        _idA1 = custA1.Id;
+        _idB = custB.Id;
 
-        // Un device por nodo de T1 + uno en T2.
-        AddDevice(admin, T1, "CHIP-ROOT1", "AA:00:00:00:00:01", root1.Id);
-        AddDevice(admin, T1, "CHIP-A", "AA:00:00:00:00:02", custA.Id);
-        AddDevice(admin, T1, "CHIP-A1", "AA:00:00:00:00:03", custA1.Id);
-        AddDevice(admin, T1, "CHIP-B", "AA:00:00:00:00:04", custB.Id);
-        AddDevice(admin, T2, "CHIP-T2", "BB:00:00:00:00:01", root2.Id);
+        // Un device por nodo de T1 + uno en T2 (cada uno con una capability → fila device_capabilities).
+        _devRoot1 = AddDevice(admin, T1, "CHIP-ROOT1", "AA:00:00:00:00:01", root1.Id);
+        _devA = AddDevice(admin, T1, "CHIP-A", "AA:00:00:00:00:02", custA.Id);
+        _devA1 = AddDevice(admin, T1, "CHIP-A1", "AA:00:00:00:00:03", custA1.Id);
+        _devB = AddDevice(admin, T1, "CHIP-B", "AA:00:00:00:00:04", custB.Id);
+        _devT2 = AddDevice(admin, T2, "CHIP-T2", "BB:00:00:00:00:01", root2.Id);
 
         // Un user por nodo de T1 + uno en T2.
         AddUser(admin, T1, "u_root1", "u_root1@t1.com", root1.Id);
@@ -99,16 +111,55 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
         AddUser(admin, T1, "u_b", "u_b@t1.com", custB.Id);
         AddUser(admin, T2, "u_t2", "u_t2@t2.com", root2.Id);
 
+        // Datos calientes del dispositivo (positions + telemetry + device_commands) por cada device.
+        // Es la superficie de la fuga E8.3b: antes sólo tenían aislamiento por tenant, sin recorte
+        // por subárbol vía el customer dueño.
+        AddDeviceData(admin, T1, _devRoot1);
+        AddDeviceData(admin, T1, _devA);
+        AddDeviceData(admin, T1, _devA1);
+        AddDeviceData(admin, T1, _devB);
+        AddDeviceData(admin, T2, _devT2);
+
         await admin.SaveChangesAsync();
     }
 
     public async Task DisposeAsync() => await _postgres.DisposeAsync();
 
-    private static void AddDevice(ApplicationDbContext ctx, Guid tenantId, string chip, string mac, Guid customerId)
+    private static Guid AddDevice(ApplicationDbContext ctx, Guid tenantId, string chip, string mac, Guid customerId)
     {
         var device = Device.Create(tenantId, chip, mac, chip, "Model", "Mfr").Value;
         device.AssignToCustomer(customerId);
+        device.AssignCapability(CapabilityType.Gps); // → una fila device_capabilities por device
         ctx.Devices.Add(device);
+        return device.Id;
+    }
+
+    private static void AddDeviceData(ApplicationDbContext ctx, Guid tenantId, Guid deviceId)
+    {
+        var now = DateTime.UtcNow;
+        ctx.Positions.Add(new PositionEntity
+        {
+            TenantId = tenantId,
+            DeviceId = deviceId,
+            RecordedAt = now,
+            ReceivedAt = now,
+            Location = new Point(-69.9, 18.5) { SRID = 4326 },
+            Latitude = 18.5,
+            Longitude = -69.9,
+            IsValid = true,
+            Version = 1,
+            Source = "real"
+        });
+        ctx.TelemetryRecords.Add(new TelemetryRecordEntity
+        {
+            TenantId = tenantId,
+            DeviceId = deviceId,
+            RecordedAt = now,
+            ReceivedAt = now,
+            MetricsJson = "{}",
+            Source = "real"
+        });
+        ctx.DeviceCommands.Add(DeviceCommand.Create(tenantId, deviceId, "ping", null, "test").Value);
     }
 
     private static void AddUser(ApplicationDbContext ctx, Guid tenantId, string username, string email, Guid customerId)
@@ -202,6 +253,80 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
         (await ctx.Customers.IgnoreQueryFilters().CountAsync(c => c.TenantId == T2)).Should().Be(0);
     }
 
+    // ---- E8.3b: datos calientes del dispositivo acotados al subárbol vía el customer DUEÑO ------
+    // positions / telemetry_records / device_commands / device_capabilities NO tienen CustomerId
+    // propio (sólo TenantId, o lo derivan vía devices), así que el filtro EF por subárbol no las
+    // toca: su único recorte por subárbol es la RLS de PostgreSQL. Estas pruebas usan
+    // IgnoreQueryFilters para aislar que es la RLS (no EF) quien cierra la fuga entre hermanos.
+
+    [Fact]
+    public async Task Rls_DeviceData_WithCustomerPathA_SeesSubtree_NotSibling()
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = T1;
+        tenant.CustomerPath = _pathA;
+
+        // Sólo los datos de los dispositivos del subárbol de A (A + A1): 2 filas de cada tabla.
+        (await ctx.Positions.IgnoreQueryFilters().CountAsync()).Should().Be(2,
+            "path=A sólo ve las positions de sus devices (A y A1), no las del hermano B");
+        (await ctx.TelemetryRecords.IgnoreQueryFilters().CountAsync()).Should().Be(2,
+            "path=A sólo ve la telemetría de A y A1");
+        (await ctx.DeviceCommands.IgnoreQueryFilters().CountAsync()).Should().Be(2,
+            "path=A sólo ve los comandos de A y A1");
+        (await ctx.DeviceCapabilities.IgnoreQueryFilters().CountAsync()).Should().Be(2,
+            "path=A sólo ve las capabilities de A y A1");
+
+        // El hermano B queda fuera del subárbol de A: 0 filas de B en cada tabla (la fuga cerrada).
+        (await ctx.Positions.IgnoreQueryFilters().CountAsync(p => p.DeviceId == _devB)).Should().Be(0,
+            "la posición/GPS del dispositivo del hermano B NO debe ser visible desde A (fuga E8.3b)");
+        (await ctx.TelemetryRecords.IgnoreQueryFilters().CountAsync(t => t.DeviceId == _devB)).Should().Be(0);
+        (await ctx.DeviceCommands.IgnoreQueryFilters().CountAsync(c => c.DeviceId == _devB)).Should().Be(0);
+        (await ctx.DeviceCapabilities.IgnoreQueryFilters().CountAsync(c => c.DeviceId == _devB)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Rls_DeviceData_WithRootOrEmptyPath_SeesEntireTenant_NonDisruptive()
+    {
+        // path = raíz: ve los datos de los 4 dispositivos de T1.
+        await using (var ctxRoot = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenantRoot))
+        {
+            tenantRoot.TenantId = T1;
+            tenantRoot.CustomerPath = _pathRoot1;
+            (await ctxRoot.Positions.IgnoreQueryFilters().CountAsync()).Should().Be(4, "el raíz ve las positions de todo T1");
+            (await ctxRoot.TelemetryRecords.IgnoreQueryFilters().CountAsync()).Should().Be(4);
+            (await ctxRoot.DeviceCommands.IgnoreQueryFilters().CountAsync()).Should().Be(4);
+            (await ctxRoot.DeviceCapabilities.IgnoreQueryFilters().CountAsync()).Should().Be(4);
+        }
+
+        // path vacío (token antiguo / sin claim): sigue viendo todo T1 (NO DISRUPTIVO).
+        await using (var ctxLegacy = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenantLegacy))
+        {
+            tenantLegacy.TenantId = T1;
+            tenantLegacy.CustomerPath = null;
+            (await ctxLegacy.Positions.IgnoreQueryFilters().CountAsync()).Should().Be(4, "un token sin path no recorta los datos del dispositivo");
+            (await ctxLegacy.TelemetryRecords.IgnoreQueryFilters().CountAsync()).Should().Be(4);
+            (await ctxLegacy.DeviceCommands.IgnoreQueryFilters().CountAsync()).Should().Be(4);
+            (await ctxLegacy.DeviceCapabilities.IgnoreQueryFilters().CountAsync()).Should().Be(4);
+        }
+    }
+
+    [Fact]
+    public async Task Rls_DeviceData_NeverSeesOtherTenant_WithAnyCustomerPath()
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = T1;
+
+        foreach (var path in new[] { _pathA, _pathRoot1, null })
+        {
+            tenant.CustomerPath = path;
+            (await ctx.Positions.IgnoreQueryFilters().CountAsync(p => p.DeviceId == _devT2)).Should().Be(0,
+                "nunca se ven las positions del dispositivo de T2, con ningún path");
+            (await ctx.TelemetryRecords.IgnoreQueryFilters().CountAsync(t => t.DeviceId == _devT2)).Should().Be(0);
+            (await ctx.DeviceCommands.IgnoreQueryFilters().CountAsync(c => c.DeviceId == _devT2)).Should().Be(0);
+            (await ctx.DeviceCapabilities.IgnoreQueryFilters().CountAsync(c => c.DeviceId == _devT2)).Should().Be(0);
+        }
+    }
+
     // ---- Defensa en profundidad: el filtro EF por subárbol (SIN IgnoreQueryFilters) -----------
 
     [Fact]
@@ -212,6 +337,9 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
         {
             tenantA.TenantId = T1;
             tenantA.CustomerPath = _pathA;
+            // El conjunto de descendientes lo resuelve el middleware en producción (async, una vez
+            // por request). Aquí se fija explícitamente el subárbol de A = {A, A1}.
+            tenantA.CustomerSubtreeIds = new[] { _idA, _idA1 };
 
             var chips = await ctxA.Devices.Select(d => d.ChipId).ToListAsync();
             chips.Should().BeEquivalentTo(new[] { "CHIP-A", "CHIP-A1" },
@@ -223,6 +351,8 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
         {
             tenantRoot.TenantId = T1;
             tenantRoot.CustomerPath = _pathRoot1;
+            // Subárbol del raíz = los 4 nodos de T1 (lo que resolvería el middleware).
+            tenantRoot.CustomerSubtreeIds = new[] { _idRoot1, _idA, _idA1, _idB };
             (await ctxRoot.Devices.CountAsync()).Should().Be(4, "el raíz no es recortado por el filtro EF");
         }
 
@@ -264,6 +394,7 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
         public Guid TenantId { get; set; } = Guid.Empty;
         public Guid? CustomerId { get; set; }
         public string? CustomerPath { get; set; }
+        public IReadOnlyCollection<Guid>? CustomerSubtreeIds { get; set; }
         public bool IsSystemOperation { get; set; }
     }
 }

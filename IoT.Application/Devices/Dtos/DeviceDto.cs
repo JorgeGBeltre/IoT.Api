@@ -15,4 +15,9 @@ public sealed record DeviceDto(
     DateTime? LastSeenAt,
     DateTime CreatedAt,
     IReadOnlyList<string> Capabilities,
-    LivePositionSnapshot? LatestPosition);
+    LivePositionSnapshot? LatestPosition,
+    // Nodo dueño en la jerarquía Customer (ADR-013). Nullable: espeja Device.CustomerId
+    // (nullable en el dominio durante la transición E8.1) y el contrato del frontend
+    // (customerId?/customerName? en DeviceDetailPage). Null = "Sin asignar".
+    Guid? CustomerId,
+    string? CustomerName);

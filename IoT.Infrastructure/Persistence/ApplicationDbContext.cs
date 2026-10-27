@@ -163,8 +163,12 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             // ChipId/IMEI único GLOBAL: identidad de dispositivos sin JWT (TCP/HTTP).
             builder.HasIndex(d => d.ChipId).IsUnique();
 
-            // Nodo dueño en la jerarquía (ADR-013). FK nullable; Restrict para no borrar un
-            // customer con dispositivos colgando.
+            // Nodo dueño en la jerarquía (ADR-013). Columna NOT NULL desde E8.4a: la
+            // creación/adopción asigna SIEMPRE un CustomerId (el del nodo de la sesión o el raíz del
+            // tenant), así que ya no existen filas con CustomerId nulo. La propiedad CLR sigue siendo
+            // Guid? (ICustomerScoped y el filtro EF por subárbol no cambian); sólo la columna es
+            // obligatoria. FK con Restrict para no borrar un customer con dispositivos colgando.
+            builder.Property(d => d.CustomerId).IsRequired();
             builder.HasOne<Customer>()
                 .WithMany()
                 .HasForeignKey(d => d.CustomerId)
@@ -244,7 +248,10 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
                 .HasForeignKey(up => up.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // Nodo al que pertenece el usuario en la jerarquía (ADR-013). FK nullable; Restrict.
+            // Nodo al que pertenece el usuario en la jerarquía (ADR-013). Columna NOT NULL desde
+            // E8.4a (el alta asigna SIEMPRE un CustomerId; ya no hay filas nulas). La propiedad CLR
+            // sigue siendo Guid?; sólo la columna es obligatoria. FK con Restrict.
+            builder.Property(u => u.CustomerId).IsRequired();
             builder.HasOne<Customer>()
                 .WithMany()
                 .HasForeignKey(u => u.CustomerId)
@@ -392,8 +399,10 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
 
                     // Subárbol (ADR-013): sólo para ICustomerScoped. Semántica NO DISRUPTIVA:
                     //   path null/vacío  → sin restricción (raíz, sistema, token antiguo);
-                    //   CustomerId null  → fila visible dentro del tenant;
                     //   en otro caso     → CustomerId debe pertenecer al subárbol resuelto.
+                    // La rama "CustomerId null → visible" se eliminó en E8.4a: desde
+                    // AddCustomerIdNotNull la columna es NOT NULL en las únicas entidades
+                    // ICustomerScoped (Device, User), así que era código muerto.
                     if (typeof(ICustomerScoped).IsAssignableFrom(entityType.ClrType))
                     {
                         var nullableGuidProperty = typeof(EF).GetMethod(nameof(EF.Property))!
@@ -409,16 +418,13 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
                         var pathIsNull = Expression.Equal(pathProperty, Expression.Constant(null, typeof(string)));
                         var pathIsEmpty = Expression.Equal(pathProperty, Expression.Constant(string.Empty, typeof(string)));
 
-                        var customerIdIsNull = Expression.Equal(
-                            customerIdProperty, Expression.Constant(null, typeof(Guid?)));
-
                         var subtreeIdsProperty = Expression.Property(
                             Expression.Constant(this), nameof(CustomerSubtreeIds));
                         var customerIdValue = Expression.Property(customerIdProperty, "Value");
                         var inSubtree = Expression.Call(containsMethod, subtreeIdsProperty, customerIdValue);
 
                         var customerMatch = Expression.OrElse(
-                            Expression.OrElse(Expression.OrElse(pathIsNull, pathIsEmpty), customerIdIsNull),
+                            Expression.OrElse(pathIsNull, pathIsEmpty),
                             inSubtree);
 
                         body = Expression.AndAlso(body, customerMatch);

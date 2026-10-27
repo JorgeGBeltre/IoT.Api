@@ -42,6 +42,9 @@ public sealed class RlsCrossTenantIsolationTests : IAsyncLifetime
     private string _adminConnectionString = string.Empty;
     private string _runtimeConnectionString = string.Empty;
 
+    // Customer raíz de B (ADR-013 E8.4a: CustomerId es NOT NULL; el device intruso debe tener nodo).
+    private Guid _rootB;
+
     public async Task InitializeAsync()
     {
         await _postgres.StartAsync();
@@ -63,10 +66,26 @@ public sealed class RlsCrossTenantIsolationTests : IAsyncLifetime
         // 2. Sembrar datos cross-tenant como admin (superusuario → bypassa RLS para la siembra).
         admin.Tenants.Add(Tenant.CreateWithId(TenantA, "Tenant A", "T-A").Value);
         admin.Tenants.Add(Tenant.CreateWithId(TenantB, "Tenant B", "T-B").Value);
-        admin.Devices.Add(Device.Create(TenantA, "CHIP-A1", "AA:AA:AA:AA:AA:01", "Dev A1", "Model", "Mfr").Value);
-        admin.Devices.Add(Device.Create(TenantA, "CHIP-A2", "AA:AA:AA:AA:AA:02", "Dev A2", "Model", "Mfr").Value);
-        admin.Devices.Add(Device.Create(TenantB, "CHIP-B1", "BB:BB:BB:BB:BB:01", "Dev B1", "Model", "Mfr").Value);
+
+        // Customer raíz por tenant: CustomerId es NOT NULL (ADR-013 E8.4a), así que cada device se
+        // asigna a su raíz. No cambia este test (que prueba el aislamiento por TENANT de ADR-003):
+        // ambos raíces son nodos distintos de tenants distintos.
+        var rootA = Customer.Create(TenantA, "Raiz A", parent: null, code: "ROOT-A").Value;
+        var rootB = Customer.Create(TenantB, "Raiz B", parent: null, code: "ROOT-B").Value;
+        admin.Customers.AddRange(rootA, rootB);
+        _rootB = rootB.Id;
+
+        admin.Devices.Add(NewDevice(TenantA, "CHIP-A1", "AA:AA:AA:AA:AA:01", "Dev A1", rootA.Id));
+        admin.Devices.Add(NewDevice(TenantA, "CHIP-A2", "AA:AA:AA:AA:AA:02", "Dev A2", rootA.Id));
+        admin.Devices.Add(NewDevice(TenantB, "CHIP-B1", "BB:BB:BB:BB:BB:01", "Dev B1", rootB.Id));
         await admin.SaveChangesAsync();
+    }
+
+    private static Device NewDevice(Guid tenantId, string chip, string mac, string name, Guid customerId)
+    {
+        var device = Device.Create(tenantId, chip, mac, name, "Model", "Mfr").Value;
+        device.AssignToCustomer(customerId);
+        return device;
     }
 
     public async Task DisposeAsync() => await _postgres.DisposeAsync();
@@ -113,9 +132,10 @@ public sealed class RlsCrossTenantIsolationTests : IAsyncLifetime
         await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
 
         // Sesión del tenant A intentando insertar una fila del tenant B: la cláusula WITH CHECK
-        // de la política RLS debe rechazar la escritura cross-tenant.
+        // de la política RLS debe rechazar la escritura cross-tenant. El device lleva un CustomerId
+        // válido (el raíz de B) para que lo que se pruebe sea el check de TENANT, no el NOT NULL.
         tenant.TenantId = TenantA;
-        ctx.Devices.Add(Device.Create(TenantB, "CHIP-B-INTRUSO", "BB:BB:BB:BB:BB:99", "Intruso", "Model", "Mfr").Value);
+        ctx.Devices.Add(NewDevice(TenantB, "CHIP-B-INTRUSO", "BB:BB:BB:BB:BB:99", "Intruso", _rootB));
 
         var act = async () => await ctx.SaveChangesAsync();
         await act.Should().ThrowAsync<DbUpdateException>("WITH CHECK de RLS debe bloquear la escritura cross-tenant");

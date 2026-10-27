@@ -95,11 +95,34 @@ public static class AuthorizationPolicies
     /// </summary>
     public static readonly string[] DefaultTenantAdminRoles = { "Admin" };
 
+    /// <summary>
+    /// Operar la jerarquía multinivel Customer (ADR-013, E8.4b): crear/renombrar/activar sub-customers
+    /// y reasignar el nodo dueño de un dispositivo.
+    ///
+    /// IMPORTANTE — esta política controla SÓLO el ROL, no el alcance. El SCOPING por subárbol lo
+    /// aplica AUTOMÁTICAMENTE la Row-Level Security de PostgreSQL (política
+    /// <c>tenant_isolation_customers</c> por la GUC <c>app.customer_path</c>) y, para Device/User, el
+    /// filtro global de EF por <c>CustomerSubtreeIds</c>. Es decir: un <c>CustomerAdmin</c> acotado a un
+    /// subárbol sólo ve y sólo puede escribir dentro de ese subárbol aunque la política de rol sea la
+    /// misma para todos los administradores; no hay que —ni se debe— recodificar ese recorte aquí. La
+    /// política únicamente impide que un perfil de sólo lectura toque la jerarquía.
+    /// </summary>
+    public const string CustomerAdmin = "CustomerAdmin";
+
+    /// <summary>
+    /// Roles admitidos por defecto para <see cref="CustomerAdmin"/>. Es el rol con el que se siembran
+    /// los administradores; ampliable sin tocar código con <c>Authorization:CustomerAdminRoles</c>.
+    /// </summary>
+    public static readonly string[] DefaultCustomerAdminRoles = { "Admin" };
+
     public static string[] ResolveDeviceManageRoles(IConfiguration configuration) =>
         ResolveRoles(configuration, "Authorization:DeviceManageRoles", DefaultDeviceManageRoles);
 
     public static string[] ResolveTenantAdminRoles(IConfiguration configuration) =>
         ResolveRoles(configuration, "Authorization:TenantAdminRoles", DefaultTenantAdminRoles);
+
+    public static string[] ResolveCustomerAdminRoles(IConfiguration configuration) =>
+        ResolveRoles(configuration, "Authorization:CustomerAdminRoles", DefaultCustomerAdminRoles);
 
     public static string[] ResolveFirmwareManageRoles(IConfiguration configuration) =>
         ResolveRoles(configuration, "Authorization:FirmwareManageRoles", DefaultFirmwareManageRoles);

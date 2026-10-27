@@ -48,6 +48,21 @@ public interface ITenantContext
 public static class TenantContextExtensions
 {
     /// <summary>
+    /// ¿El <paramref name="path"/> ltree desciende-o-es-igual del subárbol de la sesión
+    /// (<see cref="ITenantContext.CustomerPath"/>)? Fuente ÚNICA del recorte por subárbol en código
+    /// (defensa en profundidad; la línea dura es la RLS/EF). Sin path de sesión (raíz / sistema /
+    /// token antiguo) NO hay restricción = <c>true</c> (NO DISRUPTIVO). Con sesión acotada, un
+    /// <paramref name="path"/> null/vacío no desciende de nada = <c>false</c>.
+    /// </summary>
+    public static bool IsPathWithinSessionSubtree(this ITenantContext tenantContext, string? path)
+    {
+        var sessionPath = tenantContext.CustomerPath;
+        if (string.IsNullOrEmpty(sessionPath)) return true;
+        if (string.IsNullOrEmpty(path)) return false;
+        return path == sessionPath || path.StartsWith(sessionPath + ".", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Activa <see cref="ITenantContext.IsSystemOperation"/> (y limpia el TenantId) hasta el
     /// <c>Dispose</c>, restaurando el estado previo. Para acotar una operación de sistema a un
     /// bloque concreto (p. ej. el lookup global del login) sin dejar el flag encendido después.

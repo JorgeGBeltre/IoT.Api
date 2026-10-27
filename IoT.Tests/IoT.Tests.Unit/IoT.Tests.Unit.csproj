@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\IoT.Domain\IoT.Domain.csproj" />
     <ProjectReference Include="..\..\IoT.Application\IoT.Application.csproj" />
+    <ProjectReference Include="..\..\IoT.Infrastructure\IoT.Infrastructure.csproj" />
     <ProjectReference Include="..\..\IoT.Protocols\IoT.Protocols.csproj" />
   </ItemGroup>
 

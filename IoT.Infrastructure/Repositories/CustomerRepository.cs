@@ -44,4 +44,47 @@ public sealed class CustomerRepository : ICustomerRepository
             return ids;
         }
     }
+
+    public async Task<Guid?> GetRootCustomerIdAsync(Guid tenantId, CancellationToken cancellationToken = default)
+    {
+        if (tenantId == Guid.Empty)
+            return null;
+
+        // Scope de SISTEMA (ADR-013 E8.4a): resolver el raíz sin depender de la GUC de customer de
+        // la sesión (el alta puede correr acotada a un nodo) ni autobloquearse bajo
+        // Platform:Rls:Enforce. IgnoreQueryFilters porque el filtro por subárbol ocultaría el raíz
+        // cuando la sesión está acotada a un descendiente.
+        using (_tenantContext.BeginSystemOperation())
+        {
+            return await _context.Customers
+                .IgnoreQueryFilters()
+                .Where(c => c.TenantId == tenantId && c.ParentCustomerId == null)
+                .Select(c => (Guid?)c.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+    }
+
+    public async Task<Customer?> GetByIdScopedAsync(Guid customerId, CancellationToken cancellationToken = default)
+    {
+        // SIN IgnoreQueryFilters (a diferencia de GetByIdAsync): el filtro de EF acota al tenant y la
+        // RLS de PostgreSQL acota al subárbol de la sesión (app.customer_path). Un nodo de otro
+        // subárbol o tenant no es visible → null. Es la lectura segura para la capa de aplicación.
+        return await _context.Customers
+            .FirstOrDefaultAsync(c => c.Id == customerId, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<Customer>> GetVisibleAsync(CancellationToken cancellationToken = default)
+    {
+        // SIN IgnoreQueryFilters: la RLS ya acota customers al subárbol de la sesión y el filtro de EF
+        // al tenant. Devuelve la lista plana del subárbol visible (el frontend arma el árbol).
+        return await _context.Customers
+            .OrderBy(c => c.Level)
+            .ThenBy(c => c.Name)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task AddAsync(Customer customer, CancellationToken cancellationToken = default)
+    {
+        await _context.Customers.AddAsync(customer, cancellationToken);
+    }
 }

@@ -4,6 +4,7 @@ using System.Text;
 using IoT.Application.Common.Interfaces;
 using IoT.Domain.Entities;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 
 namespace IoT.Infrastructure.Security;
@@ -11,10 +12,14 @@ namespace IoT.Infrastructure.Security;
 public sealed class JwtTokenGenerator : IJwtTokenGenerator
 {
     private readonly IConfiguration _configuration;
+    private readonly ILogger<JwtTokenGenerator>? _logger;
 
-    public JwtTokenGenerator(IConfiguration configuration)
+    // El logger es opcional para no romper los constructores directos de los tests; en producción
+    // lo inyecta el contenedor DI.
+    public JwtTokenGenerator(IConfiguration configuration, ILogger<JwtTokenGenerator>? logger = null)
     {
         _configuration = configuration;
+        _logger = logger;
     }
 
     public AuthTokenResult GenerateToken(User user, Guid tenantId, Guid? customerId = null, string? customerPath = null)
@@ -44,16 +49,31 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
 
         // Jerarquía multinivel (ADR-013): el nodo del usuario viaja como claim firmado y el
         // middleware lo lee con anti-spoofing (igual que tenant_id). El Path se resuelve en el
-        // servidor (no se confía al cliente). Si el usuario no tiene nodo, se OMITEN ambos claims:
-        // un token sin customer no restringe el subárbol (ve todo su tenant), lo que mantiene la
-        // activación NO DISRUPTIVA para usuarios y tokens anteriores a E8.2.
+        // servidor (no se confía al cliente).
+        //
+        // EMISIÓN SOLIDARIA (E8.4a, punto 4): customer_id y customer_path se emiten AMBOS o NINGUNO.
+        //   - Sin nodo (customerId null) → se omiten los dos: token no acotado por subárbol (ve todo
+        //     su tenant). NO DISRUPTIVO para usuarios/tokens anteriores a E8.2.
+        //   - Con nodo y path válido → se emiten los dos.
+        //   - Con nodo pero SIN path (null/vacío) → es un ESTADO INVÁLIDO del propio emisor (el
+        //     llamador no resolvió el Path desde la tabla customers). Un token con customer_id y sin
+        //     customer_path hace que el TenantResolutionMiddleware responda 403 en CADA request
+        //     (fail-closed), bloqueando al usuario por un token mal formado por nosotros. FAIL-CLOSED
+        //     aquí también: se registra y se LANZA en vez de emitir un token inconsistente (o de
+        //     omitir customer_id, lo que degradaría a un sub-customer a ver todo el tenant).
         if (customerId.HasValue && customerId.Value != Guid.Empty)
         {
-            claims.Add(new Claim("customer_id", customerId.Value.ToString()));
-            if (!string.IsNullOrWhiteSpace(customerPath))
+            if (string.IsNullOrWhiteSpace(customerPath))
             {
-                claims.Add(new Claim("customer_path", customerPath));
+                _logger?.LogError(
+                    "Critical Security Failure: se intentó emitir un token con customer_id {CustomerId} para el usuario {UserId} sin un customer_path resuelto. Token NO emitido.",
+                    customerId.Value, user.Id);
+                throw new InvalidOperationException(
+                    "Critical Security Failure: no se puede emitir un token con customer_id pero sin customer_path (estado inconsistente del emisor). Resuelva el Path del nodo antes de generar el token.");
             }
+
+            claims.Add(new Claim("customer_id", customerId.Value.ToString()));
+            claims.Add(new Claim("customer_path", customerPath));
         }
 
         int expirationHours = 2;

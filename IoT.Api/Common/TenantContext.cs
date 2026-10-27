@@ -1,5 +1,6 @@
 global using IoT.Application.Common.Interfaces;
 
+using System.Text.RegularExpressions;
 using IoT.Domain.Repositories;
 using Microsoft.AspNetCore.Mvc;
 
@@ -26,6 +27,14 @@ public sealed class TenantResolutionMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ILogger<TenantResolutionMiddleware> _logger;
+
+    // Un path ltree válido es una secuencia de etiquetas separadas por '.'; cada etiqueta sólo
+    // admite [A-Za-z0-9_] (nuestras etiquetas son 'c' + 32 hex, ADR-013). Validar aquí deja el
+    // chequeo FAIL-CLOSED y evita que un valor malformado llegue al cast ::ltree de la GUC.
+    private static readonly Regex LtreePathPattern =
+        new(@"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$", RegexOptions.Compiled);
+
+    private static bool IsValidLtreePath(string value) => LtreePathPattern.IsMatch(value);
 
     public TenantResolutionMiddleware(RequestDelegate next, ILogger<TenantResolutionMiddleware> logger)
     {
@@ -93,21 +102,39 @@ public sealed class TenantResolutionMiddleware
                     tenantContext.CustomerId = customerIdFromClaim;
 
                     // El Path se tomó del claim firmado (emitido server-side desde la tabla
-                    // customers). Si por cualquier motivo no viene, CustomerPath queda null → sin
-                    // restricción de subárbol (no bloquear); la RLS de tenant sigue aislando.
+                    // customers). NUESTRO JwtTokenGenerator emite customer_id y customer_path de
+                    // forma solidaria: un token que trae customer_id (nodo asignado) pero NO un
+                    // customer_path válido es INCONSISTENTE (manipulado o emitido por un generador
+                    // desalineado). FAIL-CLOSED: se responde 403, igual que el anti-spoofing de
+                    // X-Tenant-Id / X-Customer-Id, y NO se continúa sin restricción de subárbol
+                    // (eso sería fail-open). El caso "ambos ausentes" (token anterior a E8.2) ni
+                    // siquiera entra aquí: queda arriba con CustomerPath null = sin restricción.
                     var pathClaim = context.User.FindFirst("customer_path");
-                    if (pathClaim != null && !string.IsNullOrWhiteSpace(pathClaim.Value))
+                    var customerPath = pathClaim?.Value;
+                    if (string.IsNullOrWhiteSpace(customerPath) || !IsValidLtreePath(customerPath))
                     {
-                        tenantContext.CustomerPath = pathClaim.Value;
+                        _logger.LogWarning("Security Alert: Inconsistent token. User {User} presents customer_id {ClaimCustomer} without a valid customer_path claim.",
+                            context.User.Identity?.Name, customerIdFromClaim);
 
-                        // Resolver UNA vez por request el conjunto de descendientes del subárbol
-                        // (ADR-013 E8.3b), de forma ASÍNCRONA y en scope de sistema, para que el
-                        // filtro global de EF lo lea sin ejecutar SQL síncrono reentrante dentro de
-                        // la evaluación del filtro. Raíz / token antiguo (sin path) NO entran aquí →
-                        // CustomerSubtreeIds queda null = sin recorte (NO DISRUPTIVO).
-                        tenantContext.CustomerSubtreeIds =
-                            await customerRepository.GetSubtreeIdsAsync(pathClaim.Value, context.RequestAborted);
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        context.Response.ContentType = "application/problem+json";
+                        await context.Response.WriteAsJsonAsync(new ProblemDetails
+                        {
+                            Title = "Token Inconsistente",
+                            Detail = "El token incluye un nodo asignado pero no un alcance (customer_path) válido. Vuelve a iniciar sesión.",
+                            Status = StatusCodes.Status403Forbidden
+                        });
+                        return;
                     }
+
+                    tenantContext.CustomerPath = customerPath;
+
+                    // Resolver UNA vez por request el conjunto de descendientes del subárbol
+                    // (ADR-013 E8.3b), de forma ASÍNCRONA y en scope de sistema, para que el
+                    // filtro global de EF lo lea sin ejecutar SQL síncrono reentrante dentro de
+                    // la evaluación del filtro.
+                    tenantContext.CustomerSubtreeIds =
+                        await customerRepository.GetSubtreeIdsAsync(customerPath, context.RequestAborted);
                 }
             }
         }

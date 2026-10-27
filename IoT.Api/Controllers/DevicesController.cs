@@ -99,6 +99,34 @@ public sealed class DevicesController : ControllerBase
         return Ok(result.Value);
     }
 
+    public sealed record AssignDeviceToCustomerRequest(Guid TargetCustomerId);
+
+    /// <summary>
+    /// Reasigna el nodo dueño (Customer) del dispositivo dentro de la jerarquía (ADR-013 E8.4b).
+    /// Exige el rol <see cref="AuthorizationPolicies.CustomerAdmin"/> por ser una operación de la
+    /// jerarquía; el recorte por subárbol (device origen y customer destino) lo aplican la RLS y el
+    /// filtro de EF, no la política de rol.
+    /// </summary>
+    [HttpPost("{id:guid}/customer")]
+    [Authorize(Policy = AuthorizationPolicies.CustomerAdmin)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> AssignToCustomer(Guid id, [FromBody] AssignDeviceToCustomerRequest request, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(
+            new AssignDeviceToCustomerCommand(id, request.TargetCustomerId),
+            cancellationToken);
+        if (result.IsFailure)
+        {
+            return result.Error.Code is "Device.NotFound" or "Device.CustomerNotFound"
+                ? NotFound(new { error = result.Error.Message })
+                : BadRequest(new { error = result.Error.Message });
+        }
+
+        return NoContent();
+    }
+
     /// <summary>Genera/rota la ApiKey MQTT del dispositivo. Devuelve el texto plano UNA sola vez.</summary>
     [HttpPost("{id:guid}/credentials/rotate")]
     [Authorize(Policy = AuthorizationPolicies.DeviceManage)]

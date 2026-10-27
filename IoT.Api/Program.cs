@@ -187,6 +187,15 @@ builder.Services.AddAuthorization(options =>
         policy => policy
             .RequireAuthenticatedUser()
             .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, tenantAdminRoles)));
+
+    // Operar la jerarquía Customer (ADR-013 E8.4b). Sólo controla el ROL: el recorte por subárbol lo
+    // aplican la RLS de PostgreSQL y el filtro de EF, no esta política (ver AuthorizationPolicies.CustomerAdmin).
+    var customerAdminRoles = IoT.Api.Common.AuthorizationPolicies.ResolveCustomerAdminRoles(builder.Configuration);
+    options.AddPolicy(
+        IoT.Api.Common.AuthorizationPolicies.CustomerAdmin,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, customerAdminRoles)));
 });
 
 // 7. Swagger / OpenAPI Documentation
@@ -325,6 +334,16 @@ using (var scope = app.Services.CreateScope())
         runtimeConn,
         adminConn,
         sp.GetRequiredService<ILoggerFactory>().CreateLogger("IoT.Infrastructure.Persistence.RlsRoleBootstrapper"));
+
+    // Guarda de arranque (E8.4c): en PRODUCCIÓN exige que el aislamiento por RLS esté forzado
+    // (Enforce=true y rol de runtime NOBYPASSRLS/NOSUPERUSER) o la app NO arranca (fail-fast). Fuera
+    // de producción sólo avisa (dev/test pueden correr con el rol admin). Se consulta por la conexión
+    // de runtime el estado del rol real con el que la app se conectará.
+    await IoT.Infrastructure.Persistence.RlsStartupGuard.EnsureIsolationEnforcedAsync(
+        runtimeConn,
+        app.Environment.IsProduction(),
+        config.GetValue<bool>("Platform:Rls:Enforce", false),
+        sp.GetRequiredService<ILoggerFactory>().CreateLogger("IoT.Infrastructure.Persistence.RlsStartupGuard"));
 }
 
 app.Run();

@@ -12,11 +12,16 @@ public sealed record GetDevicesQuery(Guid TenantId, DeviceOperationalStatus? Sta
 public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Result<IReadOnlyList<DeviceDto>>>
 {
     private readonly IDeviceRepository _deviceRepository;
+    private readonly ICustomerRepository _customerRepository;
     private readonly IStateCacheService _stateCache;
 
-    public GetDevicesQueryHandler(IDeviceRepository deviceRepository, IStateCacheService stateCache)
+    public GetDevicesQueryHandler(
+        IDeviceRepository deviceRepository,
+        ICustomerRepository customerRepository,
+        IStateCacheService stateCache)
     {
         _deviceRepository = deviceRepository;
+        _customerRepository = customerRepository;
         _stateCache = stateCache;
     }
 
@@ -24,10 +29,21 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
     {
         var devices = await _deviceRepository.GetByTenantAsync(request.TenantId, request.Status, cancellationToken);
 
+        // Nombres de los nodos dueños (Customer) en UNA sola consulta que RESPETA los filtros
+        // (RLS por subárbol + EF por tenant, SIN IgnoreQueryFilters). Los customers devueltos son
+        // exactamente el subárbol visible de la sesión, el mismo del que cuelgan los devices visibles,
+        // así que el nombre se resuelve en memoria sin consultas por dispositivo ni fuga de subárbol.
+        var customerNames = (await _customerRepository.GetVisibleAsync(cancellationToken))
+            .ToDictionary(c => c.Id, c => c.Name);
+
         var list = new List<DeviceDto>(devices.Count);
         foreach (var d in devices)
         {
             var cachedPos = await _stateCache.GetLatestPositionAsync(d.TenantId, d.Id, cancellationToken);
+
+            string? customerName = d.CustomerId is Guid cid && customerNames.TryGetValue(cid, out var name)
+                ? name
+                : null;
 
             list.Add(new DeviceDto(
                 d.Id,
@@ -42,7 +58,9 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
                 d.LastCommunicationAt ?? d.LastTelemetryAt,
                 d.CreatedAt,
                 d.Capabilities.Select(c => c.CapabilityType.ToString()).ToList(),
-                cachedPos));
+                cachedPos,
+                d.CustomerId,
+                customerName));
         }
 
         return Result<IReadOnlyList<DeviceDto>>.Success(list);

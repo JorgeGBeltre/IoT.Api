@@ -1,3 +1,4 @@
+using IoT.Application.Common.Interfaces;
 using IoT.Domain.Common;
 using IoT.Domain.Entities;
 using IoT.Domain.Enums;
@@ -18,11 +19,19 @@ public sealed record CreateDeviceCommand(
 public sealed class CreateDeviceCommandHandler : IRequestHandler<CreateDeviceCommand, Result<Guid>>
 {
     private readonly IDeviceRepository _deviceRepository;
+    private readonly ICustomerRepository _customerRepository;
+    private readonly ITenantContext _tenantContext;
     private readonly IUnitOfWork _unitOfWork;
 
-    public CreateDeviceCommandHandler(IDeviceRepository deviceRepository, IUnitOfWork unitOfWork)
+    public CreateDeviceCommandHandler(
+        IDeviceRepository deviceRepository,
+        ICustomerRepository customerRepository,
+        ITenantContext tenantContext,
+        IUnitOfWork unitOfWork)
     {
         _deviceRepository = deviceRepository;
+        _customerRepository = customerRepository;
+        _tenantContext = tenantContext;
         _unitOfWork = unitOfWork;
     }
 
@@ -56,6 +65,21 @@ public sealed class CreateDeviceCommandHandler : IRequestHandler<CreateDeviceCom
         }
 
         var device = createResult.Value;
+
+        // Nodo dueño en la jerarquía Customer (ADR-013 E8.4a): SIEMPRE se asigna un CustomerId para
+        // que no queden filas con CustomerId nulo (requisito del NOT NULL y de las políticas RLS
+        // fail-closed). Se usa el nodo de la sesión si está acotada a uno; si no (sesión raíz o
+        // token sin customer), el Customer RAÍZ del tenant. El raíz está en el propio subárbol del
+        // admin acotado al raíz, así que el alta pasa el WITH CHECK (sin regresión 42501).
+        var customerId = _tenantContext.CustomerId
+            ?? await _customerRepository.GetRootCustomerIdAsync(request.TenantId, cancellationToken);
+        if (customerId is null || customerId.Value == Guid.Empty)
+        {
+            return Result<Guid>.Failure(new Error(
+                "Device.NoCustomerNode",
+                "El tenant no tiene un nodo Customer raíz al que asignar el dispositivo."));
+        }
+        device.AssignToCustomer(customerId.Value);
 
         if (request.Capabilities != null)
         {

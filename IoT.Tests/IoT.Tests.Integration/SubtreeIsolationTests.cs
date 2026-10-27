@@ -365,6 +365,241 @@ public sealed class SubtreeIsolationTests : IAsyncLifetime
         }
     }
 
+    // ===========================================================================================
+    // E8.4a (jerarquía por subárbol correcta y fail-closed, migraciones AddCustomerIdNotNull +
+    // AddSubtreeCleanPolicies): CustomerId es NOT NULL (ya NO existen filas sin nodo) y las políticas
+    // RLS ya no llevan la rama OR "CustomerId" IS NULL — ni en USING ni en WITH CHECK. Por tanto una
+    // sesión ACOTADA a un subárbol (app.customer_path NO vacío, NO sistema):
+    //   - NO ve/escribe/borra/reclama filas fuera de su subárbol (incluido el hermano B), y
+    //   - NO sufre la REGRESIÓN 42501 en el alta por el FLUJO NORMAL (que asigna CustomerId=nodo).
+    // Raíz / sistema siguen sin restricción de subárbol (NO DISRUPTIVO). La columna NOT NULL impide
+    // incluso a una inserción de sistema dejar CustomerId nulo.
+    // ===========================================================================================
+
+    // ---- REGRESIÓN E8.4a: sesión ACOTADA AL RAÍZ crea device+user por el FLUJO NORMAL ----------
+    //      (que ahora asigna CustomerId = raíz). Antes, con CustomerId NULL y el WITH CHECK
+    //      endurecido (20261027160000), esto fallaba con 42501 y rompía el alta del admin de tenant.
+
+    [Fact]
+    public async Task WithCheck_BoundedSessionAtRoot_NormalFlowCreate_DeviceAndUser_Succeeds()
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = T1;
+        tenant.CustomerPath = _pathRoot1; // acotada al raíz: NO vacío, NO sistema
+
+        // Flujo normal E8.4a: la creación asigna SIEMPRE un CustomerId. Para una sesión acotada al
+        // raíz, ese CustomerId es el propio raíz (tenantContext.CustomerId). El raíz desciende-o-es-
+        // igual de su propio path, así que el WITH CHECK lo acepta (antes, con NULL, daba 42501).
+        var dev = Device.Create(T1, "CHIP-REG-OK", "AA:00:00:00:1F:01", "CHIP-REG-OK", "Model", "Mfr").Value;
+        dev.AssignToCustomer(_idRoot1);
+        ctx.Devices.Add(dev);
+
+        var user = User.Create(T1, "u_reg_ok", "u_reg_ok@t1.com", "hash_placeholder", "u_reg_ok").Value;
+        user.AssignToCustomer(_idRoot1);
+        ctx.Users.Add(user);
+
+        var act = async () => await ctx.SaveChangesAsync();
+        await act.Should().NotThrowAsync(
+            "el alta por el flujo normal desde una sesión acotada al raíz asigna CustomerId=raíz y pasa el WITH CHECK (regresión 42501 cerrada)");
+    }
+
+    // ---- (a) escrituras DENTRO del subárbol de A: permitidas -----------------------------------
+
+    [Fact]
+    public async Task WithCheck_BoundedSession_AllowsWrites_InsideSubtree()
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = T1;
+        tenant.CustomerPath = _pathA;
+
+        // INSERT customer hijo de A (desciende de A) → OK.
+        var custA = await ctx.Customers.IgnoreQueryFilters().FirstAsync(c => c.Id == _idA);
+        var childOfA = Customer.Create(T1, "A-hijo", parent: custA, code: "A-OK-CHILD").Value;
+        ctx.Customers.Add(childOfA);
+
+        // INSERT device cuyo CustomerId = A1 (descendiente de A) → OK.
+        var devOk = Device.Create(T1, "CHIP-WC-OK", "AA:00:00:00:0F:01", "CHIP-WC-OK", "Model", "Mfr").Value;
+        devOk.AssignToCustomer(_idA1);
+        ctx.Devices.Add(devOk);
+
+        // INSERT user cuyo CustomerId = A → OK.
+        var userOk = User.Create(T1, "u_wc_ok", "u_wc_ok@t1.com", "hash_placeholder", "u_wc_ok").Value;
+        userOk.AssignToCustomer(_idA);
+        ctx.Users.Add(userOk);
+
+        // Ninguna de estas escrituras debe violar el WITH CHECK.
+        var insert = async () => await ctx.SaveChangesAsync();
+        await insert.Should().NotThrowAsync("escribir dentro del propio subárbol es válido");
+
+        // UPDATE que MUEVE un device de A a A1 (sigue dentro del subárbol) → OK.
+        var devA = await ctx.Devices.IgnoreQueryFilters().FirstAsync(d => d.Id == _devA);
+        devA.AssignToCustomer(_idA1);
+        var update = async () => await ctx.SaveChangesAsync();
+        await update.Should().NotThrowAsync("mover un device dentro del subárbol es válido");
+    }
+
+    // ---- (b) escrituras FUERA del subárbol (hermano B) o INSERT de un nodo externo: rechazadas --
+    //      Ya NO existe el caso "CustomerId NULL": la columna es NOT NULL (no se puede crear tal fila).
+
+    [Fact]
+    public async Task WithCheck_BoundedSession_RejectsWrites_OutsideSubtree()
+    {
+        // (b.1) device con CustomerId del hermano B → DEBE FALLAR por WITH CHECK.
+        await AssertWriteRejectedAsync(_pathA, ctx =>
+        {
+            var dev = Device.Create(T1, "CHIP-WC-SIBLING", "AA:00:00:00:0F:02", "CHIP-WC-SIBLING", "Model", "Mfr").Value;
+            dev.AssignToCustomer(_idB);
+            ctx.Devices.Add(dev);
+        });
+
+        // (b.2) user con CustomerId del hermano B → DEBE FALLAR.
+        await AssertWriteRejectedAsync(_pathA, ctx =>
+        {
+            var user = User.Create(T1, "u_wc_sibling", "u_wc_sibling@t1.com", "hash_placeholder", "u_wc_sibling").Value;
+            user.AssignToCustomer(_idB);
+            ctx.Users.Add(user);
+        });
+
+        // (b.3) customer cuyo Path cae FUERA del subárbol de A (nodo raíz nuevo) → DEBE FALLAR.
+        await AssertWriteRejectedAsync(_pathA, ctx =>
+        {
+            var rogue = Customer.Create(T1, "Fuera-de-A", parent: null, code: "WC-ROGUE").Value;
+            ctx.Customers.Add(rogue);
+        });
+
+        // (b.4) UPDATE que intenta MOVER un device del subárbol de A al hermano B → DEBE FALLAR
+        //       (no escaparse del subárbol al escribir).
+        await AssertWriteRejectedAsync(_pathA, async ctx =>
+        {
+            var devA = await ctx.Devices.IgnoreQueryFilters().FirstAsync(d => d.Id == _devA);
+            devA.AssignToCustomer(_idB);
+        });
+    }
+
+    // ---- (c) el hermano B es INVISIBLE e INALCANZABLE para A (no reclamable ni borrable), y ya NO
+    //          existen filas con CustomerId NULL que reclamar (NOT NULL activo). --------------------
+
+    [Fact]
+    public async Task WithCheck_BoundedSession_CannotReachSiblingRows()
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = T1;
+        tenant.CustomerPath = _pathA;
+
+        // DELETE y la selección de fila del UPDATE se gobiernan SÓLO por USING. Como el USING ya no
+        // tiene rama de null y B no desciende de A, las filas del hermano B son INVISIBLES desde A:
+        // una sesión acotada no puede seleccionarlas para reclamarlas (UPDATE) ni borrarlas (DELETE).
+        (await ctx.Devices.IgnoreQueryFilters().AnyAsync(d => d.Id == _devB)).Should().BeFalse(
+            "el device del hermano B es invisible desde A ⇒ no reclamable por UPDATE ni borrable por DELETE");
+        (await ctx.Users.IgnoreQueryFilters().AnyAsync(u => u.Username == "u_b")).Should().BeFalse(
+            "el user del hermano B es invisible desde A");
+    }
+
+    [Fact]
+    public async Task NoDeviceOrUserRow_HasNullCustomer()
+    {
+        // En scope de SISTEMA (ve todo): comprobar que NO queda ninguna fila devices/users con
+        // CustomerId nulo (la columna es NOT NULL desde AddCustomerIdNotNull).
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = Guid.Empty;
+        tenant.IsSystemOperation = true;
+
+        (await ctx.Devices.IgnoreQueryFilters().CountAsync(d => d.CustomerId == null)).Should().Be(0,
+            "devices.CustomerId es NOT NULL: no hay filas sin nodo");
+        (await ctx.Users.IgnoreQueryFilters().CountAsync(u => u.CustomerId == null)).Should().Be(0,
+            "users.CustomerId es NOT NULL: no hay filas sin nodo");
+    }
+
+    [Fact]
+    public async Task CustomerIdNotNull_IsEnforced_AtDatabaseLevel()
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = Guid.Empty;
+        tenant.IsSystemOperation = true; // sistema: la RLS no lo frena, pero el NOT NULL SÍ.
+
+        // Ruta SQL directa (sin la validación de relación de EF): intentar nulificar el CustomerId de
+        // un device existente. La columna NOT NULL (AddCustomerIdNotNull) debe rechazarlo con 23502.
+        var act = async () => await ctx.Database.ExecuteSqlRawAsync(
+            @"UPDATE devices SET ""CustomerId"" = NULL WHERE ""Id"" = {0}", _devA);
+        var thrown = await act.Should().ThrowAsync<Npgsql.PostgresException>(
+            "la columna devices.CustomerId es NOT NULL: no se puede dejar sin nodo");
+        thrown.Which.SqlState.Should().Be(Npgsql.PostgresErrorCodes.NotNullViolation,
+            "PostgreSQL rechaza la escritura con violación NOT NULL (23502)");
+    }
+
+    // ---- (d) raíz / sistema: pueden escribir en CUALQUIER nodo del tenant (NO DISRUPTIVO); y las
+    //          lecturas por subárbol siguen ocultando al hermano B. ---------------------------------
+
+    [Fact]
+    public async Task WithCheck_RootAndSystem_StillWriteAnyNodeOfTenant_NonDisruptive()
+    {
+        // (d.1) RAÍZ (path vacío, acotado al tenant): puede crear un device con el customer del
+        //       hermano B (un admin raíz gestiona todo el tenant). NO DISRUPTIVO.
+        await using (var ctxRoot = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tRoot))
+        {
+            tRoot.TenantId = T1;
+            tRoot.CustomerPath = null; // raíz / token antiguo
+
+            var devB = Device.Create(T1, "CHIP-WC-ROOT-B", "AA:00:00:00:0F:05", "CHIP-WC-ROOT-B", "Model", "Mfr").Value;
+            devB.AssignToCustomer(_idB);
+            ctxRoot.Devices.Add(devB);
+
+            var act = async () => await ctxRoot.SaveChangesAsync();
+            await act.Should().NotThrowAsync("la raíz no está restringida por subárbol (NO DISRUPTIVO)");
+        }
+
+        // (d.2) SISTEMA (is_system): también puede crear un device en el nodo del hermano B
+        //       (ingesta / jobs de fondo). NO DISRUPTIVO.
+        await using (var ctxSys = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tSys))
+        {
+            tSys.TenantId = Guid.Empty;
+            tSys.IsSystemOperation = true;
+
+            var devSys = Device.Create(T1, "CHIP-WC-SYS-B", "AA:00:00:00:0F:06", "CHIP-WC-SYS-B", "Model", "Mfr").Value;
+            devSys.AssignToCustomer(_idB);
+            ctxSys.Devices.Add(devSys);
+
+            var act = async () => await ctxSys.SaveChangesAsync();
+            await act.Should().NotThrowAsync("una sesión de sistema no está restringida por subárbol (NO DISRUPTIVO)");
+        }
+
+        // (d.3) El device del hermano B creado por la raíz queda OCULTO en lecturas desde A (su
+        //       customer B no desciende de A): el USING por subárbol se mantiene (ya sin rama de null).
+        await using (var ctxA = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tA))
+        {
+            tA.TenantId = T1;
+            tA.CustomerPath = _pathA;
+
+            var bVisible = await ctxA.Devices.IgnoreQueryFilters()
+                .AnyAsync(d => d.ChipId == "CHIP-WC-ROOT-B");
+            bVisible.Should().BeFalse("el device del hermano B creado por la raíz sigue fuera del subárbol de A en lecturas");
+        }
+    }
+
+    /// <summary>
+    /// Abre una sesión ACOTADA (iot_app, enforce, con el <paramref name="path"/> dado), ejecuta
+    /// <paramref name="stage"/> para preparar la escritura y asevera que <c>SaveChangesAsync</c>
+    /// la RECHAZA por violación de RLS (WITH CHECK → SQLSTATE 42501 insufficient_privilege).
+    /// </summary>
+    private async Task AssertWriteRejectedAsync(string path, Func<ApplicationDbContext, Task> stage)
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = T1;
+        tenant.CustomerPath = path;
+
+        await stage(ctx);
+
+        var act = async () => await ctx.SaveChangesAsync();
+        var thrown = await act.Should().ThrowAsync<DbUpdateException>(
+            "una sesión acotada no puede escribir fuera de su subárbol (WITH CHECK fail-closed)");
+        thrown.Which.InnerException.Should().BeOfType<Npgsql.PostgresException>()
+            .Which.SqlState.Should().Be(Npgsql.PostgresErrorCodes.InsufficientPrivilege,
+                "la BD rechaza la escritura con una violación de política RLS (42501)");
+    }
+
+    private Task AssertWriteRejectedAsync(string path, Action<ApplicationDbContext> stage) =>
+        AssertWriteRejectedAsync(path, ctx => { stage(ctx); return Task.CompletedTask; });
+
     private static ApplicationDbContext BuildContext(
         string connectionString, bool withInterceptor, bool enforce, out MutableTenantContext tenant)
     {

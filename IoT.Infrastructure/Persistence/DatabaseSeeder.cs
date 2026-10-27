@@ -104,6 +104,12 @@ public sealed class DatabaseSeeder
                     "Admin",
                     mustChangePassword: mustChange).Value;
 
+                // ADR-013 E8.4a: asignar el Customer raíz AL CREAR (no después), para no violar el
+                // NOT NULL de CustomerId al guardar.
+                adminTenant1.AssignToCustomer((await EnsureRootCustomerAsync(tenant1Id, cancellationToken)).Id);
+                adminTenant2.AssignToCustomer((await EnsureRootCustomerAsync(tenant2Id, cancellationToken)).Id);
+                adminTenant3.AssignToCustomer((await EnsureRootCustomerAsync(tenant3Id, cancellationToken)).Id);
+
                 await _context.Users.AddRangeAsync(new[] { adminTenant1, adminTenant2, adminTenant3 }, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
             }
@@ -143,6 +149,13 @@ public sealed class DatabaseSeeder
                     "Controlador Bombas de Agua",
                     "MQTT-Relay-BLE",
                     "Custom IoT").Value;
+
+                // ADR-013 E8.4a: asignar el Customer raíz del tenant AL CREAR cada device (NOT NULL).
+                var rootT1 = (await EnsureRootCustomerAsync(tenant1Id, cancellationToken)).Id;
+                dev1.AssignToCustomer(rootT1);
+                dev2.AssignToCustomer(rootT1);
+                dev3.AssignToCustomer((await EnsureRootCustomerAsync(tenant2Id, cancellationToken)).Id);
+                dev4.AssignToCustomer((await EnsureRootCustomerAsync(tenant3Id, cancellationToken)).Id);
 
                 await _context.Devices.AddRangeAsync(new[] { dev1, dev2, dev3, dev4 }, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
@@ -308,6 +321,13 @@ public sealed class DatabaseSeeder
                 if (userResult.IsFailure)
                     throw new InvalidOperationException(
                         $"No se pudo crear el administrador de bootstrap de '{code}': {userResult.Error.Message}");
+
+                // ADR-013 E8.4a: el admin de bootstrap se asigna al Customer raíz del tenant AL
+                // CREAR, para no violar el NOT NULL de CustomerId (esta ruta corre en producción
+                // sobre una base limpia, donde el backfill de 3c vendría después de este SaveChanges).
+                var bootstrapRoot = await EnsureRootCustomerAsync(tenant.Id, cancellationToken);
+                userResult.Value.AssignToCustomer(bootstrapRoot.Id);
+
                 await _context.Users.AddAsync(userResult.Value, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
                 _logger.LogInformation(
@@ -335,22 +355,12 @@ public sealed class DatabaseSeeder
 
         foreach (var tenant in tenants)
         {
-            var root = await _context.Customers.IgnoreQueryFilters()
-                .FirstOrDefaultAsync(c => c.TenantId == tenant.Id && c.ParentCustomerId == null, cancellationToken);
+            var root = await EnsureRootCustomerAsync(tenant.Id, cancellationToken);
 
-            if (root is null)
-            {
-                var rootResult = Customer.Create(tenant.Id, tenant.Name, parent: null, code: "ROOT");
-                if (rootResult.IsFailure)
-                    throw new InvalidOperationException(
-                        $"No se pudo crear el customer raíz del tenant '{tenant.Code}': {rootResult.Error.Message}");
-                root = rootResult.Value;
-                await _context.Customers.AddAsync(root, cancellationToken);
-                await _context.SaveChangesAsync(cancellationToken);
-                _logger.LogInformation("Customer raíz creado para el tenant {Code}.", tenant.Code);
-            }
-
-            // Backfill: sólo filas con CustomerId nulo (no reasigna las ya asignadas).
+            // Backfill residual (ruta de actualización desde bases anteriores a E8.4a): sólo filas
+            // con CustomerId nulo (no reasigna las ya asignadas). Desde E8.4a el alta asigna siempre
+            // un CustomerId, así que en operación normal aquí no queda nada por rellenar; la columna
+            // NOT NULL (migración AddCustomerIdNotNull) es la garantía dura.
             var devices = await _context.Devices.IgnoreQueryFilters()
                 .Where(d => d.TenantId == tenant.Id && d.CustomerId == null)
                 .ToListAsync(cancellationToken);
@@ -371,6 +381,36 @@ public sealed class DatabaseSeeder
                     tenant.Code, devices.Count, users.Count);
             }
         }
+    }
+
+    /// <summary>
+    /// Get-or-create IDEMPOTENTE del <see cref="Customer"/> RAÍZ de un tenant (ADR-013 E8.4a). Se
+    /// usa tanto en el backfill como en los bloques de siembra/alta que crean devices/users, para
+    /// asignarles el raíz EN EL MOMENTO de crearlos y así no violar nunca el NOT NULL de
+    /// <c>CustomerId</c>. Corre en el contexto admin del seeder (omite RLS).
+    /// </summary>
+    private async Task<Customer> EnsureRootCustomerAsync(Guid tenantId, CancellationToken cancellationToken)
+    {
+        var root = await _context.Customers.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.ParentCustomerId == null, cancellationToken);
+        if (root is not null)
+            return root;
+
+        var tenant = await _context.Tenants.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(t => t.Id == tenantId, cancellationToken)
+            ?? throw new InvalidOperationException(
+                $"No existe el tenant {tenantId} para crear su customer raíz.");
+
+        var rootResult = Customer.Create(tenantId, tenant.Name, parent: null, code: "ROOT");
+        if (rootResult.IsFailure)
+            throw new InvalidOperationException(
+                $"No se pudo crear el customer raíz del tenant '{tenant.Code}': {rootResult.Error.Message}");
+
+        root = rootResult.Value;
+        await _context.Customers.AddAsync(root, cancellationToken);
+        await _context.SaveChangesAsync(cancellationToken);
+        _logger.LogInformation("Customer raíz creado para el tenant {Code}.", tenant.Code);
+        return root;
     }
 
     /// <summary>Forma de cada entrada de <c>Bootstrap:Tenants</c> (alta de organización + admin de producción).</summary>

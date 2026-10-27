@@ -169,7 +169,7 @@ public class PostgreSqlRowLevelSecurityTests
 
         // Assert
         connection.ExecuteCount.Should().Be(1);
-        connection.LastExecutedCommand.Should().Be("RESET app.tenant_id; RESET app.is_system_session;");
+        connection.LastExecutedCommand.Should().Be("RESET app.tenant_id; RESET app.is_system_session; RESET app.customer_path;");
     }
 
     [Fact]
@@ -197,6 +197,6 @@ public class PostgreSqlRowLevelSecurityTests
 
         // Assert Close
         connection.ExecuteCount.Should().Be(2);
-        connection.LastExecutedCommand.Should().Be("RESET app.tenant_id; RESET app.is_system_session;");
+        connection.LastExecutedCommand.Should().Be("RESET app.tenant_id; RESET app.is_system_session; RESET app.customer_path;");
     }
 }

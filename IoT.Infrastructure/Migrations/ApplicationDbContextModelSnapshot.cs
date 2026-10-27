@@ -138,6 +138,7 @@ namespace IoT.Infrastructure.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid?>("CustomerId")
+                        .IsRequired()
                         .HasColumnType("uuid");
 
                     b.Property<string>("FirmwareVersion")
@@ -752,6 +753,7 @@ namespace IoT.Infrastructure.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid?>("CustomerId")
+                        .IsRequired()
                         .HasColumnType("uuid");
 
                     b.Property<string>("Email")

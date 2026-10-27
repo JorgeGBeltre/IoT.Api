@@ -11,11 +11,16 @@ public sealed record GetDeviceByIdQuery(Guid TenantId, Guid DeviceId) : IRequest
 public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQuery, Result<DeviceDto>>
 {
     private readonly IDeviceRepository _deviceRepository;
+    private readonly ICustomerRepository _customerRepository;
     private readonly IStateCacheService _stateCache;
 
-    public GetDeviceByIdQueryHandler(IDeviceRepository deviceRepository, IStateCacheService stateCache)
+    public GetDeviceByIdQueryHandler(
+        IDeviceRepository deviceRepository,
+        ICustomerRepository customerRepository,
+        IStateCacheService stateCache)
     {
         _deviceRepository = deviceRepository;
+        _customerRepository = customerRepository;
         _stateCache = stateCache;
     }
 
@@ -28,6 +33,17 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
         }
 
         var cachedPos = await _stateCache.GetLatestPositionAsync(d.TenantId, d.Id, cancellationToken);
+
+        // Nombre del nodo dueño (Customer). Se resuelve RESPETANDO los filtros (RLS + EF, SIN
+        // IgnoreQueryFilters): como el device ya resultó visible, su Customer está en el subárbol de
+        // la sesión y por tanto también es visible, así que el nombre se resuelve sin fuga. Si el
+        // device no tiene nodo (transición E8.1) o el nodo no es visible, CustomerName queda null.
+        string? customerName = null;
+        if (d.CustomerId is Guid ownerCustomerId)
+        {
+            var owner = await _customerRepository.GetByIdScopedAsync(ownerCustomerId, cancellationToken);
+            customerName = owner?.Name;
+        }
 
         var dto = new DeviceDto(
             d.Id,
@@ -42,7 +58,9 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
             d.LastCommunicationAt ?? d.LastTelemetryAt,
             d.CreatedAt,
             d.Capabilities.Select(c => c.CapabilityType.ToString()).ToList(),
-            cachedPos);
+            cachedPos,
+            d.CustomerId,
+            customerName);
 
         return Result<DeviceDto>.Success(dto);
     }

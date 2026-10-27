@@ -1,3 +1,5 @@
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Channels;
 using IoT.Application.Common.Interfaces;
@@ -138,6 +140,16 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         Guid? CredentialTenantId,
         string Source);
 
+    // --- TLS / MQTTS (opt-in). Si Tls=true y hay certificado, se abre ADEMÁS un endpoint
+    //     cifrado (8883 por defecto) junto al 1883 en claro; ambos comparten auth y ACL (son
+    //     independientes del transporte). Con DisablePlaintext=true (y TLS), NO se abre 1883. ---
+    private readonly bool _tlsEnabled;
+    private readonly int _tlsPort;
+    private readonly string? _tlsCertPath;
+    private readonly string? _tlsCertKeyPath;
+    private readonly string? _tlsCertPassword;
+    private readonly bool _disablePlaintext;
+
     public EmbeddedMqttBroker(
         IConfiguration configuration,
         IServiceScopeFactory scopeFactory,
@@ -167,6 +179,30 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
 
         int ttlHours = int.TryParse(configuration["MqttBroker:ClientMapTtlHours"], out var h) ? h : 168;
         _clientMapTtl = ttlHours > 0 ? TimeSpan.FromHours(ttlHours) : null;
+
+        _tlsEnabled = bool.TryParse(configuration["MqttBroker:Tls"], out var tls) && tls;
+        _tlsPort = int.TryParse(configuration["MqttBroker:TlsPort"], out var tp) ? tp : 8883;
+        _tlsCertPath = configuration["MqttBroker:TlsCertPath"];
+        _tlsCertKeyPath = configuration["MqttBroker:TlsCertKeyPath"];
+        _tlsCertPassword = configuration["MqttBroker:TlsCertPassword"];
+        _disablePlaintext = bool.TryParse(configuration["MqttBroker:DisablePlaintext"], out var dp) && dp;
+    }
+
+    /// <summary>
+    /// Carga el certificado del broker para el endpoint MQTTS. Admite PFX/PKCS#12
+    /// (<c>TlsCertPath</c> + <c>TlsCertPassword</c>) o un par PEM (<c>TlsCertPath</c> =
+    /// certificado + <c>TlsCertKeyPath</c> = clave). El PEM se re-importa a PKCS#12 en memoria
+    /// para que la clave privada sea utilizable por el proveedor TLS del SO en cualquier
+    /// plataforma. La contraseña del PFX es un secreto: nunca se loguea.
+    /// </summary>
+    private static X509Certificate2 LoadBrokerCertificate(string certPath, string? keyPath, string? password)
+    {
+        if (!string.IsNullOrWhiteSpace(keyPath))
+        {
+            using var pem = X509Certificate2.CreateFromPemFile(certPath, keyPath);
+            return new X509Certificate2(pem.Export(X509ContentType.Pfx));
+        }
+        return new X509Certificate2(certPath, password ?? string.Empty);
     }
 
     // =========================================================================
@@ -174,10 +210,35 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     // =========================================================================
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var options = new MqttServerOptionsBuilder()
-            .WithDefaultEndpoint()
-            .WithDefaultEndpointPort(_port)
-            .Build();
+        var optionsBuilder = new MqttServerOptionsBuilder();
+
+        // Endpoint en claro (1883): se mantiene por compatibilidad, salvo MQTTS-exclusivo.
+        if (_tlsEnabled && _disablePlaintext)
+        {
+            optionsBuilder.WithoutDefaultEndpoint();
+        }
+        else
+        {
+            optionsBuilder.WithDefaultEndpoint().WithDefaultEndpointPort(_port);
+        }
+
+        // Endpoint cifrado (MQTTS, 8883 por defecto): OPT-IN y aditivo. La auth por ApiKey y el
+        // ACL de tópicos son independientes del transporte, así que se aplican igual sobre TLS.
+        if (_tlsEnabled)
+        {
+            if (string.IsNullOrWhiteSpace(_tlsCertPath))
+                throw new InvalidOperationException(
+                    "MqttBroker:Tls está activado pero falta MqttBroker:TlsCertPath (certificado del broker).");
+
+            var cert = LoadBrokerCertificate(_tlsCertPath!, _tlsCertKeyPath, _tlsCertPassword);
+            optionsBuilder
+                .WithEncryptedEndpoint()
+                .WithEncryptedEndpointPort(_tlsPort)
+                .WithEncryptionCertificate(cert)
+                .WithEncryptionSslProtocol(SslProtocols.Tls12 | SslProtocols.Tls13);
+        }
+
+        var options = optionsBuilder.Build();
 
         var factory = new MqttServerFactory();
         _server = factory.CreateMqttServer(options);
@@ -199,8 +260,11 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 "Sólo para desarrollo; en producción MqttBroker:AllowAnonymous debe ser false.");
         }
         _logger.LogInformation(
-            "Broker MQTT embebido iniciado en puerto {Port}. Anónimo={Anon}. Las credenciales de bootstrap se resuelven por tenant contra la base de datos.",
-            _port, _allowAnonymous);
+            "Broker MQTT embebido iniciado. Texto plano (1883)={Plain}; MQTTS/TLS={Tls}. Anónimo={Anon}. " +
+            "Las credenciales de bootstrap se resuelven por tenant contra la base de datos.",
+            (_tlsEnabled && _disablePlaintext) ? "deshabilitado" : $"puerto {_port}",
+            _tlsEnabled ? $"puerto {_tlsPort}" : "no",
+            _allowAnonymous);
 
         // El bucle de re-validación corre en paralelo al consumidor del canal. Cuelga de su
         // PROPIO token enlazado: si el consumidor termina por una razón distinta a la

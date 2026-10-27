@@ -239,6 +239,47 @@ namespace IoT.Infrastructure.Migrations
                     b.ToTable("devices", (string)null);
                 });
 
+            modelBuilder.Entity("IoT.Domain.Entities.DeviceAttribute", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTime>("LastUpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Scope")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeviceId");
+
+                    b.HasIndex("TenantId", "DeviceId", "Scope");
+
+                    b.HasIndex("TenantId", "DeviceId", "Scope", "Key")
+                        .IsUnique();
+
+                    b.ToTable("device_attributes", (string)null);
+                });
+
             modelBuilder.Entity("IoT.Domain.Entities.DeviceCapability", b =>
                 {
                     b.Property<Guid>("Id")
@@ -971,7 +1012,17 @@ namespace IoT.Infrastructure.Migrations
                     b.HasOne("IoT.Domain.Entities.Customer", null)
                         .WithMany()
                         .HasForeignKey("CustomerId")
-                        .OnDelete(DeleteBehavior.Restrict);
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("IoT.Domain.Entities.DeviceAttribute", b =>
+                {
+                    b.HasOne("IoT.Domain.Entities.Device", null)
+                        .WithMany()
+                        .HasForeignKey("DeviceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("IoT.Domain.Entities.DeviceCapability", b =>
@@ -1027,7 +1078,8 @@ namespace IoT.Infrastructure.Migrations
                     b.HasOne("IoT.Domain.Entities.Customer", null)
                         .WithMany()
                         .HasForeignKey("CustomerId")
-                        .OnDelete(DeleteBehavior.Restrict);
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
 
                     b.HasOne("IoT.Domain.Entities.Role", "Role")
                         .WithMany("Users")

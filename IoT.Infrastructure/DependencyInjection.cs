@@ -40,6 +40,7 @@ public static class DependencyInjection
         services.AddScoped<IDeviceRepository, DeviceRepository>();
         services.AddScoped<ITenantRepository, TenantRepository>();
         services.AddScoped<IDeviceCommandRepository, DeviceCommandRepository>();
+        services.AddScoped<IDeviceAttributeRepository, DeviceAttributeRepository>();
         services.AddScoped<ITelemetryStore, TelemetryStore>();
         services.AddScoped<ITelemetryRetentionService, Retention.TelemetryRetentionService>();
         services.AddScoped<DatabaseSeeder>();

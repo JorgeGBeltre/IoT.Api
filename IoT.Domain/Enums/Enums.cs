@@ -46,3 +46,22 @@ public enum NetworkType
     Ethernet = 3,
     Ble = 4
 }
+
+/// <summary>
+/// Ámbito de un atributo de dispositivo (modelo de atributos de ThingsBoard, fase P1a). Define
+/// QUIÉN es la fuente de verdad del valor y en qué dirección fluye:
+/// <list type="bullet">
+///   <item><see cref="Client"/>: lo reporta el EQUIPO (batería, rssi, versión de firmware).</item>
+///   <item><see cref="Shared"/>: lo fija el OPERADOR y se sincroniza AL equipo (intervalo de
+///     reporte, límite de velocidad, estado deseado de un relé). El push al dispositivo depende del
+///     downlink de cada protocolo y es un seguimiento (no entra en P1a).</item>
+///   <item><see cref="Server"/>: metadato de negocio SÓLO-servidor que el equipo nunca ve (fecha de
+///     instalación, póliza, notas).</item>
+/// </list>
+/// </summary>
+public enum AttributeScope
+{
+    Client = 1,
+    Shared = 2,
+    Server = 3
+}

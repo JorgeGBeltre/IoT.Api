@@ -53,6 +53,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<DeviceCommand> DeviceCommands => Set<DeviceCommand>();
     public DbSet<PositionEntity> Positions => Set<PositionEntity>();
     public DbSet<TelemetryRecordEntity> TelemetryRecords => Set<TelemetryRecordEntity>();
+    public DbSet<DeviceAttribute> DeviceAttributes => Set<DeviceAttribute>();
 
     // Identity, Roles & Security
     public DbSet<User> Users => Set<User>();
@@ -223,6 +224,32 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             builder.HasIndex(t => new { t.TenantId, t.DeviceId, t.RecordedAt });
             builder.HasIndex(t => new { t.TenantId, t.DeviceId, t.MessageId });
             builder.HasIndex(t => new { t.TenantId, t.Source, t.RecordedAt });
+        });
+
+        // DeviceAttribute Configuration (modelo de atributos de ThingsBoard, P1a).
+        // Dato PROPIEDAD DEL DEVICE: ITenantScoped (el filtro global por tenant se aplica por el
+        // foreach de abajo), NO ICustomerScoped (su recorte por subárbol lo da la RLS vía el device,
+        // como positions/telemetry). Value en text (ADR-014 D2): almacén clave-valor que acepta
+        // cadenas/escalares directos y la cadena vacía (value null -> "" de la entidad); NO exige
+        // JSON válido. Scope como string (legible en la BD).
+        modelBuilder.Entity<DeviceAttribute>(builder =>
+        {
+            builder.ToTable("device_attributes");
+            builder.HasKey(a => a.Id);
+            builder.Property(a => a.Scope).HasConversion<string>().HasMaxLength(20).IsRequired();
+            builder.Property(a => a.Key).HasMaxLength(128).IsRequired();
+            builder.Property(a => a.Value).HasColumnType("text").IsRequired();
+
+            // Un único valor por (tenant, device, scope, clave): el upsert reemplaza, no duplica.
+            builder.HasIndex(a => new { a.TenantId, a.DeviceId, a.Scope, a.Key }).IsUnique();
+            builder.HasIndex(a => new { a.TenantId, a.DeviceId, a.Scope });
+
+            // FK al device dueño. Cascade: al borrar el device se borran sus atributos (coherente con
+            // dato propiedad del device, igual que device_capabilities).
+            builder.HasOne<Device>()
+                .WithMany()
+                .HasForeignKey(a => a.DeviceId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // User Configuration

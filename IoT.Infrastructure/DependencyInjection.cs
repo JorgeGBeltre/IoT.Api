@@ -58,6 +58,7 @@ public static class DependencyInjection
         services.AddScoped<IFirmwareVersionRecordRepository, FirmwareVersionRecordRepository>();
         services.AddScoped<IFirmwareOtaService, Services.FirmwareOtaService>();
         services.AddScoped<IDevicePresenceService, Services.DevicePresenceService>();
+        services.AddScoped<ISharedAttributePushDispatcher, Services.SharedAttributePushDispatcher>();
         // Limitador de transmisiones OTA simultaneas. Singleton a proposito: el limite es del
         // PROCESO, no de la peticion que origino el rollout.
         services.AddSingleton<Services.OtaTransmissionThrottle>();

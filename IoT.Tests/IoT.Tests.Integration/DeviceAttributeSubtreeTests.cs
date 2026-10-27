@@ -381,6 +381,44 @@ public sealed class DeviceAttributeSubtreeTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task P1c_SetSharedScope_PersistsDesiredState_AndDispatchesPush()
+    {
+        await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);
+        tenant.TenantId = T1;
+        tenant.CustomerPath = _pathA;
+        tenant.CustomerSubtreeIds = new[] { _custAId, _custA1Id };
+
+        var deviceRepo = new DeviceRepository(ctx);
+        var attrRepo = new DeviceAttributeRepository(ctx);
+        var pushDispatcherMock = new Mock<ISharedAttributePushDispatcher>();
+        pushDispatcherMock.Setup(p => p.PushSharedAttributesAsync(
+            It.IsAny<Device>(), It.IsAny<IReadOnlyDictionary<string, string?>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SharedAttributePushResult(true, "mqtt", "devices/ATTR-CHIP-A/attributes"));
+
+        var setHandler = new SetDeviceAttributesCommandHandler(deviceRepo, attrRepo, tenant, ctx, pushDispatcherMock.Object);
+        var setResult = await setHandler.Handle(
+            new SetDeviceAttributesCommand(_devA, AttributeScope.Shared, new Dictionary<string, string?>
+            {
+                ["upload_interval"] = "45",
+                ["target_temp"] = "22.5"
+            }),
+            default);
+
+        setResult.IsSuccess.Should().BeTrue();
+
+        // 1. Verificamos que se persistió en la BD PostgreSQL (RLS enforce)
+        var attrs = await attrRepo.GetByDeviceAndScopeAsync(_devA, AttributeScope.Shared, default);
+        attrs.Should().Contain(a => a.Key == "upload_interval" && a.Value == "45");
+        attrs.Should().Contain(a => a.Key == "target_temp" && a.Value == "22.5");
+
+        // 2. Verificamos que se disparó el push hacia el equipo (ADR-015 P1c)
+        pushDispatcherMock.Verify(p => p.PushSharedAttributesAsync(
+            It.Is<Device>(d => d.Id == _devA),
+            It.Is<IReadOnlyDictionary<string, string?>>(d => d["upload_interval"] == "45" && d["target_temp"] == "22.5"),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
     public async Task P1b_SetClientScope_IsRejectedAsReadOnly_OverRealContext()
     {
         await using var ctx = BuildContext(_runtimeConnectionString, withInterceptor: true, enforce: true, out var tenant);

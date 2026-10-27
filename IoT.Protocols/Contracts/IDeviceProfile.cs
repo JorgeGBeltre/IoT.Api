@@ -26,6 +26,7 @@ public interface IDeviceProfile
     IReadOnlyList<CapabilityType> SupportedCapabilities { get; }
     IReadOnlyList<string> TelemetryTopicPatterns { get; }
     string CommandTopicPattern { get; }
+    string? AttributeTopicPattern => null;
     IDeviceProtocolAdapter Adapter { get; }
     bool SupportsTransport(string transportName);
 }

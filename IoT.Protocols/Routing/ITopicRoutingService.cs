@@ -5,6 +5,7 @@ namespace IoT.Protocols.Routing;
 public interface ITopicRoutingService
 {
     string BuildCommandTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null);
+    string BuildAttributeTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null);
     IReadOnlyList<string> GetAllTelemetrySubscriptionPatterns();
     TimeSpan GetDefaultCommandExpiry(string? profileIdOrModel = null);
 }
@@ -31,6 +32,25 @@ public sealed class TopicRoutingService : ITopicRoutingService
         }
 
         string pattern = profile?.CommandTopicPattern ?? "devices/{deviceId}/commands";
+
+        return pattern
+            .Replace("{deviceId}", chipId, StringComparison.OrdinalIgnoreCase)
+            .Replace("{tenantId}", tenantId?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public string BuildAttributeTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null)
+    {
+        IDeviceProfile? profile = null;
+
+        if (!string.IsNullOrWhiteSpace(profileIdOrModel))
+        {
+            profile = _registry.GetProfile(profileIdOrModel) ??
+                      _registry.GetAllProfiles().FirstOrDefault(p =>
+                          string.Equals(p.Model, profileIdOrModel, StringComparison.OrdinalIgnoreCase) ||
+                          string.Equals(p.ProfileId, profileIdOrModel, StringComparison.OrdinalIgnoreCase));
+        }
+
+        string pattern = profile?.AttributeTopicPattern ?? "devices/{deviceId}/attributes";
 
         return pattern
             .Replace("{deviceId}", chipId, StringComparison.OrdinalIgnoreCase)

@@ -37,4 +37,9 @@ public static class IoTMetrics
         "iot_command_lifecycle_duration_ms",
         unit: "ms",
         description: "Total duration from command dispatch to device confirmation in milliseconds");
+
+    // Shared Attributes Push Counters (ADR-015 P1c)
+    public static readonly Counter<long> AttributesPushedCounter = Meter.CreateCounter<long>(
+        "iot_device_attributes_pushed_total",
+        description: "Total shared device attributes pushed to physical devices");
 }

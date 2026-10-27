@@ -31,17 +31,20 @@ public sealed class SetDeviceAttributesCommandHandler : IRequestHandler<SetDevic
     private readonly IDeviceAttributeRepository _attributeRepository;
     private readonly ITenantContext _tenantContext;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly ISharedAttributePushDispatcher? _pushDispatcher;
 
     public SetDeviceAttributesCommandHandler(
         IDeviceRepository deviceRepository,
         IDeviceAttributeRepository attributeRepository,
         ITenantContext tenantContext,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        ISharedAttributePushDispatcher? pushDispatcher = null)
     {
         _deviceRepository = deviceRepository;
         _attributeRepository = attributeRepository;
         _tenantContext = tenantContext;
         _unitOfWork = unitOfWork;
+        _pushDispatcher = pushDispatcher;
     }
 
     public async Task<Result> Handle(SetDeviceAttributesCommand request, CancellationToken cancellationToken)
@@ -84,6 +87,23 @@ public sealed class SetDeviceAttributesCommandHandler : IRequestHandler<SetDevic
         }
 
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        // Envío (push) de atributos SHARED al dispositivo físico (ADR-015, P1c):
+        // La BD es la fuente de verdad del estado deseado y YA está confirmada.
+        // El despacho de red es best-effort y aislado: si el equipo está desconectado o el
+        // transporte falla, la persistencia en Postgres NO se pierde ni revierte.
+        if (request.Scope == AttributeScope.Shared && _pushDispatcher != null)
+        {
+            try
+            {
+                await _pushDispatcher.PushSharedAttributesAsync(device, request.Attributes, cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Fallback silencioso a nivel de command handler: el dispatcher registra logs y métricas.
+            }
+        }
+
         return Result.Success();
     }
 }

@@ -32,14 +32,15 @@ public static class MqttTopicAcl
         "telemetry", "telemetria", "status", "glp",
         // El firmware GPS se suscribe a "config/<chipId>" (antes al literal "config",
         // compartido por todos los equipos).
-        "config"
+        "config",
+        "attributes"
     };
 
     /// <summary>
     /// Tópicos de BAJADA: los escribe el servidor y el dispositivo sólo los lee. Si un
     /// dispositivo pudiera publicar aquí, podría inyectar un firmware o un comando a otro.
     /// </summary>
-    private static readonly string[] DownlinkPrefixes = { "ota", "event", "commands", "command", "config" };
+    private static readonly string[] DownlinkPrefixes = { "ota", "event", "commands", "command", "config", "attributes" };
 
     /// <summary>
     /// Sufijos de los reportes que el firmware publica bajo su propia rama OTA
@@ -131,7 +132,8 @@ public static class MqttTopicAcl
             if (last.Equals("command", StringComparison.OrdinalIgnoreCase) ||
                 last.Equals("commands", StringComparison.OrdinalIgnoreCase) ||
                 last.Equals("state", StringComparison.OrdinalIgnoreCase) ||
-                last.Equals("config", StringComparison.OrdinalIgnoreCase))
+                last.Equals("config", StringComparison.OrdinalIgnoreCase) ||
+                last.Equals("attributes", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }

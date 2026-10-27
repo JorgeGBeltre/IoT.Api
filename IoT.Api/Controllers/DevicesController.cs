@@ -127,6 +127,85 @@ public sealed class DevicesController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Atributos del dispositivo (ADR-014, P1b) agrupados por ámbito: Client (reportados por el equipo,
+    /// sólo-lectura), Shared (estado deseado que fija el operador; push diferido por protocolo) y Server
+    /// (metadato de negocio). Lectura: basta sesión válida (igual que el resto de GET de device); el
+    /// recorte por subárbol/tenant lo aplican la RLS + el filtro EF, no la política de rol.
+    /// </summary>
+    [HttpGet("{id:guid}/attributes")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDeviceAttributes(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetDeviceAttributesQuery(_tenantContext.TenantId, id), cancellationToken);
+        if (result.IsFailure)
+        {
+            return NotFound(new { error = result.Error.Message });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// Fija (upsert) atributos de un ámbito del dispositivo. <paramref name="scope"/> va en la ruta
+    /// (<c>shared</c> o <c>server</c>); <c>client</c> se RECHAZA con 400 porque esos valores los reporta
+    /// el equipo. Requiere <see cref="AuthorizationPolicies.DeviceManage"/>, coherente con el resto de
+    /// mutaciones de device (registro, credenciales); el recorte por subárbol lo imponen la carga scoped
+    /// del device y la RLS (<c>WITH CHECK</c>) de <c>device_attributes</c>.
+    /// </summary>
+    [HttpPut("{id:guid}/attributes/{scope}")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetDeviceAttributes(
+        Guid id, string scope, [FromBody] Dictionary<string, string?> attributes, CancellationToken cancellationToken)
+    {
+        if (!TryParseScope(scope, out var parsedScope))
+        {
+            return BadRequest(new { error = $"Ámbito de atributo inválido: '{scope}'. Use 'shared' o 'server'." });
+        }
+
+        var result = await _mediator.Send(
+            new SetDeviceAttributesCommand(id, parsedScope, attributes ?? new Dictionary<string, string?>()),
+            cancellationToken);
+
+        return result.IsSuccess ? NoContent() : MapAttributeFailure(result.Error);
+    }
+
+    /// <summary>
+    /// Borra un atributo fijado por el operador (<c>shared</c>/<c>server</c>). <c>client</c> se rechaza
+    /// con 400. Mismas garantías de alcance que el PUT.
+    /// </summary>
+    [HttpDelete("{id:guid}/attributes/{scope}/{key}")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> DeleteDeviceAttribute(
+        Guid id, string scope, string key, CancellationToken cancellationToken)
+    {
+        if (!TryParseScope(scope, out var parsedScope))
+        {
+            return BadRequest(new { error = $"Ámbito de atributo inválido: '{scope}'. Use 'shared' o 'server'." });
+        }
+
+        var result = await _mediator.Send(
+            new DeleteDeviceAttributeCommand(id, parsedScope, key), cancellationToken);
+
+        return result.IsSuccess ? NoContent() : MapAttributeFailure(result.Error);
+    }
+
+    private static bool TryParseScope(string scope, out AttributeScope parsed) =>
+        Enum.TryParse(scope, ignoreCase: true, out parsed) && Enum.IsDefined(parsed);
+
+    private IActionResult MapAttributeFailure(IoT.Domain.Common.Error error) => error.Code switch
+    {
+        "Device.NotFound" or "Attributes.NotFound" => NotFound(new { error = error.Message }),
+        _ => BadRequest(new { error = error.Message }),
+    };
+
     /// <summary>Genera/rota la ApiKey MQTT del dispositivo. Devuelve el texto plano UNA sola vez.</summary>
     [HttpPost("{id:guid}/credentials/rotate")]
     [Authorize(Policy = AuthorizationPolicies.DeviceManage)]

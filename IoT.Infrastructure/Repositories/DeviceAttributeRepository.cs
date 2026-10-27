@@ -78,4 +78,43 @@ public sealed class DeviceAttributeRepository : IDeviceAttributeRepository
             .OrderBy(a => a.Key)
             .ToListAsync(cancellationToken);
     }
+
+    public async Task<bool> DeleteAsync(
+        Guid deviceId,
+        AttributeScope scope,
+        string key,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedKey = key?.Trim();
+
+        // RESPETA los filtros globales: la RLS acota por tenant/subárbol. Si la fila no es visible
+        // (otro subárbol/tenant), no se encuentra y no se borra nada (mismo trato que inexistente).
+        var existing = await _context.DeviceAttributes
+            .FirstOrDefaultAsync(
+                a => a.DeviceId == deviceId && a.Scope == scope && a.Key == normalizedKey,
+                cancellationToken);
+
+        if (existing is null)
+        {
+            return false;
+        }
+
+        _context.DeviceAttributes.Remove(existing);
+        return true;
+    }
+
+    public void DiscardPendingChanges()
+    {
+        // DETACH de toda entrada de DeviceAttribute aún pendiente (Added/Modified/Deleted) tras un fallo
+        // del upsert best-effort. Así el change-tracker queda limpio de estas filas y un SaveChanges
+        // POSTERIOR del mismo contexto (p.ej. confirmación de comando en la ingesta) no las reintenta ni
+        // re-lanza el error. NO toca entidades de otros tipos ya encoladas por el llamador.
+        foreach (var entry in _context.ChangeTracker.Entries<DeviceAttribute>().ToList())
+        {
+            if (entry.State is EntityState.Added or EntityState.Modified or EntityState.Deleted)
+            {
+                entry.State = EntityState.Detached;
+            }
+        }
+    }
 }

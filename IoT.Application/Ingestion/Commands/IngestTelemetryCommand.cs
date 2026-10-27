@@ -61,6 +61,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
     private readonly IFirmwareOtaService? _firmwareOtaService;
     private readonly IDeviceCommandRepository? _commandRepository;
     private readonly IUnprovisionedDeviceAuditThrottle? _unprovisionedAuditThrottle;
+    private readonly IDeviceAttributeRepository? _attributeRepository;
 
     public IngestTelemetryCommandHandler(
         ICompositeProtocolAdapter protocolAdapter,
@@ -75,7 +76,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         IAuditLogRepository? auditLogRepository = null,
         IFirmwareOtaService? firmwareOtaService = null,
         IDeviceCommandRepository? commandRepository = null,
-        IUnprovisionedDeviceAuditThrottle? unprovisionedAuditThrottle = null)
+        IUnprovisionedDeviceAuditThrottle? unprovisionedAuditThrottle = null,
+        IDeviceAttributeRepository? attributeRepository = null)
     {
         _protocolAdapter = protocolAdapter;
         _deviceRepository = deviceRepository;
@@ -90,6 +92,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         _firmwareOtaService = firmwareOtaService;
         _commandRepository = commandRepository;
         _unprovisionedAuditThrottle = unprovisionedAuditThrottle;
+        _attributeRepository = attributeRepository;
     }
 
     public async Task<Result> Handle(IngestTelemetryCommand request, CancellationToken cancellationToken)
@@ -315,6 +318,54 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         // 7. Update device last seen
         device.RecordTelemetry(ev.RecordedAt);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        // 7b. Atributos CLIENT (ADR-014, P1b): reflejar el ÚLTIMO valor de los campos que el EQUIPO
+        //     reporta (firmware_version, imei, iccid, imsi) como atributos de ámbito
+        //     Client. battery/rssi ya NO se mapean a atributos: van a telemetría.
+        //     Mapeo EXACTO de las claves ya presentes en el evento canónico (ver
+        //     DeviceClientAttributeMapping), sin inventar claves. Se escribe SÓLO cuando el valor
+        //     CAMBIA respecto al almacenado, para no reescribir en cada trama (telemetría caliente).
+        //     Corre con el tenant del DEVICE resuelto (server-side, nunca entrada del cliente) y path
+        //     vacío: la RLS de device_attributes permite la escritura (tenant propio, sin recorte de
+        //     subárbol), igual que telemetry_records. Es BEST-EFFORT y aislado en su propio
+        //     SaveChanges: un fallo aquí NO debe perder la telemetría ya persistida.
+        if (_attributeRepository != null)
+        {
+            try
+            {
+                var reported = DeviceClientAttributeMapping.Extract(ev);
+                if (reported.Count > 0)
+                {
+                    var currentClient = await _attributeRepository.GetByDeviceAndScopeAsync(
+                        device.Id, AttributeScope.Client, cancellationToken);
+                    var currentMap = currentClient.ToDictionary(a => a.Key, a => a.Value, StringComparer.Ordinal);
+
+                    var changes = DeviceClientAttributeMapping.ComputeChanges(reported, currentMap);
+                    if (changes.Count > 0)
+                    {
+                        foreach (var (key, value) in changes)
+                        {
+                            await _attributeRepository.UpsertAsync(
+                                device.TenantId, device.Id, AttributeScope.Client, key, value, cancellationToken);
+                        }
+
+                        await _unitOfWork.SaveChangesAsync(cancellationToken);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Best-effort: la telemetría ya está persistida (paso 7) y NO se pierde. Pero el upsert
+                // de atributos corre sobre el MISMO contexto (IUnitOfWork == ApplicationDbContext): si su
+                // SaveChanges falló (23505 por carrera, 42501 por RLS…), las entidades DeviceAttribute
+                // encoladas antes del fallo siguen en el change-tracker. Sin descartarlas, un SaveChanges
+                // POSTERIOR del handler (p.ej. la confirmación de comando del paso 10) las reintentaría,
+                // re-lanzaría el mismo error y perdería esa confirmación en silencio. Se detachan para
+                // que el fallo de 7b NO contamine escrituras posteriores.
+                _attributeRepository.DiscardPendingChanges();
+                _logger.LogWarning(ex, "No se pudieron actualizar los atributos CLIENT de {ChipId}", device.ChipId);
+            }
+        }
 
         // 8. Real-time fleet notifications (SignalR stream)
         if (_notificationService != null)

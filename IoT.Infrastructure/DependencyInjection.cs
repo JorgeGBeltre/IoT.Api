@@ -4,11 +4,13 @@ using IoT.Infrastructure.Mqtt;
 using IoT.Infrastructure.Persistence;
 using IoT.Infrastructure.Redis;
 using IoT.Infrastructure.Repositories;
+using IoT.Infrastructure.TelemetryQueue;
 using IoT.Protocols.Contracts;
 using IoT.Protocols.Profiles;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 
 namespace IoT.Infrastructure;
@@ -86,6 +88,38 @@ public static class DependencyInjection
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnStr));
         services.AddSingleton<IRedisStateService, RedisStateService>();
         services.AddSingleton<IStateCacheService>(sp => sp.GetRequiredService<IRedisStateService>());
+
+        // Telemetry Queue & Sequential Partitioning (ADR-016: Sequential by Originator)
+        string queueEngine = configuration["TelemetryQueue:Engine"] ?? "RedisStreams";
+        int partitionCount = int.TryParse(configuration["TelemetryQueue:PartitionCount"], out var pc) ? pc : 8;
+
+        if (string.Equals(queueEngine, "InMemory", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddSingleton<InMemoryTelemetryQueueService>(sp =>
+                new InMemoryTelemetryQueueService(
+                    sp.GetRequiredService<ILogger<InMemoryTelemetryQueueService>>(),
+                    partitionCount));
+            services.AddSingleton<ITelemetryQueuePublisher>(sp => sp.GetRequiredService<InMemoryTelemetryQueueService>());
+            services.AddSingleton<ITelemetryQueueConsumer>(sp => sp.GetRequiredService<InMemoryTelemetryQueueService>());
+        }
+        else if (string.Equals(queueEngine, "Direct", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddSingleton<ITelemetryQueuePublisher, DirectTelemetryQueuePublisher>();
+        }
+        else
+        {
+            int maxLen = int.TryParse(configuration["TelemetryQueue:MaxStreamLength"], out var ml) ? ml : 10000;
+            string? consumerGroup = configuration["TelemetryQueue:ConsumerGroup"];
+            services.AddSingleton<RedisTelemetryStreamService>(sp =>
+                new RedisTelemetryStreamService(
+                    sp.GetRequiredService<IConnectionMultiplexer>(),
+                    sp.GetRequiredService<ILogger<RedisTelemetryStreamService>>(),
+                    partitionCount,
+                    maxLen,
+                    consumerGroup));
+            services.AddSingleton<ITelemetryQueuePublisher>(sp => sp.GetRequiredService<RedisTelemetryStreamService>());
+            services.AddSingleton<ITelemetryQueueConsumer>(sp => sp.GetRequiredService<RedisTelemetryStreamService>());
+        }
 
         // Broker MQTT EMBEBIDO (D1: broker propio de References/Mqtt-Broker, no externo).
         // El backend ES el broker: autentica, intercepta publishes → pipeline de ingesta,

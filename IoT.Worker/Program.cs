@@ -23,6 +23,12 @@ if (builder.Configuration.GetValue<bool>("Mqtt:ExternalSubscriptionEnabled", fal
 builder.Services.AddHostedService<DataRetentionWorker>();
 builder.Services.AddHostedService<DevicePresenceWorker>();
 
+// Telemetry Stream Partitioned Consumer (ThingsBoard Pattern 2: Sequential by Originator, ADR-016)
+if (!string.Equals(builder.Configuration["TelemetryQueue:Engine"], "Direct", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddHostedService<TelemetryStreamConsumerWorker>();
+}
+
 // Latido de liveness para el HEALTHCHECK del contenedor (el worker no expone HTTP).
 builder.Services.AddHostedService<HeartbeatWorker>();
 

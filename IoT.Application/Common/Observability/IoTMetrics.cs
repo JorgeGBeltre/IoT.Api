@@ -42,4 +42,13 @@ public static class IoTMetrics
     public static readonly Counter<long> AttributesPushedCounter = Meter.CreateCounter<long>(
         "iot_device_attributes_pushed_total",
         description: "Total shared device attributes pushed to physical devices");
+
+    // Telemetry Queue & Partitioning Counters (ADR-016 P2: Sequential by Originator)
+    public static readonly Counter<long> TelemetryQueueEnqueuedCounter = Meter.CreateCounter<long>(
+        "iot_telemetry_queue_enqueued_total",
+        description: "Total telemetry messages enqueued into sequential originator partitions");
+
+    public static readonly Counter<long> TelemetryQueueProcessedCounter = Meter.CreateCounter<long>(
+        "iot_telemetry_queue_processed_total",
+        description: "Total telemetry messages processed from sequential originator partitions");
 }

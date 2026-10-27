@@ -149,17 +149,20 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     private readonly string? _tlsCertKeyPath;
     private readonly string? _tlsCertPassword;
     private readonly bool _disablePlaintext;
+    private readonly ITelemetryQueuePublisher? _telemetryQueuePublisher;
 
     public EmbeddedMqttBroker(
         IConfiguration configuration,
         IServiceScopeFactory scopeFactory,
         IMqttClientMap clientMap,
-        ILogger<EmbeddedMqttBroker> logger)
+        ILogger<EmbeddedMqttBroker> logger,
+        ITelemetryQueuePublisher? telemetryQueuePublisher = null)
     {
         _configuration = configuration;
         _scopeFactory = scopeFactory;
         _clientMap = clientMap;
         _logger = logger;
+        _telemetryQueuePublisher = telemetryQueuePublisher;
 
         _port = int.TryParse(configuration["MqttBroker:Port"], out var p) ? p : 1883;
         _allowAnonymous = bool.TryParse(configuration["MqttBroker:AllowAnonymous"], out var anon) && anon;
@@ -465,6 +468,21 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     {
         try
         {
+            // ADR-016: Encolar hacia stream/cola particionada por originador (Sequential by Originator)
+            if (_telemetryQueuePublisher is not null)
+            {
+                await _telemetryQueuePublisher.EnqueueAsync(
+                    new TelemetryQueueItem(
+                        msg.Topic,
+                        msg.Payload,
+                        msg.Source,
+                        TransportDeviceIdentifier: msg.AuthenticatedChipId,
+                        TransportMessageId: msg.MessageId,
+                        CredentialTenantId: msg.CredentialTenantId),
+                    ct);
+                return;
+            }
+
             using var scope = _scopeFactory.CreateScope();
             var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
             // Reutiliza el pipeline existente (dedup, tenant, provisioning con auditoría).

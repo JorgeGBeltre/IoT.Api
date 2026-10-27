@@ -28,6 +28,7 @@ public sealed class MultiProtocolTcpGatewayService : BackgroundService, ITcpComm
     private readonly IConfiguration _configuration;
     private readonly IReadOnlyDictionary<string, ITcpProtocolHandler> _handlers;
     private readonly ILogger<MultiProtocolTcpGatewayService> _logger;
+    private readonly ITelemetryQueuePublisher? _telemetryQueuePublisher;
 
     private readonly ConcurrentDictionary<string, TcpDeviceSession> _activeSessions = new();
     private readonly List<TcpListener> _listeners = new();
@@ -42,12 +43,14 @@ public sealed class MultiProtocolTcpGatewayService : BackgroundService, ITcpComm
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
         IEnumerable<ITcpProtocolHandler> handlers,
-        ILogger<MultiProtocolTcpGatewayService> logger)
+        ILogger<MultiProtocolTcpGatewayService> logger,
+        ITelemetryQueuePublisher? telemetryQueuePublisher = null)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
         _handlers = handlers.ToDictionary(h => h.Family, StringComparer.OrdinalIgnoreCase);
         _logger = logger;
+        _telemetryQueuePublisher = telemetryQueuePublisher;
     }
 
     public bool IsConnected(string imei) =>
@@ -362,18 +365,32 @@ public sealed class MultiProtocolTcpGatewayService : BackgroundService, ITcpComm
         {
             try
             {
-                using var scope = _scopeFactory.CreateScope();
-                var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
-                var result = await mediator.Send(new IngestTelemetryCommand(
-                    outcome.IngestTopic,
-                    outcome.IngestPayload,
-                    Source: $"tcp-{handler.Family.ToLowerInvariant()}",
-                    TransportProtocol: string.IsNullOrEmpty(outcome.TransportProtocol) ? null : outcome.TransportProtocol),
-                    cancellationToken);
-
-                if (result.IsFailure)
+                // ADR-016: Encolado particionado secuencial por origen (IMEI)
+                if (_telemetryQueuePublisher is not null)
                 {
-                    _logger.LogWarning("Ingesta TCP {Family} fallida para IMEI {Imei}: {Error}", handler.Family, session.Imei, result.Error.Message);
+                    await _telemetryQueuePublisher.EnqueueAsync(new TelemetryQueueItem(
+                        outcome.IngestTopic,
+                        outcome.IngestPayload,
+                        Source: $"tcp-{handler.Family.ToLowerInvariant()}",
+                        TransportProtocol: string.IsNullOrEmpty(outcome.TransportProtocol) ? null : outcome.TransportProtocol,
+                        TransportDeviceIdentifier: session.Imei),
+                        cancellationToken);
+                }
+                else
+                {
+                    using var scope = _scopeFactory.CreateScope();
+                    var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+                    var result = await mediator.Send(new IngestTelemetryCommand(
+                        outcome.IngestTopic,
+                        outcome.IngestPayload,
+                        Source: $"tcp-{handler.Family.ToLowerInvariant()}",
+                        TransportProtocol: string.IsNullOrEmpty(outcome.TransportProtocol) ? null : outcome.TransportProtocol),
+                        cancellationToken);
+
+                    if (result.IsFailure)
+                    {
+                        _logger.LogWarning("Ingesta TCP {Family} fallida para IMEI {Imei}: {Error}", handler.Family, session.Imei, result.Error.Message);
+                    }
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

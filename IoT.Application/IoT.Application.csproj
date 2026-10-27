@@ -9,6 +9,16 @@
     <PackageReference Include="FluentValidation" Version="11.11.0" />
     <PackageReference Include="MediatR" Version="12.4.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <!--
+      EF Core + Npgsql SÓLO para traducir la violación de índice único (SQLSTATE 23505) del alta de
+      usuario a un fallo de negocio User.UsernameTaken (E8.6a, defensa TOCTOU). Se usa
+      Npgsql.PostgresErrorCodes.UniqueViolation (sin cadenas mágicas). Las versiones se alinean con el
+      proveedor Npgsql.EntityFrameworkCore.PostgreSQL 8.0.11 de IoT.Infrastructure, que depende de
+      Npgsql (core ADO.NET) 8.0.6 y Microsoft.EntityFrameworkCore 8.0.11: fijar Npgsql 8.0.6 evita que
+      la restricción flote el grafo a Npgsql 9.x (incompatible con el proveedor 8.x en runtime).
+    -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.11" />
+    <PackageReference Include="Npgsql" Version="8.0.6" />
   </ItemGroup>
 
   <PropertyGroup>

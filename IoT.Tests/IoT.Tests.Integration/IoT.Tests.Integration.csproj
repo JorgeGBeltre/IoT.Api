@@ -24,6 +24,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Las pruebas de integración usan Testcontainers (un contenedor PostgreSQL por clase): se
+         desactiva la paralelización de colecciones para no levantar múltiples contenedores a la vez. -->
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\IoT.Domain\IoT.Domain.csproj" />
     <ProjectReference Include="..\..\IoT.Application\IoT.Application.csproj" />
     <ProjectReference Include="..\..\IoT.Protocols\IoT.Protocols.csproj" />

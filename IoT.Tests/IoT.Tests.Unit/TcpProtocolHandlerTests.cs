@@ -125,7 +125,7 @@ public sealed class TcpProtocolHandlerTests
 
         using var doc = JsonDocument.Parse(outcome.IngestPayload!);
         var root = doc.RootElement;
-        root.GetProperty("battery_level").GetInt32().Should().Be(90); // level 5 -> 90%
+        root.GetProperty("battery_level").GetInt32().Should().Be(5); // #8: VoltageLevel crudo 0-6, NO porcentaje
         root.GetProperty("gsm_signal").GetInt32().Should().Be(75); // level 3 -> 75%
         root.GetProperty("acc").GetBoolean().Should().BeTrue();
         root.GetProperty("charge").GetBoolean().Should().BeTrue();
@@ -437,5 +437,151 @@ public sealed class TcpProtocolHandlerTests
 
         var bytesAlreadyTerminated = handler.BuildCommand("stop123456;", 2);
         Encoding.ASCII.GetString(bytesAlreadyTerminated!).Should().Be("stop123456;");
+    }
+
+    // =========================================================================
+    // Regresión GT06: construcción de comando 0x80 (#1 Length-of-Command, #2 sin
+    // Language), bit de aceite del 0x13 (#4) y tipo de alarma del 0x16 (#3).
+    // =========================================================================
+
+    /// <summary>
+    /// Implementación INDEPENDIENTE (bit a bit) de CRC-ITU / CRC-16-X25 para validar el CRC
+    /// que produce BuildCommand sin depender de la tabla de R12LFCrc16 (que es la que usa el
+    /// propio productor): así el test detecta si la REGIÓN del CRC cambia (p.ej. si volviera
+    /// el campo Language o un LenCmd equivocado), no sólo que productor y verificador coincidan.
+    /// </summary>
+    private static ushort CrcX25(IReadOnlyList<byte> data)
+    {
+        ushort crc = 0xFFFF;
+        foreach (var b in data)
+        {
+            crc ^= b;
+            for (int i = 0; i < 8; i++)
+                crc = (ushort)(((crc & 1) != 0) ? (crc >> 1) ^ 0x8408 : crc >> 1);
+        }
+        return (ushort)(crc ^ 0xFFFF);
+    }
+
+    private static List<byte> BuildGt06Frame(byte protocol, byte[] content, ushort serial)
+    {
+        // Length cuenta de Protocol a CRC (inclusive): Protocol(1)+content(N)+Serial(2)+CRC(2) = 5 + N.
+        byte length = (byte)(5 + content.Length);
+        var body = new List<byte> { length, protocol };
+        body.AddRange(content);
+        body.Add((byte)(serial >> 8));
+        body.Add((byte)(serial & 0xFF));
+        ushort crc = R12LFCrc16.Compute(body.ToArray());
+        var frame = new List<byte> { 0x78, 0x78 };
+        frame.AddRange(body);
+        frame.Add((byte)(crc >> 8));
+        frame.Add((byte)(crc & 0xFF));
+        frame.Add(0x0D);
+        frame.Add(0x0A);
+        return frame;
+    }
+
+    [Fact]
+    public void Gt06_BuildCommand_Dyd000000_MatchesAppendixBFrame_WithoutLanguageField()
+    {
+        // (a) Apéndice B del spec R12L-F: 78 78 15 80 0F <ServerFlag 00000001> "DYD,000000#"
+        //     <Serial(2)> <CRC-ITU(2)> 0D 0A. Sin campo Language. El serial se fija para que
+        //     la comparación sea determinista y el CRC se valida con una implementación propia.
+        const ushort serial = 0x0001;
+        var handler = new Gt06TcpHandler();
+        byte[]? built = handler.BuildCommand("DYD,000000#", serial);
+        built.Should().NotBeNull();
+        byte[] packet = built!;
+
+        byte[] content = Encoding.ASCII.GetBytes("DYD,000000#"); // 11 bytes
+        content.Should().HaveCount(11);
+
+        // CRC-ITU sobre la región Packet-Length..Serial (inclusive), sin Language.
+        var crcRegion = new List<byte> { 0x15, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x01 };
+        crcRegion.AddRange(content);
+        crcRegion.Add(0x00);
+        crcRegion.Add(0x01);
+        ushort crc = CrcX25(crcRegion);
+
+        var expected = new List<byte> { 0x78, 0x78, 0x15, 0x80, 0x0F, 0x00, 0x00, 0x00, 0x01 };
+        expected.AddRange(content);
+        expected.Add(0x00); // serial hi
+        expected.Add(0x01); // serial lo
+        expected.Add((byte)(crc >> 8));
+        expected.Add((byte)(crc & 0xFF));
+        expected.Add(0x0D);
+        expected.Add(0x0A);
+
+        packet.Should().Equal(expected, "debe coincidir byte a byte con el apéndice B (sin Language)");
+        packet.Length.Should().Be(26);
+        packet[2].Should().Be(0x15, "Packet Length = 10 + 11 ASCII");
+        packet[4].Should().Be(0x0F, "#1: Length of Command = ServerFlag(4) + 11 ASCII, ya no 0x04");
+
+        // #2: sin Language, el ASCII va seguido DIRECTAMENTE del serial (no hay 00 02 entre medias).
+        int serialIndex = 9 + content.Length;
+        packet[serialIndex].Should().Be(0x00);
+        packet[serialIndex + 1].Should().Be(0x01);
+
+        // Y debe re-parsear: si el CRC o el LenCmd fuesen incoherentes, TryParse lo rechazaría.
+        R12LFFrame.TryParse(packet, out var parsed, out _).Should().BeTrue("el CRC-ITU debe ser válido");
+        parsed!.ProtocolNumber.Should().Be(R12LFFrame.ProtocolServerCommand);
+        parsed.PacketLength.Should().Be(0x15);
+    }
+
+    [Fact]
+    public void Gt06_Status0x13_OilElectricityBit_IsNotInverted()
+    {
+        // (b) #4: Bit7 de Terminal Info = 1 DESCONECTADO, 0 conectado.
+        var handler = new Gt06TcpHandler();
+
+        // termInfo con Bit7=1 → oil_connected debe ser FALSE.
+        var disconnected = BuildGt06Frame(0x13, new byte[] { 0x80, 0x05, 0x03, 0x00, 0x02 }, serial: 1);
+        handler.TryReadFrame(disconnected, "861234567890123", out var offOutcome).Should().BeTrue();
+        using (var doc = JsonDocument.Parse(offOutcome!.IngestPayload!))
+        {
+            doc.RootElement.GetProperty("oil_connected").GetBoolean().Should().BeFalse("Bit7=1 significa DESCONECTADO");
+            doc.RootElement.GetProperty("battery_level").GetInt32().Should().Be(5, "#8: VoltageLevel crudo 0-6");
+        }
+
+        // termInfo con Bit7=0 → oil_connected debe ser TRUE.
+        var connected = BuildGt06Frame(0x13, new byte[] { 0x40, 0x05, 0x03, 0x00, 0x02 }, serial: 2);
+        handler.TryReadFrame(connected, "861234567890123", out var onOutcome).Should().BeTrue();
+        using (var doc = JsonDocument.Parse(onOutcome!.IngestPayload!))
+        {
+            doc.RootElement.GetProperty("oil_connected").GetBoolean().Should().BeTrue("Bit7=0 significa conectado");
+        }
+    }
+
+    [Fact]
+    public void Gt06_Alarm0x16_FormerByte0x01_ProducesAlarmTypeSos()
+    {
+        // (c) #3: el byte "former" de Alarm/Language = 0x01 ⇒ alarm_type "sos".
+        //     Trama 0x16 estándar: 18 (posición con fix) + 8 (LBS) + TermInfo + Voltage + GSM
+        //     + Alarm/Language. El former (índice 29 del contenido) es el tipo de alarma.
+        byte[] content =
+        [
+            26, 10, 22, 14, 30, 0,          // fecha/hora
+            0x88,                           // satélites
+            0x01, 0xFB, 0xBC, 0x64,         // lat
+            0x07, 0x80, 0xB7, 0xC0,         // lon
+            60,                             // speed
+            0x1C, 0x00,                     // course/status: posicionado + Norte + Oeste
+            0x01, 0x37, 0x0A, 0x12, 0x34, 0x00, 0x00, 0x01, // LBS: MCC MNC LAC CellID
+            0x05, 0x04, 0x03,               // TerminalInfo, Voltage, GSM
+            0x01, 0x02                      // Alarm/Language: former=0x01 (SOS), latter=0x02
+        ];
+        content.Should().HaveCount(31);
+
+        var handler = new Gt06TcpHandler();
+        var buf = BuildGt06Frame(0x16, content, serial: 7);
+
+        handler.TryReadFrame(buf, "861234567890123", out var outcome).Should().BeTrue();
+        outcome!.Ingest.Should().BeTrue();
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("is_alarm").GetBoolean().Should().BeTrue();
+        root.GetProperty("alarm_type").GetString().Should().Be("sos");
+        root.GetProperty("isValid").GetBoolean().Should().BeTrue("la trama trae fix GPS");
+        root.GetProperty("protocol_number").GetString().Should().Be("0x16");
     }
 }

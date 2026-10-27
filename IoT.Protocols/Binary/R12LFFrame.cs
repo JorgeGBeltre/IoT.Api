@@ -211,11 +211,39 @@ public sealed record R12LFFrame
     /// </summary>
     public (GeoPosition? Position, DateTime RecordedAt) DecodeLocationPacket(byte canonicalProtocolNumber)
     {
+        // Contrato histórico que conservan otros transportes (TcpBinaryTransport,
+        // R12LFTcpGatewayService, TcpBinaryTelemetryStrategy): sin fix GPS se devuelve null.
+        var (position, recordedAt, extras) = DecodeLocationPacketDetailed(canonicalProtocolNumber);
+        return (extras.HasFix ? position : null, recordedAt);
+    }
+
+    /// <summary>
+    /// Celda LBS (localización por antena) presente en las tramas 0x12/0x16 tras el bloque
+    /// de curso/estado: MCC(2)/MNC(1)/LAC(2)/CellID(3). NO es una posición GPS; se expone
+    /// como metadato para conservar la trama sin fix sin inventar lat/lon.
+    /// </summary>
+    public readonly record struct Gt06LbsCell(int Mcc, int Mnc, int Lac, long CellId);
+
+    /// <summary>
+    /// Metadatos adicionales de una trama de posición/alarma: si trae fix GPS, el tipo de
+    /// alarma (sólo 0x16) y la celda LBS (si el contenido la incluye).
+    /// </summary>
+    public readonly record struct Gt06LocationExtras(bool HasFix, string? AlarmType, Gt06LbsCell? Lbs);
+
+    /// <summary>
+    /// Variante de <see cref="DecodeLocationPacket(byte)"/> que, además de la posición,
+    /// devuelve metadatos: presencia de fix, tipo de alarma (0x16) y celda LBS. A diferencia
+    /// del método base, SÍ construye la posición cuando no hay fix (marcada IsValid=false),
+    /// para que el llamador pueda conservar la trama en vez de descartarla entera. No sustituye
+    /// al método base porque otros transportes dependen de su contrato de devolver null sin fix.
+    /// </summary>
+    public (GeoPosition? Position, DateTime RecordedAt, Gt06LocationExtras Extras) DecodeLocationPacketDetailed(byte canonicalProtocolNumber)
+    {
         if (canonicalProtocolNumber != ProtocolLocation && canonicalProtocolNumber != ProtocolAlarm)
-            return (null, DateTime.UtcNow);
+            return (null, DateTime.UtcNow, default);
 
         if (InformationContent.Length < 18)
-            return (null, DateTime.UtcNow);
+            return (null, DateTime.UtcNow, default);
 
         var span = InformationContent.AsSpan();
 
@@ -260,12 +288,59 @@ public sealed record R12LFFrame
         if (!isNorth) latitude = -latitude;   // hemisferio sur → latitud negativa
         if (isWest) longitude = -longitude;   // longitud oeste → longitud negativa
 
-        // Sin fix GPS las coordenadas no son fiables (suelen venir 0,0). No emitir posición
-        // para no ingerir un punto espurio en el Golfo de Guinea; el llamador omite la ingesta.
-        if (!isGpsPositioned)
-            return (null, recordedAt);
+        // 7. Celda LBS (8 bytes) inmediatamente después del bloque de curso/estado.
+        Gt06LbsCell? lbs = null;
+        if (InformationContent.Length >= 18 + 8)
+        {
+            int mcc = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(18, 2));
+            int mnc = span[20];
+            int lac = BinaryPrimitives.ReadUInt16BigEndian(span.Slice(21, 2));
+            long cellId = ((long)span[23] << 16) | ((long)span[24] << 8) | span[25];
+            lbs = new Gt06LbsCell(mcc, mnc, lac, cellId);
+        }
 
-        var posResult = GeoPosition.Create(latitude, longitude, speed, heading, null, satellites, isGpsPositioned);
-        return (posResult.IsSuccess ? posResult.Value : null, recordedAt);
+        // 8. Tipo de alarma: sólo el 0x16 añade, tras la LBS, Terminal Info(1) + Voltage(1)
+        //    + GSM(1) + Alarm/Language(2). El byte "former" de Alarm/Language (índice
+        //    18+8+3 = 29) es el tipo de alarma.
+        string? alarmType = null;
+        if (canonicalProtocolNumber == ProtocolAlarm && InformationContent.Length >= 30)
+            alarmType = MapAlarmType(span[29]);
+
+        GeoPosition? position;
+        if (isGpsPositioned)
+        {
+            // Caso con fix: idéntico al comportamiento previo (rumbo/velocidad sin sanear).
+            var posResult = GeoPosition.Create(latitude, longitude, speed, heading, null, satellites, true);
+            position = posResult.IsSuccess ? posResult.Value : null;
+        }
+        else
+        {
+            // #5: sin fix se CONSERVA la trama como posición marcada no válida (sin inventar
+            // lat/lon: se pasan las coordenadas decodificadas, casi siempre 0,0). Se sanea
+            // rumbo/velocidad porque sin fix suelen venir fuera de rango y GeoPosition.Create
+            // las rechazaría, perdiendo también la celda LBS asociada al llamador.
+            float? safeSpeed = speed >= 0f ? speed : null;
+            float safeHeading = ((heading % 360f) + 360f) % 360f;
+            var posResult = GeoPosition.Create(latitude, longitude, safeSpeed, safeHeading, null, satellites, false);
+            position = posResult.IsSuccess ? posResult.Value : null;
+        }
+
+        return (position, recordedAt, new Gt06LocationExtras(isGpsPositioned, alarmType, lbs));
     }
+
+    /// <summary>
+    /// Traduce el byte "former" del campo Alarm/Language (tramas 0x13/0x16) al código de
+    /// alarma canónico, según el spec GT06/R12L-F (apéndice de alarmas). 0x00 (normal) no es
+    /// alarma; un valor desconocido se conserva como hex para no perder información.
+    /// </summary>
+    public static string? MapAlarmType(byte alarm) => alarm switch
+    {
+        0x00 => null,
+        0x01 => "sos",
+        0x02 => "power_cut",
+        0x03 => "vibration",
+        0x04 => "geofence_enter",
+        0x05 => "geofence_exit",
+        _ => $"0x{alarm:X2}"
+    };
 }

@@ -198,6 +198,37 @@ public sealed class GpsAccidentAdapter : IDeviceProtocolAdapter
                 }
             }
 
+            // Trackers binarios GT06/R12L-F por TCP: el gateway emite is_alarm/alarm_type/lbs
+            // planos en la raíz. alarm_type (SOS, corte de energía, geocerca…) se propaga como
+            // atributo y, al marcar is_alarm como métrica, el registro de telemetría se persiste
+            // con su RawPayload JSONB — el portador existente del evento (no hay columna propia).
+            if (root.TryGetProperty("is_alarm", out var isAlarmElem) &&
+                isAlarmElem.ValueKind == JsonValueKind.True)
+            {
+                attributes["is_alarm"] = "True";
+                metrics["is_alarm"] = 1;
+            }
+
+            if (root.TryGetProperty("alarm_type", out var alarmTypeElem) &&
+                alarmTypeElem.ValueKind == JsonValueKind.String)
+            {
+                string alarmType = alarmTypeElem.GetString() ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(alarmType))
+                {
+                    attributes["alarm_type"] = alarmType;
+                    // Reutiliza la clave canónica que ya usan las alarmas de accidente.
+                    attributes["alarm_code"] = alarmType;
+                }
+            }
+
+            if (root.TryGetProperty("lbs", out var lbsElem) &&
+                lbsElem.ValueKind == JsonValueKind.String)
+            {
+                string lbsCell = lbsElem.GetString() ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(lbsCell))
+                    attributes["lbs_cell"] = lbsCell;
+            }
+
             return new NormalizedTelemetryEvent
             {
                 DeviceIdentifier = chipId,

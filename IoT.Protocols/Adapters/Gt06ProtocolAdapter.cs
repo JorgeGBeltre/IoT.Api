@@ -131,10 +131,27 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
                             byte canonical = (frame.ProtocolNumber == 0x22) ? R12LFFrame.ProtocolLocation :
                                              (frame.ProtocolNumber == 0x26) ? R12LFFrame.ProtocolAlarm :
                                              frame.ProtocolNumber;
-                            var (pos, time) = frame.DecodeLocationPacket(canonical);
+                            // #5: se conserva la trama aunque no haya fix (posición marcada
+                            // IsValid=false) y se extrae la celda LBS. #3: alarm_type del 0x16.
+                            var (pos, time, extras) = frame.DecodeLocationPacketDetailed(canonical);
                             position = pos;
                             recordedAt = time;
-                            attributes["packet_type"] = canonical == R12LFFrame.ProtocolAlarm ? "alarm" : "location";
+                            bool isAlarm = canonical == R12LFFrame.ProtocolAlarm;
+                            attributes["packet_type"] = isAlarm ? "alarm" : "location";
+                            if (isAlarm)
+                            {
+                                // is_alarm como métrica garantiza que el registro (con su
+                                // RawPayload JSONB) se persista, portando el alarm_type.
+                                attributes["is_alarm"] = "True";
+                                metrics["is_alarm"] = 1;
+                            }
+                            if (!string.IsNullOrWhiteSpace(extras.AlarmType))
+                            {
+                                attributes["alarm_type"] = extras.AlarmType!;
+                                attributes["alarm_code"] = extras.AlarmType!;
+                            }
+                            if (extras.Lbs is { } cell)
+                                attributes["lbs_cell"] = $"{cell.Mcc}-{cell.Mnc}-{cell.Lac}-{cell.CellId}";
                             if (position?.SpeedKph.HasValue == true)
                                 metrics["speed_kph"] = position.SpeedKph.Value;
                             if (position?.Heading.HasValue == true)
@@ -151,6 +168,8 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
 
                                 bool acc = (terminalInfo & 0x02) != 0;
                                 metrics["ignition_acc"] = acc ? 1.0 : 0.0;
+                                // #8: VoltageLevel CRUDO del GT06 (escala ordinal 0-6, NO
+                                // porcentaje). Misma convención que Gt06TcpHandler.
                                 metrics["battery_level"] = voltageLevel;
                                 metrics["csq"] = gsmSignal;
                             }
@@ -168,6 +187,11 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
                                 }
                             }
                         }
+                        // #6 (DIFERIDO): las tramas extendidas 0x79 con protocolo 0x90 (IMSI) y
+                        // 0x94 (ICCID) no se decodifican aquí: el layout del contenido no está
+                        // confirmado para el R12L-F físico ni documentado en References/, y
+                        // adivinar los bytes poblaría Imsi/Iccid (identidad) con datos falsos.
+                        // Pendiente: confirmar el layout real y parsear el número.
                     }
                 }
                 catch

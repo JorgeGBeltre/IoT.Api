@@ -66,20 +66,22 @@ public class Gt06TcpHandler : ITcpProtocolHandler
                     bool acc = (termInfo & 0x02) != 0;
                     bool charge = (termInfo & 0x04) != 0;
                     bool armed = (termInfo & 0x01) != 0;
-                    bool oilConnected = (termInfo & 0x80) != 0;
+                    // #4: Bit7 de Terminal Info = 1 DESCONECTADO, 0 conectado (corte de
+                    // aceite/electricidad). Antes estaba invertido y reportaba lo contrario.
+                    bool oilConnected = (termInfo & 0x80) == 0;
 
-                    int batteryPercent = voltLevel switch
-                    {
-                        0 => 0,
-                        1 => 10,
-                        2 => 30,
-                        3 => 50,
-                        4 => 70,
-                        5 => 90,
-                        6 => 100,
-                        _ => Math.Min(100, (int)voltLevel * 15)
-                    };
+                    // #8: battery_level es el VoltageLevel CRUDO del GT06 (escala ordinal 0-6:
+                    // 0=sin batería … 6=plena), NO un porcentaje. Antes este handler lo mapeaba
+                    // a un % inventado mientras Gt06ProtocolAdapter guardaba el nivel crudo;
+                    // ambas rutas emiten ahora el mismo nivel 0-6.
+                    int batteryLevel = voltLevel;
                     int gsmPercent = Math.Min(100, gsmLevel * 25);
+
+                    // #3: el campo Alarm/Language del 0x13 trae el tipo de alarma en el byte
+                    // "former" (índice 3 del contenido); antes se ignoraba por completo.
+                    string? alarmType = frame.InformationContent.Length >= 4
+                        ? R12LFFrame.MapAlarmType(frame.InformationContent[3])
+                        : null;
 
                     var statusObj = new
                     {
@@ -88,8 +90,9 @@ public class Gt06TcpHandler : ITcpProtocolHandler
                         charge = charge,
                         defense_armed = armed,
                         oil_connected = oilConnected,
-                        battery_level = batteryPercent,
+                        battery_level = batteryLevel,
                         gsm_signal = gsmPercent,
+                        alarm_type = alarmType,
                         protocol_number = $"0x{frame.ProtocolNumber:X2}",
                         serial_number = frame.SerialNumber,
                         timestamp = DateTime.UtcNow.ToString("o")
@@ -153,15 +156,23 @@ public class Gt06TcpHandler : ITcpProtocolHandler
                 bool isAlarm = canonical == R12LFFrame.ProtocolAlarm;
                 // Se decodifica según el número CANÓNICO: un dialecto puede haberlo enviado
                 // con otro número (Mictrack: 0x22/0x26) y el cuerpo es el mismo.
-                var (position, recordedAt) = frame.DecodeLocationPacket(canonical);
+                var (position, recordedAt, extras) = frame.DecodeLocationPacketDetailed(canonical);
                 byte[]? ack = isAlarm ? R12LFFrame.BuildAck(frame.ProtocolNumber, frame.SerialNumber) : null;
 
                 if (position == null)
                 {
-                    // Sin posición (p.ej. sólo LBS): ACK si aplica, sin ingesta.
+                    // Ni siquiera se pudo construir una posición (trama demasiado corta o
+                    // coordenadas fuera de rango): ACK si aplica, sin ingesta.
                     outcome = new TcpFrameOutcome { Ack = ack, Ingest = false };
                     return true;
                 }
+
+                // #5: con o sin fix se CONSERVA la trama. Sin fix la posición va marcada
+                // IsValid=false (sin inventar lat/lon) y se adjunta la celda LBS como metadato.
+                // #3: alarm_type propaga el tipo de alarma del 0x16 (SOS, corte de energía, …).
+                string? lbsCell = extras.Lbs is { } cell
+                    ? $"{cell.Mcc}-{cell.Mnc}-{cell.Lac}-{cell.CellId}"
+                    : null;
 
                 var payloadObj = new
                 {
@@ -174,6 +185,8 @@ public class Gt06TcpHandler : ITcpProtocolHandler
                     isValid = position.IsValid,
                     timestamp = recordedAt.ToString("o"),
                     is_alarm = isAlarm,
+                    alarm_type = extras.AlarmType,
+                    lbs = lbsCell,
                     protocol_number = $"0x{frame.ProtocolNumber:X2}",
                     serial_number = frame.SerialNumber
                 };
@@ -189,6 +202,12 @@ public class Gt06TcpHandler : ITcpProtocolHandler
                 return true;
 
             default:
+                // #6 (DIFERIDO): las tramas extendidas 0x79 con protocolo 0x90 (IMSI) y 0x94
+                // (ICCID) caen aquí. El layout del contenido (BCD vs ASCII, posible subcabecera
+                // tipo/longitud) NO está confirmado para el R12L-F físico ni documentado en
+                // References/, así que no se decodifica el número para no poblar Imsi/Iccid con
+                // bytes adivinados. Pendiente: confirmar el layout contra el equipo real y
+                // parsear el número desde frame.InformationContent.
                 outcome = new TcpFrameOutcome { Ingest = false };
                 return true;
         }
@@ -198,24 +217,32 @@ public class Gt06TcpHandler : ITcpProtocolHandler
     {
         byte[] contentBytes = Encoding.ASCII.GetBytes(commandText);
 
-        // Comando servidor 0x80. Length = Protocol(1) + [flagLen(1)+flag(4)+CommandLen+lang(2)]
-        //   + Serial(2) + CRC(2) = 12 + CommandLen. (El protocolo cuenta en Length; con 11 el
-        //   array 'framed' quedaba 1 byte corto y BuildCommand lanzaba IndexOutOfRange.)
-        byte packetLength = (byte)(12 + contentBytes.Length);
+        // Comando servidor 0x80. El tráfico REAL del equipo (apéndice B del spec R12L-F,
+        // CRC-ITU verificado) NO lleva campo Language: el contenido va
+        //   Protocol(1) | Length-of-Command(1) | ServerFlag(4) | ASCII(N) | Serial(2) | CRC(2).
+        // (#2) Antes se añadían 2 bytes de Language (0x00 0x02) que el R12L-F físico omite;
+        // debe validarse contra el equipo real.
+        //
+        // (#1) "Length of Command" = ServerFlag(4) + longitud del ASCII (p.ej. "DYD,000000#"
+        //      de 11 bytes -> 0x0F). Antes estaba FIJO en 0x04, descuadrando el conteo.
+        byte commandLength = (byte)(4 + contentBytes.Length);
 
-        Span<byte> toHash = stackalloc byte[1 + 1 + 1 + 4 + contentBytes.Length + 2 + 2];
+        // Packet Length (de Protocol a CRC, ambos inclusive) =
+        //   Protocol(1) + LenCmd(1) + ServerFlag(4) + ASCII(N) + Serial(2) + CRC(2) = 10 + N.
+        byte packetLength = (byte)(10 + contentBytes.Length);
+
+        // Región cubierta por el CRC: de Packet Length a Serial (ambos inclusive).
+        Span<byte> toHash = stackalloc byte[1 + 1 + 1 + 4 + contentBytes.Length + 2];
         toHash[0] = packetLength;
         toHash[1] = R12LFFrame.ProtocolServerCommand;
-        toHash[2] = 0x04;
+        toHash[2] = commandLength;
         toHash[3] = 0x00;
         toHash[4] = 0x00;
         toHash[5] = 0x00;
         toHash[6] = 0x01;
         contentBytes.CopyTo(toHash.Slice(7, contentBytes.Length));
-        int offset = 7 + contentBytes.Length;
-        toHash[offset] = 0x00;     // Language 0x0002 = English
-        toHash[offset + 1] = 0x02;
-        BinaryPrimitives.WriteUInt16BigEndian(toHash.Slice(offset + 2, 2), serial);
+        int serialOffset = 7 + contentBytes.Length;
+        BinaryPrimitives.WriteUInt16BigEndian(toHash.Slice(serialOffset, 2), serial);
 
         ushort crc = R12LFCrc16.Compute(toHash);
 
@@ -224,19 +251,17 @@ public class Gt06TcpHandler : ITcpProtocolHandler
         framed[1] = 0x78;
         framed[2] = packetLength;
         framed[3] = R12LFFrame.ProtocolServerCommand;
-        framed[4] = 0x04;
+        framed[4] = commandLength;
         framed[5] = 0x00;
         framed[6] = 0x00;
         framed[7] = 0x00;
         framed[8] = 0x01;
         Array.Copy(contentBytes, 0, framed, 9, contentBytes.Length);
-        int frameOffset = 9 + contentBytes.Length;
-        framed[frameOffset] = 0x00;
-        framed[frameOffset + 1] = 0x02;
-        BinaryPrimitives.WriteUInt16BigEndian(framed.AsSpan(frameOffset + 2, 2), serial);
-        BinaryPrimitives.WriteUInt16BigEndian(framed.AsSpan(frameOffset + 4, 2), crc);
-        framed[frameOffset + 6] = 0x0D;
-        framed[frameOffset + 7] = 0x0A;
+        int frameSerialOffset = 9 + contentBytes.Length;
+        BinaryPrimitives.WriteUInt16BigEndian(framed.AsSpan(frameSerialOffset, 2), serial);
+        BinaryPrimitives.WriteUInt16BigEndian(framed.AsSpan(frameSerialOffset + 2, 2), crc);
+        framed[frameSerialOffset + 4] = 0x0D;
+        framed[frameSerialOffset + 5] = 0x0A;
 
         return framed;
     }

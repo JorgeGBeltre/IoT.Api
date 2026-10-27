@@ -148,6 +148,13 @@ public sealed class DatabaseSeeder
                 await _context.SaveChangesAsync(cancellationToken);
             }
 
+            // 3b. Alta de ORGANIZACIÓN + ADMINISTRADOR para producción, dirigida por
+            //     configuración (Bootstrap:Tenants). A diferencia de los bloques demo de arriba,
+            //     corre en cualquier entorno pero SÓLO si hay tenants configurados; es idempotente
+            //     (por Code y por usuario) y va ANTES de las credenciales de bootstrap MQTT para
+            //     que el tenant ya exista cuando se le fija la ApiKey por su mismo Code.
+            await SeedConfiguredTenantsAndAdminsAsync(isDevelopment, cancellationToken);
+
             // 4. Credenciales de bootstrap por tenant (reemplazan la antigua clave global
             //    única para todos los tenants — MEDIUM-2). Idempotente y FUERA del bloque de
             //    siembra de tenants: la migración añade las columnas a una base ya existente,
@@ -185,10 +192,15 @@ public sealed class DatabaseSeeder
 
         foreach (var cred in configured)
         {
-            if (string.IsNullOrWhiteSpace(cred.TenantCode) || string.IsNullOrWhiteSpace(cred.ApiKey))
+            // Una ApiKey vacía = "no configurada para este despliegue" (p.ej. una organización
+            // opcional que no se dio de alta): se omite en silencio, no es un error de config.
+            if (string.IsNullOrWhiteSpace(cred.ApiKey))
+                continue;
+
+            if (string.IsNullOrWhiteSpace(cred.TenantCode))
             {
                 _logger.LogWarning(
-                    "Credencial de bootstrap mal configurada (falta TenantCode o ApiKey); se omite.");
+                    "Credencial de bootstrap mal configurada (falta TenantCode); se omite.");
                 continue;
             }
 
@@ -214,6 +226,98 @@ public sealed class DatabaseSeeder
                 "Credencial de bootstrap sembrada/rotada para el tenant {Code} (huella {Fingerprint}).",
                 tenant.Code, fingerprint);
         }
+    }
+
+    /// <summary>
+    /// Alta de ORGANIZACIÓN + ADMINISTRADOR para PRODUCCIÓN dirigida por configuración
+    /// (<c>Bootstrap:Tenants</c>: lista de {Code, Name, AdminEmail, AdminUsername}). A diferencia
+    /// del sembrado demo (sólo Development), permite que una base de datos LIMPIA de producción
+    /// tenga una organización y un administrador con los que iniciar sesión, sin datos de ejemplo.
+    ///
+    /// Es IDEMPOTENTE: busca el tenant por Code y el admin por usuario/email dentro de ese tenant,
+    /// y NO recrea ni reescribe lo que ya exista (no resetea la contraseña en cada reinicio). La
+    /// contraseña inicial sale de <c>Seed:AdminPassword</c> (obligatoria y fuerte en producción; el
+    /// admin la cambia en el primer inicio de sesión). Sin <c>Bootstrap:Tenants</c> no hace nada
+    /// (no-op), así que Development y los despliegues que no lo usan quedan intactos. Corre ANTES de
+    /// <see cref="SeedTenantBootstrapCredentialsAsync"/> para que el tenant ya exista cuando se le
+    /// fija la credencial de bootstrap MQTT por su mismo Code.
+    /// </summary>
+    private async Task SeedConfiguredTenantsAndAdminsAsync(bool isDevelopment, CancellationToken cancellationToken)
+    {
+        var configured = _configuration
+            .GetSection("Bootstrap:Tenants")
+            .Get<List<BootstrapTenantConfig>>() ?? new List<BootstrapTenantConfig>();
+
+        if (configured.Count == 0)
+            return;
+
+        foreach (var cfg in configured)
+        {
+            if (string.IsNullOrWhiteSpace(cfg.Code) || string.IsNullOrWhiteSpace(cfg.Name) ||
+                string.IsNullOrWhiteSpace(cfg.AdminEmail) || string.IsNullOrWhiteSpace(cfg.AdminUsername))
+            {
+                throw new InvalidOperationException(
+                    "Bootstrap:Tenants mal configurado: cada entrada requiere Code, Name, AdminEmail y AdminUsername.");
+            }
+
+            string code = cfg.Code.Trim().ToUpperInvariant();
+
+            // Tenant: crear si no existe (idempotente por Code). IgnoreQueryFilters porque este
+            // contexto admin siembra cross-tenant (omite RLS por diseño).
+            var tenant = await _context.Tenants.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(t => t.Code == code, cancellationToken);
+            if (tenant is null)
+            {
+                var tenantResult = Tenant.Create(cfg.Name.Trim(), code);
+                if (tenantResult.IsFailure)
+                    throw new InvalidOperationException(
+                        $"No se pudo crear la organización de bootstrap '{code}': {tenantResult.Error.Message}");
+                tenant = tenantResult.Value;
+                await _context.Tenants.AddAsync(tenant, cancellationToken);
+                await _context.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation("Organización de bootstrap creada: {Code}.", code);
+            }
+
+            // Administrador del tenant: crear si no existe (idempotente por usuario/email DENTRO del
+            // tenant). Si ya existe no se toca, para no resetear su contraseña en cada reinicio.
+            string username = cfg.AdminUsername.Trim();
+            string email = cfg.AdminEmail.Trim().ToLowerInvariant();
+            bool adminExists = await _context.Users.IgnoreQueryFilters()
+                .AnyAsync(u => u.TenantId == tenant.Id && (u.Username == username || u.Email == email), cancellationToken);
+            if (!adminExists)
+            {
+                // La contraseña sólo se resuelve cuando hay un admin que CREAR: así un reinicio en
+                // el que la organización y su admin ya existen no depende de Seed:AdminPassword (su
+                // fail-fast de producción sólo aplica al dar de alta un administrador nuevo).
+                (string password, bool mustChange) = ResolveSeedAdminPassword(isDevelopment);
+
+                var userResult = User.Create(
+                    tenant.Id,
+                    username,
+                    email,
+                    _passwordHasher.Hash(password),
+                    $"Administrador {cfg.Name.Trim()}",
+                    "Admin",
+                    mustChangePassword: mustChange);
+                if (userResult.IsFailure)
+                    throw new InvalidOperationException(
+                        $"No se pudo crear el administrador de bootstrap de '{code}': {userResult.Error.Message}");
+                await _context.Users.AddAsync(userResult.Value, cancellationToken);
+                await _context.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation(
+                    "Administrador inicial creado para {Code} (usuario {Username}); cambio de contraseña obligatorio: {MustChange}.",
+                    code, username, mustChange);
+            }
+        }
+    }
+
+    /// <summary>Forma de cada entrada de <c>Bootstrap:Tenants</c> (alta de organización + admin de producción).</summary>
+    private sealed class BootstrapTenantConfig
+    {
+        public string? Code { get; set; }
+        public string? Name { get; set; }
+        public string? AdminEmail { get; set; }
+        public string? AdminUsername { get; set; }
     }
 
     /// <summary>Forma de cada entrada de <c>MqttBroker:BootstrapCredentials</c>.</summary>

@@ -106,12 +106,15 @@ services:
       # Credenciales de bootstrap POR TENANT (reemplazan la antigua clave global unica para
       # todos los tenants, MEDIUM-2). Cada clave esta acotada a su tenant: filtrar una no
       # permite inyectar en otro. El seeder las hashea en la entidad Tenant por su codigo.
+      # Solo CARIBE-LOG es obligatoria (la organizacion que se da de alta por defecto, arriba).
+      # DOM-GLP/SMART-ACT son OPCIONALES (vacias por defecto): solo aplican si tambien das de alta
+      # esa organizacion via Bootstrap__Tenants__N__; si quedan vacias, el seeder las omite.
       - MqttBroker__BootstrapCredentials__0__TenantCode=CARIBE-LOG
       - MqttBroker__BootstrapCredentials__0__ApiKey=${MQTT_BOOTSTRAP_KEY_CARIBE:?MQTT_BOOTSTRAP_KEY_CARIBE es obligatorio}
       - MqttBroker__BootstrapCredentials__1__TenantCode=DOM-GLP
-      - MqttBroker__BootstrapCredentials__1__ApiKey=${MQTT_BOOTSTRAP_KEY_GLP:?MQTT_BOOTSTRAP_KEY_GLP es obligatorio}
+      - MqttBroker__BootstrapCredentials__1__ApiKey=${MQTT_BOOTSTRAP_KEY_GLP:-}
       - MqttBroker__BootstrapCredentials__2__TenantCode=SMART-ACT
-      - MqttBroker__BootstrapCredentials__2__ApiKey=${MQTT_BOOTSTRAP_KEY_SMART:?MQTT_BOOTSTRAP_KEY_SMART es obligatorio}
+      - MqttBroker__BootstrapCredentials__2__ApiKey=${MQTT_BOOTSTRAP_KEY_SMART:-}
       # Gateway TCP binario para trackers GPS
       - TcpGateway__Enabled=true
       - TcpGateway__Port=5023
@@ -123,6 +126,15 @@ services:
       # Contraseña inicial de administradores sembrados. OBLIGATORIA en producción:
       # si falta, el API falla al arrancar (no se autogenera ni se loguea ningún secreto).
       - Seed__AdminPassword=${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD es obligatorio en producción}
+      # Alta de ORGANIZACIÓN + ADMINISTRADOR inicial en una BD de producción LIMPIA
+      # (Bootstrap:Tenants). Idempotente: si ya existen no los recrea ni resetea la contraseña.
+      # El admin usa SEED_ADMIN_PASSWORD (arriba) y la cambia en el primer inicio de sesión.
+      # Para más organizaciones, repetir con índices __1__, __2__ (cada Code debería coincidir
+      # con una MQTT_BOOTSTRAP_KEY_* para que su credencial de ingesta también quede sembrada).
+      - Bootstrap__Tenants__0__Code=${BOOTSTRAP_TENANT_CODE:-CARIBE-LOG}
+      - Bootstrap__Tenants__0__Name=${BOOTSTRAP_TENANT_NAME:-Logística y Transporte Caribe}
+      - Bootstrap__Tenants__0__AdminUsername=${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      - Bootstrap__Tenants__0__AdminEmail=${BOOTSTRAP_ADMIN_EMAIL:-admin@iot.caribe}
       # Orígenes CORS del frontend (obligatorio en prod). Coma-separados vía índices.
       - Cors__AllowedOrigins__0=${FRONTEND_ORIGIN:?FRONTEND_ORIGIN es obligatorio (dominio del frontend)}
       - AllowedHosts=${ALLOWED_HOSTS:-*}
@@ -216,9 +228,9 @@ services:
       - MqttBroker__BootstrapCredentials__0__TenantCode=CARIBE-LOG
       - MqttBroker__BootstrapCredentials__0__ApiKey=${MQTT_BOOTSTRAP_KEY_CARIBE:?MQTT_BOOTSTRAP_KEY_CARIBE es obligatorio}
       - MqttBroker__BootstrapCredentials__1__TenantCode=DOM-GLP
-      - MqttBroker__BootstrapCredentials__1__ApiKey=${MQTT_BOOTSTRAP_KEY_GLP:?MQTT_BOOTSTRAP_KEY_GLP es obligatorio}
+      - MqttBroker__BootstrapCredentials__1__ApiKey=${MQTT_BOOTSTRAP_KEY_GLP:-}
       - MqttBroker__BootstrapCredentials__2__TenantCode=SMART-ACT
-      - MqttBroker__BootstrapCredentials__2__ApiKey=${MQTT_BOOTSTRAP_KEY_SMART:?MQTT_BOOTSTRAP_KEY_SMART es obligatorio}
+      - MqttBroker__BootstrapCredentials__2__ApiKey=${MQTT_BOOTSTRAP_KEY_SMART:-}
       - Simulator__IntervalSeconds=4
     networks:
       - iot-network

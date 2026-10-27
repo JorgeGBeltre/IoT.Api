@@ -3,12 +3,16 @@ using IoT.Domain.Enums;
 
 namespace IoT.Domain.Entities;
 
-public sealed class Device : AggregateRoot<Guid>, ITenantScoped
+public sealed class Device : AggregateRoot<Guid>, ITenantScoped, ICustomerScoped
 {
     private readonly List<DeviceCapability> _capabilities = [];
 
     public Guid TenantId { get; private set; }
     public Guid? GroupId { get; private set; }
+    // Nodo dueño en la jerarquía Customer (ADR-013). Nullable durante la transición E8.1;
+    // el seeder rellena los nulos al customer raíz del tenant. La visibilidad por subárbol
+    // se cablea en E8.2/E8.3, no aquí.
+    public Guid? CustomerId { get; private set; }
     public string ChipId { get; private set; }
     public string MacAddress { get; private set; }
     public string Name { get; private set; }
@@ -191,6 +195,13 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped
     public void AssignToGroup(Guid? groupId)
     {
         GroupId = groupId;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    /// <summary>Asigna el dispositivo a un nodo <see cref="Customer"/> de la jerarquía (ADR-013).</summary>
+    public void AssignToCustomer(Guid customerId)
+    {
+        CustomerId = customerId;
         UpdatedAt = DateTime.UtcNow;
     }
 

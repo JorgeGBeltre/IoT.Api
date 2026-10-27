@@ -8,6 +8,12 @@ public sealed class TenantContext : ITenantContext
 {
     public Guid TenantId { get; set; } = Guid.Empty;
 
+    /// <summary>Nodo del usuario en la jerarquía (ADR-013). Ver <see cref="ITenantContext"/>.</summary>
+    public Guid? CustomerId { get; set; }
+
+    /// <summary>Path del subárbol visible (ADR-013). Ver <see cref="ITenantContext"/>.</summary>
+    public string? CustomerPath { get; set; }
+
     /// <summary>Operación de sistema (cross-tenant autorizada). Ver <see cref="ITenantContext"/>.</summary>
     public bool IsSystemOperation { get; set; }
 }
@@ -51,6 +57,46 @@ public sealed class TenantResolutionMiddleware
                 }
 
                 tenantContext.TenantId = tenantIdFromClaim;
+
+                // Jerarquía multinivel (ADR-013): el nodo del usuario viaja en el claim firmado
+                // customer_id y su Path (resuelto en el servidor al emitir el token) en
+                // customer_path. Se leen SÓLO del JWT verificado, con el mismo anti-spoofing que
+                // tenant_id. Si NO vienen (token anterior a E8.2), CustomerPath queda null = SIN
+                // restricción de subárbol dentro del tenant (equivale al raíz; NO bloquear).
+                var customerClaim = context.User.FindFirst("customer_id");
+                if (customerClaim != null && Guid.TryParse(customerClaim.Value, out var customerIdFromClaim) && customerIdFromClaim != Guid.Empty)
+                {
+                    // Anti-spoofing: un header X-Customer-Id que no coincida con el claim se rechaza
+                    // (igual que X-Tenant-Id). El cliente nunca redefine su nodo por cabecera.
+                    if (context.Request.Headers.TryGetValue("X-Customer-Id", out var customerHeaderVal) &&
+                        Guid.TryParse(customerHeaderVal, out var headerCustomerId) &&
+                        headerCustomerId != customerIdFromClaim)
+                    {
+                        _logger.LogWarning("Security Alert: Customer spoofing detected. User {User} with customer {ClaimCustomer} attempted to access customer {HeaderCustomer}",
+                            context.User.Identity?.Name, customerIdFromClaim, headerCustomerId);
+
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        context.Response.ContentType = "application/problem+json";
+                        await context.Response.WriteAsJsonAsync(new ProblemDetails
+                        {
+                            Title = "Acceso a Customer Denegado",
+                            Detail = "El header X-Customer-Id no coincide con el nodo asignado a tu sesión.",
+                            Status = StatusCodes.Status403Forbidden
+                        });
+                        return;
+                    }
+
+                    tenantContext.CustomerId = customerIdFromClaim;
+
+                    // El Path se tomó del claim firmado (emitido server-side desde la tabla
+                    // customers). Si por cualquier motivo no viene, CustomerPath queda null → sin
+                    // restricción de subárbol (no bloquear); la RLS de tenant sigue aislando.
+                    var pathClaim = context.User.FindFirst("customer_path");
+                    if (pathClaim != null && !string.IsNullOrWhiteSpace(pathClaim.Value))
+                    {
+                        tenantContext.CustomerPath = pathClaim.Value;
+                    }
+                }
             }
         }
         else

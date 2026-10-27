@@ -34,7 +34,7 @@ public class SecurityAndMultiTenantIntegrationTests
         _hasherMock.Setup(h => h.Verify("SecretPassword123!", "hashed_pwd_123"))
             .Returns(true);
 
-        _jwtMock.Setup(j => j.GenerateToken(user, tenantId))
+        _jwtMock.Setup(j => j.GenerateToken(user, tenantId, It.IsAny<Guid?>(), It.IsAny<string?>()))
             .Returns(new AuthTokenResult("sample_jwt_token_xyz", tenantId, user.Id, user.Username, user.Email, user.RoleName, false, DateTime.UtcNow.AddDays(7)));
 
         var handler = new LoginCommandHandler(
@@ -85,7 +85,7 @@ public class SecurityAndMultiTenantIntegrationTests
         // Assert
         result.IsFailure.Should().BeTrue();
         result.Error.Code.Should().Be("Auth.InvalidCredentials");
-        _jwtMock.Verify(j => j.GenerateToken(It.IsAny<User>(), It.IsAny<Guid>()), Times.Never);
+        _jwtMock.Verify(j => j.GenerateToken(It.IsAny<User>(), It.IsAny<Guid>(), It.IsAny<Guid?>(), It.IsAny<string?>()), Times.Never);
     }
 
     [Fact]
@@ -137,7 +137,7 @@ public class SecurityAndMultiTenantIntegrationTests
         _hasherMock.Setup(h => h.Hash("NewStrongPass2026!"))
             .Returns("new_bcrypt_hash_xyz");
 
-        _jwtMock.Setup(j => j.GenerateToken(user, tenantId))
+        _jwtMock.Setup(j => j.GenerateToken(user, tenantId, It.IsAny<Guid?>(), It.IsAny<string?>()))
             .Returns(new AuthTokenResult("new_jwt_token", tenantId, user.Id, user.Username, user.Email, user.RoleName, false, DateTime.UtcNow.AddDays(7)));
 
         var handler = new ChangeTemporaryPasswordCommandHandler(

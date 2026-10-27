@@ -155,6 +155,12 @@ public sealed class DatabaseSeeder
             //     que el tenant ya exista cuando se le fija la ApiKey por su mismo Code.
             await SeedConfiguredTenantsAndAdminsAsync(isDevelopment, cancellationToken);
 
+            // 3c. Customer raíz por tenant + backfill de la jerarquía (ADR-013, fase E8.1).
+            //     Corre DESPUÉS de dar de alta tenants/admins y en el mismo scope de sistema
+            //     (IgnoreQueryFilters), para que toda base existente quede con un nodo raíz por
+            //     tenant y sin devices/users con CustomerId nulo. No cambia authz/RLS.
+            await SeedRootCustomersAndBackfillAsync(cancellationToken);
+
             // 4. Credenciales de bootstrap por tenant (reemplazan la antigua clave global
             //    única para todos los tenants — MEDIUM-2). Idempotente y FUERA del bloque de
             //    siembra de tenants: la migración añade las columnas a una base ya existente,
@@ -307,6 +313,62 @@ public sealed class DatabaseSeeder
                 _logger.LogInformation(
                     "Administrador inicial creado para {Code} (usuario {Username}); cambio de contraseña obligatorio: {MustChange}.",
                     code, username, mustChange);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Fase E8.1 de la jerarquía multinivel (ADR-013): garantiza que CADA tenant tenga un
+    /// <see cref="Customer"/> RAÍZ (<c>ParentCustomerId == null</c>) y hace BACKFILL de los
+    /// <see cref="Device"/> y <see cref="User"/> del tenant cuyo <c>CustomerId</c> siga nulo,
+    /// asignándolos a ese raíz. Es NO DISRUPTIVA: no toca authz ni RLS; sólo rellena nulos.
+    ///
+    /// IDEMPOTENTE: si el raíz ya existe no se recrea; sólo se rellenan los <c>CustomerId</c>
+    /// nulos (los ya asignados no se reasignan). Cada tenant recibe SU PROPIO raíz; no se cruzan
+    /// datos entre tenants. Corre en scope de sistema (<c>IgnoreQueryFilters</c>) como el resto
+    /// del sembrado.
+    /// </summary>
+    private async Task SeedRootCustomersAndBackfillAsync(CancellationToken cancellationToken)
+    {
+        var tenants = await _context.Tenants.IgnoreQueryFilters()
+            .ToListAsync(cancellationToken);
+
+        foreach (var tenant in tenants)
+        {
+            var root = await _context.Customers.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(c => c.TenantId == tenant.Id && c.ParentCustomerId == null, cancellationToken);
+
+            if (root is null)
+            {
+                var rootResult = Customer.Create(tenant.Id, tenant.Name, parent: null, code: "ROOT");
+                if (rootResult.IsFailure)
+                    throw new InvalidOperationException(
+                        $"No se pudo crear el customer raíz del tenant '{tenant.Code}': {rootResult.Error.Message}");
+                root = rootResult.Value;
+                await _context.Customers.AddAsync(root, cancellationToken);
+                await _context.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation("Customer raíz creado para el tenant {Code}.", tenant.Code);
+            }
+
+            // Backfill: sólo filas con CustomerId nulo (no reasigna las ya asignadas).
+            var devices = await _context.Devices.IgnoreQueryFilters()
+                .Where(d => d.TenantId == tenant.Id && d.CustomerId == null)
+                .ToListAsync(cancellationToken);
+            foreach (var device in devices)
+                device.AssignToCustomer(root.Id);
+
+            var users = await _context.Users.IgnoreQueryFilters()
+                .Where(u => u.TenantId == tenant.Id && u.CustomerId == null)
+                .ToListAsync(cancellationToken);
+            foreach (var user in users)
+                user.AssignToCustomer(root.Id);
+
+            if (devices.Count > 0 || users.Count > 0)
+            {
+                await _context.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation(
+                    "Backfill de jerarquía para el tenant {Code}: {Devices} dispositivos y {Users} usuarios asignados al raíz.",
+                    tenant.Code, devices.Count, users.Count);
             }
         }
     }

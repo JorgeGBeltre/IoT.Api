@@ -21,6 +21,7 @@ namespace IoT.Infrastructure.Migrations
                 .HasAnnotation("ProductVersion", "8.0.11")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
+            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "ltree");
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "postgis");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
@@ -66,6 +67,59 @@ namespace IoT.Infrastructure.Migrations
                     b.ToTable("audit_logs", (string)null);
                 });
 
+            modelBuilder.Entity("IoT.Domain.Entities.Customer", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Code")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("Level")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)");
+
+                    b.Property<Guid?>("ParentCustomerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<LTree>("Path")
+                        .HasColumnType("ltree");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ParentCustomerId");
+
+                    b.HasIndex("Path");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Path"), "gist");
+
+                    b.HasIndex("TenantId", "Code")
+                        .IsUnique()
+                        .HasFilter("\"Code\" IS NOT NULL");
+
+                    b.HasIndex("TenantId", "ParentCustomerId");
+
+                    b.ToTable("customers", (string)null);
+                });
+
             modelBuilder.Entity("IoT.Domain.Entities.Device", b =>
                 {
                     b.Property<Guid>("Id")
@@ -82,6 +136,9 @@ namespace IoT.Infrastructure.Migrations
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("FirmwareVersion")
                         .HasColumnType("text");
@@ -171,8 +228,12 @@ namespace IoT.Infrastructure.Migrations
                     b.HasIndex("ChipId")
                         .IsUnique();
 
+                    b.HasIndex("CustomerId");
+
                     b.HasIndex("TenantId", "ChipId")
                         .IsUnique();
+
+                    b.HasIndex("TenantId", "CustomerId");
 
                     b.ToTable("devices", (string)null);
                 });
@@ -690,6 +751,9 @@ namespace IoT.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("Email")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -742,7 +806,11 @@ namespace IoT.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("CustomerId");
+
                     b.HasIndex("RoleId");
+
+                    b.HasIndex("TenantId", "CustomerId");
 
                     b.HasIndex("TenantId", "Email");
 
@@ -888,6 +956,22 @@ namespace IoT.Infrastructure.Migrations
                     b.ToTable("telemetry_records", (string)null);
                 });
 
+            modelBuilder.Entity("IoT.Domain.Entities.Customer", b =>
+                {
+                    b.HasOne("IoT.Domain.Entities.Customer", null)
+                        .WithMany()
+                        .HasForeignKey("ParentCustomerId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("IoT.Domain.Entities.Device", b =>
+                {
+                    b.HasOne("IoT.Domain.Entities.Customer", null)
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
             modelBuilder.Entity("IoT.Domain.Entities.DeviceCapability", b =>
                 {
                     b.HasOne("IoT.Domain.Entities.Device", null)
@@ -938,6 +1022,11 @@ namespace IoT.Infrastructure.Migrations
 
             modelBuilder.Entity("IoT.Domain.Entities.User", b =>
                 {
+                    b.HasOne("IoT.Domain.Entities.Customer", null)
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("IoT.Domain.Entities.Role", "Role")
                         .WithMany("Users")
                         .HasForeignKey("RoleId")

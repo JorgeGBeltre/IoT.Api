@@ -5,6 +5,7 @@ using IoT.Domain.Entities;
 using IoT.Domain.Repositories;
 using IoT.Infrastructure.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using NpgsqlTypes;
 
 namespace IoT.Infrastructure.Persistence;
 
@@ -21,8 +22,50 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
 
     public Guid CurrentTenantId => _tenantContext?.TenantId ?? Guid.Empty;
 
+    /// <summary>
+    /// Path <c>ltree</c> del subárbol visible del usuario (ADR-013). <c>null</c>/vacío = SIN
+    /// restricción de subárbol (raíz, operación de sistema o token antiguo) = comportamiento NO
+    /// DISRUPTIVO: el filtro de customer no recorta y sólo aplica el aislamiento por tenant.
+    /// </summary>
+    public string? CurrentCustomerPath => _tenantContext?.CustomerPath;
+
+    private string? _resolvedSubtreePath;
+    private IReadOnlyCollection<Guid> _customerSubtreeIds = Array.Empty<Guid>();
+
+    /// <summary>
+    /// Conjunto de <c>CustomerId</c> del subárbol del usuario, resuelto UNA vez por path (cacheado
+    /// en el contexto, ADR-013). Es DEFENSA EN PROFUNDIDAD del filtro EF; la línea dura es la RLS
+    /// de PostgreSQL por <c>app.customer_path</c>. Bajo la RLS de <c>customers</c> (con el path
+    /// fijado) la consulta ya devuelve exactamente el subárbol; el predicado <c>&lt;@</c> explícito
+    /// lo hace además independiente de la RLS. Devuelve vacío cuando no hay path: en ese caso el
+    /// filtro NO restringe (corta antes por <see cref="CurrentCustomerPath"/> null/vacío), de modo
+    /// que el raíz y los tokens antiguos siguen viendo todo su tenant.
+    /// </summary>
+    public IReadOnlyCollection<Guid> CustomerSubtreeIds
+    {
+        get
+        {
+            var path = CurrentCustomerPath;
+            if (string.IsNullOrEmpty(path))
+                return Array.Empty<Guid>();
+
+            if (_resolvedSubtreePath == path)
+                return _customerSubtreeIds;
+
+            // Consulta cruda keyless (sin recursión en los filtros de EF). El path se pasa como
+            // parámetro ({0}) → sin inyección. "Id" AS "Value": SqlQueryRaw<Guid> espera la columna
+            // escalar llamada "Value".
+            _customerSubtreeIds = Database
+                .SqlQueryRaw<Guid>(@"SELECT ""Id"" AS ""Value"" FROM customers WHERE ""Path"" <@ {0}::ltree", path)
+                .ToList();
+            _resolvedSubtreePath = path;
+            return _customerSubtreeIds;
+        }
+    }
+
     // Tenant & Devices
     public DbSet<Tenant> Tenants => Set<Tenant>();
+    public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<DeviceGroup> DeviceGroups => Set<DeviceGroup>();
     public DbSet<Device> Devices => Set<Device>();
     public DbSet<DeviceCapability> DeviceCapabilities => Set<DeviceCapability>();
@@ -51,6 +94,9 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
 
         // PostGIS extension support
         modelBuilder.HasPostgresExtension("postgis");
+        // ltree: path materializado de la jerarquía Customer (ADR-013). La migración corre como
+        // iot_admin, que puede crear extensiones.
+        modelBuilder.HasPostgresExtension("ltree");
 
         // Tenant Configuration
         modelBuilder.Entity<Tenant>(builder =>
@@ -69,6 +115,36 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             builder.HasIndex(t => t.BootstrapApiKeyHash)
                 .IsUnique()
                 .HasFilter("\"BootstrapApiKeyHash\" IS NOT NULL");
+        });
+
+        // Customer Configuration (jerarquía multinivel bajo Tenant — ADR-013)
+        modelBuilder.Entity<Customer>(builder =>
+        {
+            builder.ToTable("customers");
+            builder.HasKey(c => c.Id);
+            builder.Property(c => c.Name).HasMaxLength(150).IsRequired();
+            builder.Property(c => c.Code).HasMaxLength(50);
+            builder.Property(c => c.Level).IsRequired();
+            builder.Property(c => c.IsActive).IsRequired();
+            // Path materializado como ltree: convertido desde/hacia string en .NET.
+            builder.Property(c => c.Path)
+                .HasColumnType("ltree")
+                .HasConversion(v => new LTree(v), v => v.ToString())
+                .IsRequired();
+
+            // Subárbol: GiST sobre Path para que el predicado "<@" (desciende de) sea indexado.
+            builder.HasIndex(c => c.Path).HasMethod("gist");
+            builder.HasIndex(c => new { c.TenantId, c.ParentCustomerId });
+            // Code único DENTRO del tenant, sólo para filas con Code no nulo.
+            builder.HasIndex(c => new { c.TenantId, c.Code })
+                .IsUnique()
+                .HasFilter("\"Code\" IS NOT NULL");
+
+            // Auto-referencia (padre → hijos). Restrict: no borrar un nodo con descendientes.
+            builder.HasOne<Customer>()
+                .WithMany()
+                .HasForeignKey(c => c.ParentCustomerId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         // DeviceGroup Configuration
@@ -105,6 +181,14 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             builder.HasIndex(d => new { d.TenantId, d.ChipId }).IsUnique();
             // ChipId/IMEI único GLOBAL: identidad de dispositivos sin JWT (TCP/HTTP).
             builder.HasIndex(d => d.ChipId).IsUnique();
+
+            // Nodo dueño en la jerarquía (ADR-013). FK nullable; Restrict para no borrar un
+            // customer con dispositivos colgando.
+            builder.HasOne<Customer>()
+                .WithMany()
+                .HasForeignKey(d => d.CustomerId)
+                .OnDelete(DeleteBehavior.Restrict);
+            builder.HasIndex(d => new { d.TenantId, d.CustomerId });
         });
 
         // DeviceCapability Configuration
@@ -178,6 +262,13 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
                 .WithOne(up => up.User)
                 .HasForeignKey(up => up.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Nodo al que pertenece el usuario en la jerarquía (ADR-013). FK nullable; Restrict.
+            builder.HasOne<Customer>()
+                .WithMany()
+                .HasForeignKey(u => u.CustomerId)
+                .OnDelete(DeleteBehavior.Restrict);
+            builder.HasIndex(u => new { u.TenantId, u.CustomerId });
         });
 
         // Role Configuration
@@ -290,8 +381,14 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
 
         // ======================================================================
         // Aislamiento Multi-Tenant Automático (Data Plane Isolation)
-        // Todo registro que implementa ITenantScoped se filtra estrictamente por TenantId
+        // Todo registro que implementa ITenantScoped se filtra estrictamente por TenantId.
+        // Además, las entidades ICustomerScoped (ADR-013) se acotan al SUBÁRBOL del usuario:
+        // el filtro de tenant (ADR-003) se preserva intacto y el de customer se AÑADE con AND.
         // ======================================================================
+        var containsMethod = typeof(Enumerable).GetMethods()
+            .First(m => m.Name == nameof(Enumerable.Contains) && m.GetParameters().Length == 2)
+            .MakeGenericMethod(typeof(Guid));
+
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
         {
             if (typeof(ITenantScoped).IsAssignableFrom(entityType.ClrType))
@@ -310,9 +407,43 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
                         Expression.Constant(this),
                         nameof(CurrentTenantId));
 
-                    var isMatch = Expression.Equal(tenantProperty, currentTenantProperty);
-                    var lambda = Expression.Lambda(isMatch, parameter);
+                    Expression body = Expression.Equal(tenantProperty, currentTenantProperty);
 
+                    // Subárbol (ADR-013): sólo para ICustomerScoped. Semántica NO DISRUPTIVA:
+                    //   path null/vacío  → sin restricción (raíz, sistema, token antiguo);
+                    //   CustomerId null  → fila visible dentro del tenant;
+                    //   en otro caso     → CustomerId debe pertenecer al subárbol resuelto.
+                    if (typeof(ICustomerScoped).IsAssignableFrom(entityType.ClrType))
+                    {
+                        var nullableGuidProperty = typeof(EF).GetMethod(nameof(EF.Property))!
+                            .MakeGenericMethod(typeof(Guid?));
+                        var customerIdProperty = Expression.Call(
+                            null,
+                            nullableGuidProperty,
+                            parameter,
+                            Expression.Constant(nameof(ICustomerScoped.CustomerId)));
+
+                        var pathProperty = Expression.Property(
+                            Expression.Constant(this), nameof(CurrentCustomerPath));
+                        var pathIsNull = Expression.Equal(pathProperty, Expression.Constant(null, typeof(string)));
+                        var pathIsEmpty = Expression.Equal(pathProperty, Expression.Constant(string.Empty, typeof(string)));
+
+                        var customerIdIsNull = Expression.Equal(
+                            customerIdProperty, Expression.Constant(null, typeof(Guid?)));
+
+                        var subtreeIdsProperty = Expression.Property(
+                            Expression.Constant(this), nameof(CustomerSubtreeIds));
+                        var customerIdValue = Expression.Property(customerIdProperty, "Value");
+                        var inSubtree = Expression.Call(containsMethod, subtreeIdsProperty, customerIdValue);
+
+                        var customerMatch = Expression.OrElse(
+                            Expression.OrElse(Expression.OrElse(pathIsNull, pathIsEmpty), customerIdIsNull),
+                            inSubtree);
+
+                        body = Expression.AndAlso(body, customerMatch);
+                    }
+
+                    var lambda = Expression.Lambda(body, parameter);
                     modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
                 }
             }

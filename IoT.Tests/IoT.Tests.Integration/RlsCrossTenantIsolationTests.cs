@@ -176,6 +176,8 @@ public sealed class RlsCrossTenantIsolationTests : IAsyncLifetime
     private sealed class MutableTenantContext : ITenantContext
     {
         public Guid TenantId { get; set; } = Guid.Empty;
+        public Guid? CustomerId { get; set; }
+        public string? CustomerPath { get; set; }
         public bool IsSystemOperation { get; set; }
     }
 }

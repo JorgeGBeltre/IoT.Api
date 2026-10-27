@@ -17,7 +17,7 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
         _configuration = configuration;
     }
 
-    public AuthTokenResult GenerateToken(User user, Guid tenantId)
+    public AuthTokenResult GenerateToken(User user, Guid tenantId, Guid? customerId = null, string? customerPath = null)
     {
         string secretKey = _configuration["Jwt:SecretKey"]
             ?? throw new InvalidOperationException("Critical Security Failure: 'Jwt:SecretKey' configuration is missing.");
@@ -41,6 +41,20 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
             new("full_name", user.FullName),
             new("must_change_password", user.MustChangePassword ? "true" : "false")
         };
+
+        // Jerarquía multinivel (ADR-013): el nodo del usuario viaja como claim firmado y el
+        // middleware lo lee con anti-spoofing (igual que tenant_id). El Path se resuelve en el
+        // servidor (no se confía al cliente). Si el usuario no tiene nodo, se OMITEN ambos claims:
+        // un token sin customer no restringe el subárbol (ve todo su tenant), lo que mantiene la
+        // activación NO DISRUPTIVA para usuarios y tokens anteriores a E8.2.
+        if (customerId.HasValue && customerId.Value != Guid.Empty)
+        {
+            claims.Add(new Claim("customer_id", customerId.Value.ToString()));
+            if (!string.IsNullOrWhiteSpace(customerPath))
+            {
+                claims.Add(new Claim("customer_path", customerPath));
+            }
+        }
 
         int expirationHours = 2;
         if (int.TryParse(_configuration["Jwt:ExpirationHours"], out int h) && h > 0)

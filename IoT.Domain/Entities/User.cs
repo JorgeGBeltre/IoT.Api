@@ -3,9 +3,13 @@ using IoT.Domain.Enums;
 
 namespace IoT.Domain.Entities;
 
-public sealed class User : AggregateRoot<Guid>, ITenantScoped
+public sealed class User : AggregateRoot<Guid>, ITenantScoped, ICustomerScoped
 {
     public Guid TenantId { get; private set; }
+    // Nodo al que pertenece el usuario en la jerarquía Customer (ADR-013). Nullable durante
+    // la transición E8.1; el seeder rellena los nulos al customer raíz del tenant. El alcance
+    // por subárbol (rol + nivel) se cablea en E8.2/E8.3, no aquí.
+    public Guid? CustomerId { get; private set; }
     public string Username { get; private set; }
     public string Email { get; private set; }
     public string PasswordHash { get; private set; }
@@ -125,6 +129,13 @@ public sealed class User : AggregateRoot<Guid>, ITenantScoped
     public void Activate()
     {
         IsActive = true;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
+    /// <summary>Asigna el usuario a un nodo <see cref="Customer"/> de la jerarquía (ADR-013).</summary>
+    public void AssignToCustomer(Guid customerId)
+    {
+        CustomerId = customerId;
         UpdatedAt = DateTime.UtcNow;
     }
 }

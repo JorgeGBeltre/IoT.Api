@@ -24,6 +24,7 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
     private readonly IUnitOfWork _unitOfWork;
     private readonly ILogger<LoginCommandHandler> _logger;
     private readonly ITenantContext? _tenantContext;
+    private readonly ICustomerRepository? _customerRepository;
 
     public LoginCommandHandler(
         IUserRepository userRepository,
@@ -32,7 +33,8 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
         IAuditLogRepository auditLogRepository,
         IUnitOfWork unitOfWork,
         ILogger<LoginCommandHandler> logger,
-        ITenantContext? tenantContext = null)
+        ITenantContext? tenantContext = null,
+        ICustomerRepository? customerRepository = null)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
@@ -41,6 +43,7 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
         _unitOfWork = unitOfWork;
         _logger = logger;
         _tenantContext = tenantContext;
+        _customerRepository = customerRepository;
     }
 
     public async Task<Result<AuthTokenResult>> Handle(LoginCommand request, CancellationToken cancellationToken)
@@ -90,7 +93,18 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
             Guid.NewGuid(), user.TenantId, user.Id, user.Username, "LoginSuccess", "Inicio de sesión exitoso.", request.IpAddress, request.UserAgent), cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        var tokenResult = _jwtTokenGenerator.GenerateToken(user, user.TenantId);
+        // Jerarquía multinivel (ADR-013): resolver el Path del nodo del usuario EN EL SERVIDOR para
+        // emitirlo como claim firmado. Corre en el scope de sistema del login (IgnoreQueryFilters).
+        // Si el usuario no tiene nodo (o no hay repositorio en un test), no se emiten claims de
+        // customer y el token no restringe el subárbol (NO DISRUPTIVO).
+        string? customerPath = null;
+        if (_customerRepository is not null && user.CustomerId.HasValue && user.CustomerId.Value != Guid.Empty)
+        {
+            var customer = await _customerRepository.GetByIdAsync(user.CustomerId.Value, cancellationToken);
+            customerPath = customer?.Path;
+        }
+
+        var tokenResult = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath);
         _logger.LogInformation("User {Username} logged in successfully for Tenant {TenantId}", user.Username, user.TenantId);
 
         return Result<AuthTokenResult>.Success(tokenResult);
@@ -287,6 +301,7 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
     private readonly IAuditLogRepository _auditLogRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ITenantContext? _tenantContext;
+    private readonly ICustomerRepository? _customerRepository;
 
     public ChangeTemporaryPasswordCommandHandler(
         IUserRepository userRepository,
@@ -294,7 +309,8 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
         IJwtTokenGenerator jwtTokenGenerator,
         IAuditLogRepository auditLogRepository,
         IUnitOfWork unitOfWork,
-        ITenantContext? tenantContext = null)
+        ITenantContext? tenantContext = null,
+        ICustomerRepository? customerRepository = null)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
@@ -302,6 +318,7 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
         _auditLogRepository = auditLogRepository;
         _unitOfWork = unitOfWork;
         _tenantContext = tenantContext;
+        _customerRepository = customerRepository;
     }
 
     public async Task<Result<AuthTokenResult>> Handle(ChangeTemporaryPasswordCommand request, CancellationToken cancellationToken)
@@ -355,7 +372,16 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
 
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        var token = _jwtTokenGenerator.GenerateToken(user, user.TenantId);
+        // Igual que en el login: el token reemitido tras el cambio de clave temporal lleva el nodo
+        // del usuario (ADR-013), para que la sesión quede acotada a su subárbol desde el principio.
+        string? customerPath = null;
+        if (_customerRepository is not null && user.CustomerId.HasValue && user.CustomerId.Value != Guid.Empty)
+        {
+            var customer = await _customerRepository.GetByIdAsync(user.CustomerId.Value, cancellationToken);
+            customerPath = customer?.Path;
+        }
+
+        var token = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath);
         return Result<AuthTokenResult>.Success(token);
     }
 }

@@ -78,12 +78,19 @@ public sealed class TenantSessionInterceptor : DbConnectionInterceptor
             // tenantId es un Guid (no texto controlado por el usuario): su interpolación en el
             // literal no es inyectable. set_config no admite parámetros enlazados cómodamente
             // aquí (comando crudo sobre la conexión), y el valor está acotado al formato Guid.
-            return $"SELECT set_config('app.tenant_id', '{tenantId}', false); SELECT set_config('app.is_system_session', 'false', false);";
+            //
+            // app.customer_path (ADR-013): path ltree del subárbol visible, o cadena vacía si el
+            // usuario no tiene nodo (raíz / token antiguo) = SIN restricción de subárbol. El valor
+            // se resuelve en el servidor desde la tabla customers (no se confía al cliente) y aquí
+            // se escapan las comillas simples como defensa adicional (ya es un ltree válido).
+            var customerPath = EscapeLiteral(_tenantContext.CustomerPath);
+            return $"SELECT set_config('app.tenant_id', '{tenantId}', false); SELECT set_config('app.is_system_session', 'false', false); SELECT set_config('app.customer_path', '{customerPath}', false);";
         }
 
         if (_tenantContext.IsSystemOperation)
         {
-            return "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false);";
+            // Operación de sistema: sin restricción de subárbol (customer_path vacío = raíz).
+            return "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false); SELECT set_config('app.customer_path', '', false);";
         }
 
         if (RlsEnforce)
@@ -95,8 +102,16 @@ public sealed class TenantSessionInterceptor : DbConnectionInterceptor
 
         // Modo no estricto (compatibilidad): sin tenant → sesión de sistema. RLS sigue aislando
         // todo el plano de datos que SÍ trae tenant; sólo las rutas sin tenant quedan abiertas.
-        return "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false);";
+        return "SELECT set_config('app.tenant_id', '', false); SELECT set_config('app.is_system_session', 'true', false); SELECT set_config('app.customer_path', '', false);";
     }
+
+    /// <summary>
+    /// Escapa las comillas simples de un literal para interpolarlo con seguridad en el argumento
+    /// de <c>set_config</c>. El path proviene de la tabla <c>customers</c> (ya un ltree válido);
+    /// esto es defensa adicional, no la única barrera. <c>null</c> → cadena vacía (sin restricción).
+    /// </summary>
+    private static string EscapeLiteral(string? value) =>
+        string.IsNullOrEmpty(value) ? string.Empty : value.Replace("'", "''");
 
     private void ConfigureSession(DbConnection connection)
     {
@@ -145,7 +160,7 @@ public sealed class TenantSessionInterceptor : DbConnectionInterceptor
         try
         {
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = "RESET app.tenant_id; RESET app.is_system_session;";
+            cmd.CommandText = "RESET app.tenant_id; RESET app.is_system_session; RESET app.customer_path;";
             cmd.ExecuteNonQuery();
         }
         catch
@@ -161,7 +176,7 @@ public sealed class TenantSessionInterceptor : DbConnectionInterceptor
         try
         {
             await using var cmd = connection.CreateCommand();
-            cmd.CommandText = "RESET app.tenant_id; RESET app.is_system_session;";
+            cmd.CommandText = "RESET app.tenant_id; RESET app.is_system_session; RESET app.customer_path;";
             await cmd.ExecuteNonQueryAsync();
         }
         catch

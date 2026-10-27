@@ -57,5 +57,11 @@ public sealed record AuthTokenResult(
 
 public interface IJwtTokenGenerator
 {
-    AuthTokenResult GenerateToken(User user, Guid tenantId);
+    /// <summary>
+    /// Emite el JWT de sesión. <paramref name="customerId"/>/<paramref name="customerPath"/> son el
+    /// nodo del usuario en la jerarquía (ADR-013), resueltos en el servidor por el handler de login.
+    /// Si <paramref name="customerId"/> es <c>null</c> se OMITEN ambos claims (token sin acotación de
+    /// subárbol = ve todo su tenant; comportamiento NO DISRUPTIVO).
+    /// </summary>
+    AuthTokenResult GenerateToken(User user, Guid tenantId, Guid? customerId = null, string? customerPath = null);
 }

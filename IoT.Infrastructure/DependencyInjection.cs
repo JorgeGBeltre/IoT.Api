@@ -46,6 +46,7 @@ public static class DependencyInjection
 
         // Security & Multi-Tenant Identity Repositories
         services.AddScoped<IUserRepository, UserRepository>();
+        services.AddScoped<ICustomerRepository, CustomerRepository>();
         services.AddScoped<IRoleRepository, RoleRepository>();
         services.AddScoped<IOtpRepository, OtpRepository>();
         services.AddScoped<IAuditLogRepository, AuditLogRepository>();

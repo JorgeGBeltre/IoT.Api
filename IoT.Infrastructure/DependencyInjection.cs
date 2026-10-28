@@ -57,6 +57,7 @@ public static class DependencyInjection
 
         // Tenant Operations Repositories
         services.AddScoped<IEventQueryService, Services.EventQueryService>();
+        services.AddScoped<IMcpFleetService, Services.McpFleetService>();
         services.AddScoped<IMqttBrokerConfigRepository, MqttBrokerConfigRepository>();
         services.AddScoped<ITenantSettingsRepository, TenantSettingsRepository>();
         services.AddScoped<IFirmwareVersionRecordRepository, FirmwareVersionRecordRepository>();

@@ -320,6 +320,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
 
         // 7. Update device last seen
         device.RecordTelemetry(ev.RecordedAt);
+        _deviceRepository.Update(device);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         // 7b. Atributos CLIENT (ADR-014, P1b): reflejar el ÚLTIMO valor de los campos que el EQUIPO

@@ -20,6 +20,8 @@ public sealed class GpsAccidentAdapter : IDeviceProtocolAdapter
             TopicPatternMatcher.MatchesMqttTopic("devices/+/events", topic) ||
             TopicPatternMatcher.MatchesMqttTopic("telemetry/+", topic) ||
             TopicPatternMatcher.MatchesMqttTopic("telemetry/gps/+", topic) ||
+            TopicPatternMatcher.MatchesMqttTopic("telemetry/+/gps", topic) ||
+            TopicPatternMatcher.MatchesMqttTopic("telemetry/+/accidents", topic) ||
             TopicPatternMatcher.MatchesMqttTopic("events/+", topic))
         {
             return payload.Contains("accident", StringComparison.OrdinalIgnoreCase) ||

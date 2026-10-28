@@ -8,6 +8,7 @@ var builder = Host.CreateApplicationBuilder(args);
 
 // Register layers & Tenant Context for Ingestion Scopes
 builder.Services.AddScoped<ITenantContext, WorkerTenantContext>();
+builder.Services.AddSingleton<IFleetNotificationService, WorkerFleetNotificationService>();
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 

@@ -25,6 +25,8 @@ public sealed class GpsTrackerProfile : IDeviceProfile
         "telemetry",
         "devices/{deviceId}/gps",
         "telemetry/gps/{deviceId}",
+        "telemetry/{deviceId}/gps",
+        "telemetry/{deviceId}/accidents",
         "devices/{deviceId}/telemetry"
     ];
 

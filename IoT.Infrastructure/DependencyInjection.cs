@@ -56,6 +56,7 @@ public static class DependencyInjection
         services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
         // Tenant Operations Repositories
+        services.AddScoped<IEventQueryService, Services.EventQueryService>();
         services.AddScoped<IMqttBrokerConfigRepository, MqttBrokerConfigRepository>();
         services.AddScoped<ITenantSettingsRepository, TenantSettingsRepository>();
         services.AddScoped<IFirmwareVersionRecordRepository, FirmwareVersionRecordRepository>();

@@ -397,6 +397,59 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
                         ev.RecordedAt,
                         cancellationToken);
                 }
+
+                // 8b. Alertas de telemetría (SOS, impacto, vuelco, alarmas de protocolo)
+                string? detectedAlertType = null;
+                string? alertMessage = null;
+
+                if (ev.Attributes.TryGetValue("emergency", out var em) && em.Equals("true", StringComparison.OrdinalIgnoreCase))
+                {
+                    detectedAlertType = "SOS";
+                    alertMessage = $"Alerta de Emergencia / SOS activada en {device.Name} ({device.ChipId})";
+                }
+                else if (ev.Attributes.TryGetValue("impact_detected", out var imp) && imp.Equals("true", StringComparison.OrdinalIgnoreCase))
+                {
+                    detectedAlertType = "Impact";
+                    alertMessage = $"Impacto o colisión detectada en {device.Name} ({device.ChipId})";
+                }
+                else if (ev.Attributes.TryGetValue("rollover_detected", out var roll) && roll.Equals("true", StringComparison.OrdinalIgnoreCase))
+                {
+                    detectedAlertType = "Rollover";
+                    alertMessage = $"Vuelco detectado en {device.Name} ({device.ChipId})";
+                }
+                else if (ev.Attributes.TryGetValue("alarm_code", out var ac) && !string.IsNullOrWhiteSpace(ac))
+                {
+                    detectedAlertType = $"Alarm_{ac}";
+                    alertMessage = $"Alarma de hardware [{ac}] recibida en {device.Name} ({device.ChipId})";
+                }
+
+                if (detectedAlertType != null && alertMessage != null)
+                {
+                    await _notificationService.NotifyDeviceAlertAsync(
+                        device.TenantId,
+                        device.Id,
+                        device.ChipId,
+                        detectedAlertType,
+                        alertMessage,
+                        ev.RecordedAt,
+                        cancellationToken);
+
+                    if (_auditLogRepository != null)
+                    {
+                        var alertLog = new Domain.Entities.AuditLog(
+                            id: Guid.NewGuid(),
+                            tenantId: device.TenantId,
+                            userId: null,
+                            username: device.ChipId,
+                            action: $"DeviceAlert.{detectedAlertType}",
+                            details: alertMessage,
+                            ipAddress: null,
+                            userAgent: "IoT.Telemetry");
+
+                        await _auditLogRepository.AddAsync(alertLog, cancellationToken);
+                        await _unitOfWork.SaveChangesAsync(cancellationToken);
+                    }
+                }
             }
             catch (Exception ex)
             {

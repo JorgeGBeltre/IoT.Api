@@ -4,6 +4,8 @@ namespace IoT.Application.Common.Interfaces;
 
 public interface IEmailService
 {
+    string ClientAppUrl => "http://localhost:3000";
+
     Task<bool> SendTemporaryPasswordEmailAsync(
         string toEmail,
         string username,

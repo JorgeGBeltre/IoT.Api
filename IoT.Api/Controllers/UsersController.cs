@@ -75,7 +75,8 @@ public sealed class UsersController : ControllerBase
         Guid CustomerId,
         bool MustChangePassword,
         string TemporaryPassword,
-        string Notice);
+        string Notice,
+        string? InvitationLink = null);
 
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -127,6 +128,10 @@ public sealed class UsersController : ControllerBase
         }
 
         var value = result.Value;
+        var notice = !string.IsNullOrWhiteSpace(value.InvitationLink)
+            ? "Se ha generado un enlace de invitación y enviado al correo del usuario. También se provee una contraseña temporal de contingencia."
+            : "Esta contraseña temporal se muestra una sola vez. Entréguela al usuario por un canal seguro; deberá cambiarla al iniciar sesión.";
+
         var response = new CreateUserResponse(
             value.Id,
             value.Username,
@@ -136,7 +141,8 @@ public sealed class UsersController : ControllerBase
             value.CustomerId,
             value.MustChangePassword,
             value.TemporaryPassword,
-            "Esta contraseña temporal se muestra una sola vez. Entréguela al usuario por un canal seguro; deberá cambiarla al iniciar sesión.");
+            notice,
+            value.InvitationLink);
 
         return CreatedAtAction(nameof(GetAll), new { }, response);
     }

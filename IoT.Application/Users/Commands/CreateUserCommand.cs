@@ -45,6 +45,8 @@ public sealed class CreateUserCommandHandler : IRequestHandler<CreateUserCommand
     private readonly IAuditLogRepository _auditLogRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ILogger<CreateUserCommandHandler> _logger;
+    private readonly IOtpRepository? _otpRepository;
+    private readonly IEmailService? _emailService;
 
     public CreateUserCommandHandler(
         IUserRepository userRepository,
@@ -53,7 +55,9 @@ public sealed class CreateUserCommandHandler : IRequestHandler<CreateUserCommand
         IPasswordHasher passwordHasher,
         IAuditLogRepository auditLogRepository,
         IUnitOfWork unitOfWork,
-        ILogger<CreateUserCommandHandler> logger)
+        ILogger<CreateUserCommandHandler> logger,
+        IOtpRepository? otpRepository = null,
+        IEmailService? emailService = null)
     {
         _userRepository = userRepository;
         _customerRepository = customerRepository;
@@ -62,6 +66,8 @@ public sealed class CreateUserCommandHandler : IRequestHandler<CreateUserCommand
         _auditLogRepository = auditLogRepository;
         _unitOfWork = unitOfWork;
         _logger = logger;
+        _otpRepository = otpRepository;
+        _emailService = emailService;
     }
 
     public async Task<Result<CreateUserResult>> Handle(CreateUserCommand request, CancellationToken cancellationToken)
@@ -185,6 +191,15 @@ public sealed class CreateUserCommandHandler : IRequestHandler<CreateUserCommand
 
         await _userRepository.AddAsync(user, cancellationToken);
 
+        // Token de restablecimiento para el enlace directo de invitación (Item 4)
+        string? rawResetToken = null;
+        if (_otpRepository != null)
+        {
+            var (resetTokenEntity, raw) = PasswordResetToken.Create(tenantId, user.Id, expirationMinutes: 10080); // 7 días de vigencia
+            rawResetToken = raw;
+            await _otpRepository.AddResetTokenAsync(resetTokenEntity, cancellationToken);
+        }
+
         // AUDITORÍA: quién (actor), a quién (usuario creado), qué customer/rol. SIN la contraseña.
         await _auditLogRepository.AddAsync(new AuditLog(
             Guid.NewGuid(),
@@ -216,6 +231,34 @@ public sealed class CreateUserCommandHandler : IRequestHandler<CreateUserCommand
                 $"Ya existe un usuario con el nombre '{username}' en el tenant."));
         }
 
+        // Construir enlace de invitación para fijar contraseña
+        string? invitationLink = null;
+        var baseUrl = _emailService?.ClientAppUrl ?? "http://localhost:3000";
+        if (!string.IsNullOrWhiteSpace(rawResetToken) && !string.IsNullOrWhiteSpace(user.Email))
+        {
+            invitationLink = $"{baseUrl.TrimEnd('/')}/login?email={Uri.EscapeDataString(user.Email)}&token={Uri.EscapeDataString(rawResetToken)}";
+        }
+
+        // Envío de correo de invitación asíncrono / best-effort (no revierte la creación si SMTP falla)
+        if (_emailService != null && !string.IsNullOrWhiteSpace(user.Email))
+        {
+            try
+            {
+                await _emailService.SendTemporaryPasswordEmailAsync(
+                    toEmail: user.Email,
+                    username: user.Username,
+                    tempPassword: temporaryPassword,
+                    loginUrl: invitationLink ?? baseUrl,
+                    companyName: target.Name,
+                    fullName: user.FullName,
+                    cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Fallo al enviar correo de invitación a {Email} para usuario {Username}.", user.Email, user.Username);
+            }
+        }
+
         // Nunca se registra la contraseña ni el hash: sólo metadatos no sensibles.
         _logger.LogInformation(
             "Usuario {Username} (id {UserId}) creado con rol {Role} en el customer {CustomerId} por {Actor}.",
@@ -230,6 +273,7 @@ public sealed class CreateUserCommandHandler : IRequestHandler<CreateUserCommand
             user.RoleName,
             target.Id,
             user.MustChangePassword,
-            temporaryPassword));
+            temporaryPassword,
+            invitationLink));
     }
 }

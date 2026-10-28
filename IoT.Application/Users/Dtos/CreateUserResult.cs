@@ -16,4 +16,5 @@ public sealed record CreateUserResult(
     string RoleName,
     Guid CustomerId,
     bool MustChangePassword,
-    string TemporaryPassword);
+    string TemporaryPassword,
+    string? InvitationLink = null);

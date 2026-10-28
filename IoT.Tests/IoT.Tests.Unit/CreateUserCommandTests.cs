@@ -254,4 +254,74 @@ public sealed class CreateUserCommandTests
         result.IsSuccess.Should().BeTrue();
         result.Value.RoleName.Should().Be(canonical);
     }
+
+    [Fact]
+    public async Task Handle_WhenEmailProvided_GeneratesResetToken_AndDispatchesInvitationEmail()
+    {
+        var node = Customer.Create(T1, "Nodo", parent: null, code: "N").Value;
+
+        var users = new Mock<IUserRepository>();
+        users.Setup(r => r.GetByUsernameAsync(T1, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((User?)null);
+        var customers = new Mock<ICustomerRepository>();
+        customers.Setup(r => r.GetByIdScopedAsync(node.Id, It.IsAny<CancellationToken>())).ReturnsAsync(node);
+        var hasher = new Mock<IPasswordHasher>();
+        hasher.Setup(h => h.Hash(It.IsAny<string>())).Returns("H");
+        var audit = new Mock<IAuditLogRepository>();
+        var uow = new Mock<IUnitOfWork>();
+        var tenant = new Mock<ITenantContext>();
+        tenant.SetupGet(t => t.TenantId).Returns(T1);
+        tenant.SetupGet(t => t.CustomerId).Returns(node.Id);
+        tenant.SetupGet(t => t.CustomerPath).Returns(node.Path);
+
+        var otpRepo = new Mock<IOtpRepository>();
+        PasswordResetToken? savedToken = null;
+        otpRepo.Setup(r => r.AddResetTokenAsync(It.IsAny<PasswordResetToken>(), It.IsAny<CancellationToken>()))
+            .Callback<PasswordResetToken, CancellationToken>((t, _) => savedToken = t)
+            .Returns(Task.CompletedTask);
+
+        var emailService = new Mock<IEmailService>();
+        emailService.SetupGet(e => e.ClientAppUrl).Returns("https://platform.test");
+        string? sentLoginUrl = null;
+        emailService.Setup(e => e.SendTemporaryPasswordEmailAsync(
+            "test@t1.com",
+            "testuser",
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            node.Name,
+            "Test User",
+            It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, string?, string?, CancellationToken>((_, _, _, url, _, _, _) => sentLoginUrl = url)
+            .ReturnsAsync(true);
+
+        var handler = new CreateUserCommandHandler(
+            users.Object,
+            customers.Object,
+            tenant.Object,
+            hasher.Object,
+            audit.Object,
+            uow.Object,
+            NullLogger<CreateUserCommandHandler>.Instance,
+            otpRepo.Object,
+            emailService.Object);
+
+        var result = await handler.Handle(
+            new CreateUserCommand("testuser", "test@t1.com", "Test User", "Operator"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.InvitationLink.Should().NotBeNullOrWhiteSpace();
+        result.Value.InvitationLink.Should().StartWith("https://platform.test/login?email=test%40t1.com&token=");
+        savedToken.Should().NotBeNull();
+        savedToken!.UserId.Should().Be(result.Value.Id);
+        emailService.Verify(e => e.SendTemporaryPasswordEmailAsync(
+            "test@t1.com",
+            "testuser",
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            node.Name,
+            "Test User",
+            It.IsAny<CancellationToken>()), Times.Once);
+        sentLoginUrl.Should().Be(result.Value.InvitationLink);
+    }
 }

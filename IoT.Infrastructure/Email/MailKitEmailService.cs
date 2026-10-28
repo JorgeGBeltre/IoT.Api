@@ -29,6 +29,8 @@ public sealed class MailKitEmailService : IEmailService
         _logger = logger;
     }
 
+    public string ClientAppUrl => _settings.ClientAppUrl;
+
     public async Task<bool> SendTemporaryPasswordEmailAsync(
         string toEmail,
         string username,

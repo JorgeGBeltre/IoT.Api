@@ -33,9 +33,7 @@ public sealed class AuthController : ControllerBase
 
     private static readonly List<DemoTenantDto> DemoTenants = new()
     {
-        new(Guid.Parse("11111111-1111-1111-1111-111111111111"), "Logística & Transporte Caribe", "CARIBE-LOG", "Flota de camiones GPS y entregas urbanas"),
-        new(Guid.Parse("22222222-2222-2222-2222-222222222222"), "Gas & Energía Dominicana GLP", "DOM-GLP", "Monitoreo industrial y tanques estacionarios GLP"),
-        new(Guid.Parse("33333333-3333-3333-3333-333333333333"), "Smart Infrastructure & Actuators", "SMART-ACT", "Sistemas de control remoto, bombas y alumbrado")
+        new(Guid.Parse("11111111-1111-1111-1111-111111111111"), "Logística & Transporte Caribe", "CARIBE-LOG", "Flota de camiones GPS y entregas urbanas")
     };
 
     [HttpGet("demo-tenants")]

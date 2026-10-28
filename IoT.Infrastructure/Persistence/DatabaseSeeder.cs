@@ -51,18 +51,14 @@ public sealed class DatabaseSeeder
             bool isDevelopment = _environment.IsDevelopment();
 
             var tenant1Id = Guid.Parse("11111111-1111-1111-1111-111111111111");
-            var tenant2Id = Guid.Parse("22222222-2222-2222-2222-222222222222");
-            var tenant3Id = Guid.Parse("33333333-3333-3333-3333-333333333333");
 
             // 1. Seed Tenants (SÓLO Development)
             if (isDevelopment && !await _context.Tenants.IgnoreQueryFilters().AnyAsync(cancellationToken))
             {
-                _logger.LogInformation("Sembrando tenants de demostración...");
+                _logger.LogInformation("Sembrando tenant de prueba...");
                 var tenants = new List<Tenant>
                 {
-                    Tenant.CreateWithId(tenant1Id, "Logística & Transporte Caribe", "CARIBE-LOG").Value,
-                    Tenant.CreateWithId(tenant2Id, "Gas & Energía Dominicana GLP", "DOM-GLP").Value,
-                    Tenant.CreateWithId(tenant3Id, "Smart Infrastructure & Actuators", "SMART-ACT").Value
+                    Tenant.CreateWithId(tenant1Id, "Logística & Transporte Caribe", "CARIBE-LOG").Value
                 };
                 await _context.Tenants.AddRangeAsync(tenants, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
@@ -71,7 +67,7 @@ public sealed class DatabaseSeeder
             // 2. Seed Users (SÓLO Development)
             if (isDevelopment && !await _context.Users.IgnoreQueryFilters().AnyAsync(cancellationToken))
             {
-                _logger.LogInformation("Sembrando usuarios administradores iniciales...");
+                _logger.LogInformation("Sembrando usuario administrador inicial...");
 
                 (string password, bool mustChange) = ResolveSeedAdminPassword(isDevelopment);
                 // Hash POR admin (BCrypt usa sal por hash): aunque compartan contraseña inicial,
@@ -86,31 +82,11 @@ public sealed class DatabaseSeeder
                     "Admin",
                     mustChangePassword: mustChange).Value;
 
-                var adminTenant2 = User.Create(
-                    tenant2Id,
-                    "admin_glp",
-                    "admin@glp.do",
-                    _passwordHasher.Hash(password),
-                    "Administrador GLP",
-                    "Admin",
-                    mustChangePassword: mustChange).Value;
-
-                var adminTenant3 = User.Create(
-                    tenant3Id,
-                    "admin_smart",
-                    "admin@smart.do",
-                    _passwordHasher.Hash(password),
-                    "Administrador Actuadores",
-                    "Admin",
-                    mustChangePassword: mustChange).Value;
-
                 // ADR-013 E8.4a: asignar el Customer raíz AL CREAR (no después), para no violar el
                 // NOT NULL de CustomerId al guardar.
                 adminTenant1.AssignToCustomer((await EnsureRootCustomerAsync(tenant1Id, cancellationToken)).Id);
-                adminTenant2.AssignToCustomer((await EnsureRootCustomerAsync(tenant2Id, cancellationToken)).Id);
-                adminTenant3.AssignToCustomer((await EnsureRootCustomerAsync(tenant3Id, cancellationToken)).Id);
 
-                await _context.Users.AddRangeAsync(new[] { adminTenant1, adminTenant2, adminTenant3 }, cancellationToken);
+                await _context.Users.AddAsync(adminTenant1, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
             }
 
@@ -134,30 +110,12 @@ public sealed class DatabaseSeeder
                     "MQTT-GPS-Tracker",
                     "Generic").Value;
 
-                var dev3 = Device.Create(
-                    tenant2Id,
-                    "GLP-TANK01",
-                    "7C:DF:A1:90:22:01",
-                    "Tanque Estacionario 5000 Gal",
-                    "MQTT-PressureLevelSensor",
-                    "Custom IoT").Value;
-
-                var dev4 = Device.Create(
-                    tenant3Id,
-                    "RELAY-CTRL01",
-                    "80:65:99:33:44:01",
-                    "Controlador Bombas de Agua",
-                    "MQTT-Relay-BLE",
-                    "Custom IoT").Value;
-
                 // ADR-013 E8.4a: asignar el Customer raíz del tenant AL CREAR cada device (NOT NULL).
                 var rootT1 = (await EnsureRootCustomerAsync(tenant1Id, cancellationToken)).Id;
                 dev1.AssignToCustomer(rootT1);
                 dev2.AssignToCustomer(rootT1);
-                dev3.AssignToCustomer((await EnsureRootCustomerAsync(tenant2Id, cancellationToken)).Id);
-                dev4.AssignToCustomer((await EnsureRootCustomerAsync(tenant3Id, cancellationToken)).Id);
 
-                await _context.Devices.AddRangeAsync(new[] { dev1, dev2, dev3, dev4 }, cancellationToken);
+                await _context.Devices.AddRangeAsync(new[] { dev1, dev2 }, cancellationToken);
                 await _context.SaveChangesAsync(cancellationToken);
             }
 

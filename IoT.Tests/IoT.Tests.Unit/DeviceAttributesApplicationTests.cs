@@ -223,6 +223,9 @@ public class DeviceAttributesApplicationTests
             Attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["firmware_version"] = "v2.4.1",
+                ["hardware_version"] = "HW-rev3",
+                ["serial_number"] = "SN-2026-9901",
+                ["protocol_version"] = "1.2",
                 ["imei"] = "860000000000001",
                 ["iccid"] = "8934071100000000001",
                 ["imsi"] = "310150123456789",
@@ -241,8 +244,11 @@ public class DeviceAttributesApplicationTests
         var mapped = DeviceClientAttributeMapping.Extract(ev);
 
         // Sólo metadatos ESTABLES de identidad/firmware (cadenas). Ninguna métrica numérica volátil.
-        mapped.Keys.Should().BeEquivalentTo(new[] { "firmware_version", "imei", "iccid", "imsi" });
+        mapped.Keys.Should().BeEquivalentTo(new[] { "firmware_version", "hardware_version", "serial_number", "protocol_version", "imei", "iccid", "imsi" });
         mapped["firmware_version"].Should().Be("v2.4.1");
+        mapped["hardware_version"].Should().Be("HW-rev3");
+        mapped["serial_number"].Should().Be("SN-2026-9901");
+        mapped["protocol_version"].Should().Be("1.2");
         mapped.Should().NotContainKey("battery", "battery es volátil: serie en telemetry_records, no atributo client");
         mapped.Should().NotContainKey("rssi", "rssi es volátil: serie en telemetry_records, no atributo client");
     }

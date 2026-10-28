@@ -31,6 +31,9 @@ public static class DeviceClientAttributeMapping
     private static readonly string[] StringAttributeKeys =
     {
         "firmware_version",
+        "hardware_version",
+        "serial_number",
+        "protocol_version",
         "imei",
         "iccid",
         "imsi"

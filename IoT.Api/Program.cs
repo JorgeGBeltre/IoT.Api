@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -290,6 +291,11 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("AllowFrontend");
 app.UseRateLimiter();
+
+// Observabilidad (Item 19): Exponer métricas Prometheus (/metrics) y capturar System.Diagnostics.Metrics (IoTMetrics)
+Prometheus.MeterAdapter.StartListening();
+app.UseHttpMetrics();
+app.MapMetrics("/metrics").AllowAnonymous();
 
 // E0-03: Middlewares order: Authentication -> Authorization -> TenantResolution
 app.UseAuthentication();

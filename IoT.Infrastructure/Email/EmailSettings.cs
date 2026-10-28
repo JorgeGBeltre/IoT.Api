@@ -10,5 +10,6 @@ public sealed class EmailSettings
     public string SenderPassword { get; set; } = string.Empty;
     public string SenderName { get; set; } = "IoT Nexus Platform";
     public bool EnableSsl { get; set; } = true;
+    public bool AllowInvalidCertificates { get; set; } = false;
     public string ClientAppUrl { get; set; } = "http://localhost:3000";
 }

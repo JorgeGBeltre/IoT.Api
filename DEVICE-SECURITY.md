@@ -106,6 +106,6 @@ activo puede **suplantar** al dispositivo (posiciones/alarmas falsas). La compue
 - [ ] (Opcional) proxy TLS-terminador para el subconjunto de trackers TLS-capaces.
 - [ ] Documentado qué equipos van cifrados, cuáles por aislamiento y qué rangos/peers se permiten.
 
-> Nota aparte (no es B3): `MailKitEmailService` acepta cualquier certificado del servidor SMTP
-> (`ServerCertificateValidationCallback => true`), lo que habilita MITM del correo saliente.
-> Conviene validar la cadena del SMTP; es un endurecimiento independiente del canal de dispositivos.
+> [x] Endurecimiento SMTP (Item 17): `MailKitEmailService` valida estrictamente la cadena de certificados
+> y revocación X.509 del servidor SMTP por defecto (`CheckCertificateRevocation = true`), mitigando ataques MITM.
+> Sólo se admiten certificados no confiables mediante configuración explícita (`Email:AllowInvalidCertificates = true`).

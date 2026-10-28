@@ -237,7 +237,15 @@ public sealed class MailKitEmailService : IEmailService
             message.Body = bodyBuilder.ToMessageBody();
 
             using var client = new SmtpClient();
-            client.ServerCertificateValidationCallback = (s, c, h, e) => true;
+            if (_settings.AllowInvalidCertificates)
+            {
+                _logger.LogWarning("SEGURIDAD SMTP DEGRADADA: AllowInvalidCertificates=true. Se aceptan certificados SMTP no confiables (posible riesgo de MITM). No usar en producción.");
+                client.ServerCertificateValidationCallback = (s, c, h, e) => true;
+            }
+            else
+            {
+                client.CheckCertificateRevocation = true;
+            }
 
             var socketOptions = _settings.Port == 465
                 ? SecureSocketOptions.SslOnConnect

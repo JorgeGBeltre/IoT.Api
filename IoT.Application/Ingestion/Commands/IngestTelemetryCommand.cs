@@ -62,6 +62,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
     private readonly IDeviceCommandRepository? _commandRepository;
     private readonly IUnprovisionedDeviceAuditThrottle? _unprovisionedAuditThrottle;
     private readonly IDeviceAttributeRepository? _attributeRepository;
+    private readonly IOutboundWebhookDispatcher? _webhookDispatcher;
 
     public IngestTelemetryCommandHandler(
         ICompositeProtocolAdapter protocolAdapter,
@@ -77,7 +78,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         IFirmwareOtaService? firmwareOtaService = null,
         IDeviceCommandRepository? commandRepository = null,
         IUnprovisionedDeviceAuditThrottle? unprovisionedAuditThrottle = null,
-        IDeviceAttributeRepository? attributeRepository = null)
+        IDeviceAttributeRepository? attributeRepository = null,
+        IOutboundWebhookDispatcher? webhookDispatcher = null)
     {
         _protocolAdapter = protocolAdapter;
         _deviceRepository = deviceRepository;
@@ -93,6 +95,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         _commandRepository = commandRepository;
         _unprovisionedAuditThrottle = unprovisionedAuditThrottle;
         _attributeRepository = attributeRepository;
+        _webhookDispatcher = webhookDispatcher;
     }
 
     public async Task<Result> Handle(IngestTelemetryCommand request, CancellationToken cancellationToken)
@@ -448,6 +451,29 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
 
                         await _auditLogRepository.AddAsync(alertLog, cancellationToken);
                         await _unitOfWork.SaveChangesAsync(cancellationToken);
+                    }
+
+                    if (_webhookDispatcher != null)
+                    {
+                        _ = _webhookDispatcher.DispatchAsync(
+                            device.TenantId,
+                            $"device.alert.{detectedAlertType.ToLowerInvariant()}",
+                            new
+                            {
+                                deviceId = device.Id,
+                                chipId = device.ChipId,
+                                name = device.Name,
+                                alertType = detectedAlertType,
+                                message = alertMessage,
+                                recordedAt = ev.RecordedAt,
+                                position = ev.Position == null ? null : new
+                                {
+                                    latitude = ev.Position.Latitude,
+                                    longitude = ev.Position.Longitude,
+                                    speedKph = ev.Position.SpeedKph
+                                }
+                            },
+                            cancellationToken);
                     }
                 }
             }

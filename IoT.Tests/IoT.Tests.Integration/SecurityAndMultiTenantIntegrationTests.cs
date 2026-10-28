@@ -37,6 +37,9 @@ public class SecurityAndMultiTenantIntegrationTests
         _jwtMock.Setup(j => j.GenerateToken(user, tenantId, It.IsAny<Guid?>(), It.IsAny<string?>()))
             .Returns(new AuthTokenResult("sample_jwt_token_xyz", tenantId, user.Id, user.Username, user.Email, user.RoleName, false, DateTime.UtcNow.AddDays(7)));
 
+        _jwtMock.Setup(j => j.GenerateToken(user, tenantId, It.IsAny<Guid?>(), It.IsAny<string?>(), It.IsAny<IEnumerable<string>?>()))
+            .Returns(new AuthTokenResult("sample_jwt_token_xyz", tenantId, user.Id, user.Username, user.Email, user.RoleName, false, DateTime.UtcNow.AddDays(7)));
+
         var handler = new LoginCommandHandler(
             _userRepoMock.Object,
             _hasherMock.Object,

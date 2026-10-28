@@ -57,6 +57,7 @@ public static class DependencyInjection
 
         // Tenant Operations Repositories
         services.AddScoped<IEventQueryService, Services.EventQueryService>();
+        services.AddScoped<IOutboundWebhookDispatcher, Services.OutboundWebhookDispatcher>();
         services.AddScoped<IMcpFleetService, Services.McpFleetService>();
         services.AddScoped<IMqttBrokerConfigRepository, MqttBrokerConfigRepository>();
         services.AddScoped<ITenantSettingsRepository, TenantSettingsRepository>();
@@ -144,6 +145,7 @@ public static class DependencyInjection
         // HTTP Device Transport (E3-04). Timeout acotado: un endpoint de dispositivo lento
         // no debe bloquear el hilo de downlink indefinidamente.
         services.AddHttpClient("IoT.HttpDeviceTransport", c => c.Timeout = TimeSpan.FromSeconds(15));
+        services.AddHttpClient("OutboundWebhookClient", c => c.Timeout = TimeSpan.FromSeconds(5));
         services.AddSingleton<Http.HttpDeviceTransport>();
 
         // Gateway TCP multi-protocolo (E5, ADR-007): un handler por familia + un servicio

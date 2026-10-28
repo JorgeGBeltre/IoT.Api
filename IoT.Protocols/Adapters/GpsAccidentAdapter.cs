@@ -106,11 +106,19 @@ public sealed class GpsAccidentAdapter : IDeviceProtocolAdapter
 
                     if (latOk && lonOk)
                     {
-                        float? speed = gpsElem.TryGetProperty("speed", out var spElem) && spElem.TryGetSingle(out var s) ? s : null;
-                        float? heading = gpsElem.TryGetProperty("heading", out var hdElem) && hdElem.TryGetSingle(out var h) ? h : null;
-                        bool isValid = !gpsElem.TryGetProperty("is_valid", out var vElem) || vElem.GetBoolean();
+                        float? speed = gpsElem.TryGetProperty("speed_kmph", out var spElem) && spElem.TryGetSingle(out var s) ? s
+                            : (gpsElem.TryGetProperty("speed", out var sp2) && sp2.TryGetSingle(out var s2) ? s2 : null);
+                        float? heading = gpsElem.TryGetProperty("course_deg", out var hdElem) && hdElem.TryGetSingle(out var h) ? h
+                            : (gpsElem.TryGetProperty("heading", out var hd2) && hd2.TryGetSingle(out var h2) ? h2 : null);
+                        float? altitude = gpsElem.TryGetProperty("altitude_m", out var altElem) && altElem.TryGetSingle(out var a) ? a
+                            : (gpsElem.TryGetProperty("altitude", out var alt2) && alt2.TryGetSingle(out var a2) ? a2 : null);
+                        short? sats = gpsElem.TryGetProperty("satellites", out var satElem) && satElem.TryGetInt32(out var st) && st >= 0 && st <= short.MaxValue
+                            ? (short)st : null;
+                        bool isValid = gpsElem.TryGetProperty("valid", out var vElem) && (vElem.ValueKind == JsonValueKind.True || vElem.ValueKind == JsonValueKind.False)
+                            ? vElem.GetBoolean()
+                            : (!gpsElem.TryGetProperty("is_valid", out var vElem2) || vElem2.GetBoolean());
 
-                        var posResult = GeoPosition.Create(lat, lon, speed, heading, null, null, isValid);
+                        var posResult = GeoPosition.Create(lat, lon, speed, heading, altitude, sats, isValid);
                         if (posResult.IsSuccess)
                             position = posResult.Value;
                     }

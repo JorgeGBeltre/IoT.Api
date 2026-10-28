@@ -74,4 +74,43 @@ public sealed class GpsAccidentAdapterTests
         result.Value.Position!.Latitude.Should().BeApproximately(18.50, 0.0001);
         result.Value.Attributes.Should().ContainKey("impact_detected").WhoseValue.Should().Be("True");
     }
+
+    [Fact]
+    public void Decode_Esp32GpsTelemetryPayload_ParsesAllGpsFields()
+    {
+        var adapter = new GpsAccidentAdapter();
+
+        string json = JsonSerializer.Serialize(new
+        {
+            Device = new { ChipId = "B81B05BBBC2C", status = "operational", FirmwareVersion = "v0.0.9" },
+            Timestamp = "2026-10-28T06:50:00Z",
+            Details = new
+            {
+                chipId = "B81B05BBBC2C",
+                gps = new
+                {
+                    valid = true,
+                    latitude = 18.4861,
+                    longitude = -69.9312,
+                    speed_kmph = 25.5,
+                    altitude_m = 45.2,
+                    course_deg = 120.0,
+                    satellites = 7
+                }
+            }
+        });
+
+        var result = adapter.Decode("telemetry/B81B05BBBC2C/gps", json);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.DeviceIdentifier.Should().Be("B81B05BBBC2C");
+        result.Value.Position.Should().NotBeNull();
+        result.Value.Position!.Latitude.Should().BeApproximately(18.4861, 0.0001);
+        result.Value.Position!.Longitude.Should().BeApproximately(-69.9312, 0.0001);
+        result.Value.Position!.SpeedKph.Should().BeApproximately(25.5f, 0.1f);
+        result.Value.Position!.AltitudeM.Should().BeApproximately(45.2f, 0.1f);
+        result.Value.Position!.Heading.Should().BeApproximately(120.0f, 0.1f);
+        result.Value.Position!.Satellites.Should().Be(7);
+        result.Value.Position!.IsValid.Should().BeTrue();
+    }
 }

@@ -14,6 +14,7 @@ services:
       - "5432"
     volumes:
       - iot_postgres_data:/var/lib/postgresql/data
+      - iot_postgres_backups:/backups
     networks:
       - iot-network
     security_opt:
@@ -268,6 +269,8 @@ volumes:
   iot_dataprotection:
     driver: local
   iot_postgres_data:
+    driver: local
+  iot_postgres_backups:
     driver: local
   iot_redis_data:
     driver: local

@@ -24,3 +24,5 @@ publish/
 *.sqlite
 logs/
 data/
+backups/
+*.dump

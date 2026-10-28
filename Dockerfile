@@ -54,7 +54,7 @@ RUN apk add --no-cache icu-libs icu-data-full tzdata wget curl
 # subida OTA falla con "Permission denied". Creandolo aqui (y con el chown -R de abajo), un
 # volumen nuevo hereda uid 1000 y es escribible. OJO: un volumen YA creado como root
 # conserva su propiedad; hay que recrearlo al desplegar este arreglo (ver docker-compose.yml).
-RUN mkdir -p /app/data /app/logs /app/storage/firmware && \
+RUN mkdir -p /app/data/keys /app/logs /app/storage/firmware && \
     addgroup -g 1000 appgroup && \
     adduser -u 1000 -G appgroup -s /bin/sh -D appuser && \
     chown -R appuser:appgroup /app

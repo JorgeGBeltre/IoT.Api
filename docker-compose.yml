@@ -87,6 +87,8 @@ services:
       # campana OTA fallaba con "archivo fisico no encontrado" y no habia forma de
       # recuperarlo salvo volver a subir cada version.
       - iot_firmware:/app/storage
+      # Llaves DataProtection persistentes fuera del contenedor (Item 23)
+      - iot_dataprotection:/app/data/keys
       # Certificado del broker MQTTS (opt-in; solo se usa si MqttBroker__Tls=true). Pon el PFX en
       # ./mqtt-certs/broker.pfx en el host. NO se commitea (ver .gitignore). Ver DEVICE-SECURITY.md.
       - ${MQTT_CERTS_DIR:-./mqtt-certs}:/app/mqtt-certs:ro
@@ -262,6 +264,8 @@ volumes:
   # la subida nunca funciono en el contenedor endurecido):
   #   docker compose down && docker volume rm iotapi_iot_firmware && docker compose up -d --build
   iot_firmware:
+    driver: local
+  iot_dataprotection:
     driver: local
   iot_postgres_data:
     driver: local

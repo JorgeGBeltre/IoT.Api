@@ -32,14 +32,20 @@ public class FirmwareAuthorizationTests
                 AuthorizationPolicies.FirmwareManage,
                 policy => policy
                     .RequireAuthenticatedUser()
-                    .RequireAssertion(ctx => AuthorizationPolicies.HasAnyRole(ctx.User, firmwareRoles)));
+                    .RequireAssertion(ctx => AuthorizationPolicies.HasPermissionOrRole(
+                        ctx.User,
+                        IoT.Domain.Common.StandardPermissions.FirmwareManage,
+                        firmwareRoles)));
 
             var commandRoles = AuthorizationPolicies.ResolveDeviceCommandRoles(configuration);
             options.AddPolicy(
                 AuthorizationPolicies.DeviceCommand,
                 policy => policy
                     .RequireAuthenticatedUser()
-                    .RequireAssertion(ctx => AuthorizationPolicies.HasAnyRole(ctx.User, commandRoles)));
+                    .RequireAssertion(ctx => AuthorizationPolicies.HasPermissionOrRole(
+                        ctx.User,
+                        IoT.Domain.Common.StandardPermissions.DevicesCommand,
+                        commandRoles)));
         });
 
         return services.BuildServiceProvider().GetRequiredService<IAuthorizationService>();
@@ -201,5 +207,43 @@ public class FirmwareAuthorizationTests
                 .Select(a => a.Policy)
                 .Should().NotContain(AuthorizationPolicies.FirmwareManage);
         }
+    }
+
+    [Fact]
+    public async Task AUserWithFineGrainedPermissionClaim_CanManageFirmware_EvenWithNonAdminRole()
+    {
+        var authz = BuildAuthorizationService(EmptyConfig());
+
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.Name, "technician_user"),
+            new("tenant_id", Guid.NewGuid().ToString()),
+            new(ClaimTypes.Role, "CustomTechnician"),
+            new("permission", IoT.Domain.Common.StandardPermissions.FirmwareManage)
+        };
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+
+        var result = await authz.AuthorizeAsync(principal, null, AuthorizationPolicies.FirmwareManage);
+
+        result.Succeeded.Should().BeTrue("el claim explícito 'permission: firmware.manage' otorga acceso");
+    }
+
+    [Fact]
+    public async Task AUserWithFineGrainedPermissionClaim_CanExecuteDeviceCommand()
+    {
+        var authz = BuildAuthorizationService(EmptyConfig());
+
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.Name, "dispatcher_user"),
+            new("tenant_id", Guid.NewGuid().ToString()),
+            new(ClaimTypes.Role, "CustomDispatcher"),
+            new("permission", IoT.Domain.Common.StandardPermissions.DevicesCommand)
+        };
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+
+        var result = await authz.AuthorizeAsync(principal, null, AuthorizationPolicies.DeviceCommand);
+
+        result.Succeeded.Should().BeTrue("el claim explícito 'permission: devices.command' otorga acceso");
     }
 }

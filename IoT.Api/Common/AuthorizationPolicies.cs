@@ -160,4 +160,24 @@ public static class AuthorizationPolicies
 
         return false;
     }
+
+    /// <summary>
+    /// ¿Tiene el usuario el permiso fino requerido (claim "permission") o alguno de los roles de fallback?
+    /// Permite adopción gradual de RBAC fino (decisión D3) preservando compatibilidad absoluta.
+    /// </summary>
+    public static bool HasPermissionOrRole(System.Security.Claims.ClaimsPrincipal user, string permissionCode, string[] fallbackRoles)
+    {
+        // 1. Verificación directa de permiso fino en claims del token
+        foreach (var claim in user.Claims)
+        {
+            if ((claim.Type == "permission" || claim.Type == "permissions") &&
+                string.Equals(claim.Value, permissionCode, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        // 2. Fallback a roles tradicionales por nombre
+        return HasAnyRole(user, fallbackRoles);
+    }
 }

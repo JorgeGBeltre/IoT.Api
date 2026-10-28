@@ -25,6 +25,7 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
     private readonly ILogger<LoginCommandHandler> _logger;
     private readonly ITenantContext? _tenantContext;
     private readonly ICustomerRepository? _customerRepository;
+    private readonly IPermissionService? _permissionService;
 
     public LoginCommandHandler(
         IUserRepository userRepository,
@@ -34,7 +35,8 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
         IUnitOfWork unitOfWork,
         ILogger<LoginCommandHandler> logger,
         ITenantContext? tenantContext = null,
-        ICustomerRepository? customerRepository = null)
+        ICustomerRepository? customerRepository = null,
+        IPermissionService? permissionService = null)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
@@ -44,6 +46,7 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
         _logger = logger;
         _tenantContext = tenantContext;
         _customerRepository = customerRepository;
+        _permissionService = permissionService;
     }
 
     public async Task<Result<AuthTokenResult>> Handle(LoginCommand request, CancellationToken cancellationToken)
@@ -104,8 +107,12 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
             customerPath = customer?.Path;
         }
 
-        var tokenResult = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath);
-        _logger.LogInformation("User {Username} logged in successfully for Tenant {TenantId}", user.Username, user.TenantId);
+        var permissions = _permissionService != null
+            ? await _permissionService.GetEffectivePermissionsAsync(user.TenantId, user.Id, user.RoleName, cancellationToken)
+            : StandardPermissions.GetDefaultPermissionsForRole(user.RoleName);
+
+        var tokenResult = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath, permissions);
+        _logger.LogInformation("User {Username} logged in successfully for Tenant {TenantId} with {PermCount} permissions", user.Username, user.TenantId, permissions.Count);
 
         return Result<AuthTokenResult>.Success(tokenResult);
     }

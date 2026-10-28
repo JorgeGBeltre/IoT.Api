@@ -22,7 +22,21 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
         _logger = logger;
     }
 
-    public AuthTokenResult GenerateToken(User user, Guid tenantId, Guid? customerId = null, string? customerPath = null)
+    public AuthTokenResult GenerateToken(
+        User user,
+        Guid tenantId,
+        Guid? customerId = null,
+        string? customerPath = null)
+    {
+        return GenerateToken(user, tenantId, customerId, customerPath, null);
+    }
+
+    public AuthTokenResult GenerateToken(
+        User user,
+        Guid tenantId,
+        Guid? customerId,
+        string? customerPath,
+        IEnumerable<string>? permissions)
     {
         string secretKey = _configuration["Jwt:SecretKey"]
             ?? throw new InvalidOperationException("Critical Security Failure: 'Jwt:SecretKey' configuration is missing.");
@@ -76,6 +90,13 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
             claims.Add(new Claim("customer_path", customerPath));
         }
 
+        var permList = permissions?.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList()
+            ?? new List<string>();
+        foreach (var perm in permList)
+        {
+            claims.Add(new Claim("permission", perm));
+        }
+
         int expirationHours = 2;
         if (int.TryParse(_configuration["Jwt:ExpirationHours"], out int h) && h > 0)
         {
@@ -109,6 +130,7 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
             user.Email,
             user.RoleName,
             user.MustChangePassword,
-            expiresAt);
+            expiresAt,
+            permList);
     }
 }

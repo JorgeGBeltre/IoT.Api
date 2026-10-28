@@ -164,48 +164,58 @@ builder.Services.AddAuthorization(options =>
         .RequireAuthenticatedUser()
         .Build();
 
-    // Escribir firmware en hardware real exige un ROL explícito. Antes bastaba con estar
-    // autenticado: cualquier usuario del tenant podía subir un .bin y flashear la flota.
+    // Escribir firmware en hardware real exige un ROL o PERMISO explícito (RBAC fino - Decisión D3).
     var firmwareRoles = IoT.Api.Common.AuthorizationPolicies.ResolveFirmwareManageRoles(builder.Configuration);
     options.AddPolicy(
         IoT.Api.Common.AuthorizationPolicies.FirmwareManage,
         policy => policy
             .RequireAuthenticatedUser()
-            // No se usa RequireRole: compara el valor del claim distinguiendo mayúsculas y un
-            // usuario guardado como "admin" quedaba denegado. Ver AuthorizationPolicies.HasAnyRole.
-            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, firmwareRoles)));
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
+                ctx.User,
+                IoT.Domain.Common.StandardPermissions.FirmwareManage,
+                firmwareRoles)));
 
-    // Enviar un comando a un dispositivo también es accionamiento físico (apagar un relé),
-    // pero es la operación del día a día: su conjunto de roles por defecto es más amplio.
+    // Enviar un comando a un dispositivo también es accionamiento físico (apagar un relé).
     var commandRoles = IoT.Api.Common.AuthorizationPolicies.ResolveDeviceCommandRoles(builder.Configuration);
     options.AddPolicy(
         IoT.Api.Common.AuthorizationPolicies.DeviceCommand,
         policy => policy
             .RequireAuthenticatedUser()
-            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, commandRoles)));
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
+                ctx.User,
+                IoT.Domain.Common.StandardPermissions.DevicesCommand,
+                commandRoles)));
 
     var deviceManageRoles = IoT.Api.Common.AuthorizationPolicies.ResolveDeviceManageRoles(builder.Configuration);
     options.AddPolicy(
         IoT.Api.Common.AuthorizationPolicies.DeviceManage,
         policy => policy
             .RequireAuthenticatedUser()
-            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, deviceManageRoles)));
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
+                ctx.User,
+                IoT.Domain.Common.StandardPermissions.DevicesManage,
+                deviceManageRoles)));
 
     var tenantAdminRoles = IoT.Api.Common.AuthorizationPolicies.ResolveTenantAdminRoles(builder.Configuration);
     options.AddPolicy(
         IoT.Api.Common.AuthorizationPolicies.TenantAdmin,
         policy => policy
             .RequireAuthenticatedUser()
-            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, tenantAdminRoles)));
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
+                ctx.User,
+                IoT.Domain.Common.StandardPermissions.SettingsManage,
+                tenantAdminRoles)));
 
-    // Operar la jerarquía Customer (ADR-013 E8.4b). Sólo controla el ROL: el recorte por subárbol lo
-    // aplican la RLS de PostgreSQL y el filtro de EF, no esta política (ver AuthorizationPolicies.CustomerAdmin).
+    // Operar la jerarquía Customer (ADR-013 E8.4b). Exige permiso customers.manage o rol admin.
     var customerAdminRoles = IoT.Api.Common.AuthorizationPolicies.ResolveCustomerAdminRoles(builder.Configuration);
     options.AddPolicy(
         IoT.Api.Common.AuthorizationPolicies.CustomerAdmin,
         policy => policy
             .RequireAuthenticatedUser()
-            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasAnyRole(ctx.User, customerAdminRoles)));
+            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
+                ctx.User,
+                IoT.Domain.Common.StandardPermissions.CustomersManage,
+                customerAdminRoles)));
 });
 
 // 7. Swagger / OpenAPI Documentation

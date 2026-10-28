@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using IoT.Application.Common.Interfaces;
+using IoT.Domain.Common;
 using IoT.Domain.Entities;
 using IoT.Domain.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -131,6 +132,12 @@ public sealed class DatabaseSeeder
             //     (IgnoreQueryFilters), para que toda base existente quede con un nodo raíz por
             //     tenant y sin devices/users con CustomerId nulo. No cambia authz/RLS.
             await SeedRootCustomersAndBackfillAsync(cancellationToken);
+
+            // 3d. Sembrado de permisos estándar, roles de tenant y vinculación de usuarios (ADR-013, Decisión D3).
+            //     Idempotente: crea los permisos del catálogo StandardPermissions que no existan,
+            //     asegura los roles básicos (Admin, Operator, Viewer) por tenant con sus permisos por defecto,
+            //     y vincula RoleId en los usuarios que aún tengan RoleId nulo.
+            await SeedPermissionsAndRolesAsync(cancellationToken);
 
             // 4. Credenciales de bootstrap por tenant (reemplazan la antigua clave global
             //    única para todos los tenants — MEDIUM-2). Idempotente y FUERA del bloque de
@@ -369,6 +376,136 @@ public sealed class DatabaseSeeder
         await _context.SaveChangesAsync(cancellationToken);
         _logger.LogInformation("Customer raíz creado para el tenant {Code}.", tenant.Code);
         return root;
+    }
+
+    /// <summary>
+    /// Sembrado de catálogo de permisos estándar y roles por tenant (ADR-013, Decisión D3).
+    /// Asegura que el catálogo de permisos estándar exista en la tabla permissions,
+    /// que cada tenant tenga sus roles estándar (Admin, Operator, Viewer) con sus RolePermissions asociados,
+    /// y que los usuarios existentes sin RoleId queden vinculados a su Role correspondiente.
+    /// </summary>
+    private async Task SeedPermissionsAndRolesAsync(CancellationToken cancellationToken)
+    {
+        // 1. Catálogo global de permisos estándar
+        var existingPerms = await _context.Permissions.IgnoreQueryFilters()
+            .ToListAsync(cancellationToken);
+        var permsByCode = existingPerms.ToDictionary(p => p.Code, StringComparer.OrdinalIgnoreCase);
+
+        var newPerms = new List<Permission>();
+        foreach (var (code, name, module, description) in StandardPermissions.All)
+        {
+            if (!permsByCode.TryGetValue(code, out var permEntity))
+            {
+                var permResult = Permission.Create(code, name, module, description);
+                if (permResult.IsSuccess)
+                {
+                    newPerms.Add(permResult.Value);
+                    permsByCode[code] = permResult.Value;
+                }
+            }
+        }
+
+        if (newPerms.Count > 0)
+        {
+            await _context.Permissions.AddRangeAsync(newPerms, cancellationToken);
+            await _context.SaveChangesAsync(cancellationToken);
+            _logger.LogInformation("Se sembraron {Count} nuevos permisos estándar en el catálogo.", newPerms.Count);
+        }
+
+        // 2. Roles estándar y permisos por cada Tenant
+        var tenants = await _context.Tenants.IgnoreQueryFilters()
+            .ToListAsync(cancellationToken);
+
+        foreach (var tenant in tenants)
+        {
+            var existingRoles = await _context.Roles.IgnoreQueryFilters()
+                .Where(r => r.TenantId == tenant.Id)
+                .ToListAsync(cancellationToken);
+            var rolesByName = existingRoles.ToDictionary(r => r.Name, StringComparer.OrdinalIgnoreCase);
+
+            var standardRoles = new (string Name, string Description)[]
+            {
+                ("Admin", "Administrador de la organización con permisos de gestión completos"),
+                ("Operator", "Operador de flota con permisos de monitoreo, telemetría y comandos"),
+                ("Viewer", "Visualizador con permisos de solo lectura para mapa y reportes")
+            };
+
+            var rolesCreated = false;
+            foreach (var (rName, rDesc) in standardRoles)
+            {
+                if (!rolesByName.TryGetValue(rName, out var roleEntity))
+                {
+                    var roleResult = Role.Create(tenant.Id, rName, rDesc, isSystemRole: false);
+                    if (roleResult.IsSuccess)
+                    {
+                        await _context.Roles.AddAsync(roleResult.Value, cancellationToken);
+                        rolesByName[rName] = roleResult.Value;
+                        rolesCreated = true;
+                    }
+                }
+            }
+
+            if (rolesCreated)
+            {
+                await _context.SaveChangesAsync(cancellationToken);
+            }
+
+            // RolePermissions para cada rol del tenant
+            var existingRolePerms = await _context.RolePermissions.IgnoreQueryFilters()
+                .Where(rp => rp.TenantId == tenant.Id)
+                .ToListAsync(cancellationToken);
+            var existingRolePermSet = new HashSet<(Guid RoleId, Guid PermId)>(
+                existingRolePerms.Select(rp => (rp.RoleId, rp.PermissionId)));
+
+            var newRolePerms = new List<RolePermission>();
+            foreach (var (rName, roleEntity) in rolesByName)
+            {
+                var defaultPermCodes = StandardPermissions.GetDefaultPermissionsForRole(rName);
+                foreach (var code in defaultPermCodes)
+                {
+                    if (permsByCode.TryGetValue(code, out var permEntity))
+                    {
+                        if (!existingRolePermSet.Contains((roleEntity.Id, permEntity.Id)))
+                        {
+                            newRolePerms.Add(new RolePermission(Guid.NewGuid(), tenant.Id, roleEntity.Id, permEntity.Id));
+                            existingRolePermSet.Add((roleEntity.Id, permEntity.Id));
+                        }
+                    }
+                }
+            }
+
+            if (newRolePerms.Count > 0)
+            {
+                await _context.RolePermissions.AddRangeAsync(newRolePerms, cancellationToken);
+                await _context.SaveChangesAsync(cancellationToken);
+            }
+
+            // Vincular RoleId en usuarios sin rol asignado
+            var usersWithoutRole = await _context.Users.IgnoreQueryFilters()
+                .Where(u => u.TenantId == tenant.Id && u.RoleId == null)
+                .ToListAsync(cancellationToken);
+
+            var usersUpdated = false;
+            foreach (var user in usersWithoutRole)
+            {
+                if (rolesByName.TryGetValue(user.RoleName, out var roleEntity))
+                {
+                    user.AssignRole(roleEntity);
+                    usersUpdated = true;
+                }
+                else if (rolesByName.TryGetValue("Operator", out var fallbackRole))
+                {
+                    user.AssignRole(fallbackRole);
+                    usersUpdated = true;
+                }
+            }
+
+            if (usersUpdated)
+            {
+                await _context.SaveChangesAsync(cancellationToken);
+                _logger.LogInformation("Se vincularon roles para {Count} usuarios en el tenant {Code}.", usersWithoutRole.Count, tenant.Code);
+            }
+        }
     }
 
     /// <summary>Forma de cada entrada de <c>Bootstrap:Tenants</c> (alta de organización + admin de producción).</summary>

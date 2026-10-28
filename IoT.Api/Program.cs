@@ -47,10 +47,21 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
 // 4. SignalR — detailed errors sólo en desarrollo (no filtrar excepciones al cliente en prod)
-builder.Services.AddSignalR(options =>
+var signalRBuilder = builder.Services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
 });
+
+var redisSignalRConn = builder.Configuration["Redis:ConnectionString"]
+    ?? builder.Configuration.GetConnectionString("Redis");
+
+if (!string.IsNullOrWhiteSpace(redisSignalRConn))
+{
+    signalRBuilder.AddStackExchangeRedis(redisSignalRConn, redisOptions =>
+    {
+        redisOptions.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal("IoT.SignalR");
+    });
+}
 
 // 4b. ForwardedHeaders: la app corre detrás de un reverse proxy (nginx) que termina TLS.
 //     Sin esto, Request.IsHttps=false (cookie sin Secure) y la IP real se pierde (auditoría/rate limit).

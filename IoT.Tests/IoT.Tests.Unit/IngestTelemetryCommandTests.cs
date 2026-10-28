@@ -48,10 +48,14 @@ public class IngestTelemetryCommandTests
             _unitOfWorkMock.Object,
             _loggerMock.Object);
 
-        string payload = """
+        // Timestamp RELATIVO (reciente) para que el evento no caiga en la ventana anti-stale de 7
+        // días del handler y éste SÍ ejecute TryUpdateLatestPositionAsync. Un timestamp fijo se
+        // volvía obsoleto con el paso del tiempo y el handler saltaba la actualización de la posición.
+        string recentTimestamp = DateTime.UtcNow.AddMinutes(-5).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string payload = $$"""
         {
           "Device": { "ChipId": "GPS-ESP8266-99" },
-          "Timestamp": "2026-10-21T10:00:00Z",
+          "Timestamp": "{{recentTimestamp}}",
           "Details": {
             "accident": {
               "gps_data": { "latitude": 18.4861, "longitude": -69.9312, "speed": 60.0, "is_valid": true }

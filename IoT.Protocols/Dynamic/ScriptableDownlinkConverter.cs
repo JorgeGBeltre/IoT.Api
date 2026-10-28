@@ -1,9 +1,9 @@
 using System.Text;
+using Acornima.Ast;
 using IoT.Domain.Common;
 using IoT.Protocols.Contracts;
 using Jint;
 using Jint.Native;
-using Jint.Native.Object;
 
 namespace IoT.Protocols.Dynamic;
 
@@ -14,8 +14,13 @@ namespace IoT.Protocols.Dynamic;
 public sealed class ScriptableDownlinkConverter : IDownlinkConverter
 {
     private readonly string _converterId;
-    private readonly string _script;
     private readonly Func<DownlinkCommandRequest, bool>? _predicate;
+
+    // AST PREPARADO una vez por instancia y reutilizado (igual que el convertidor de uplink). La
+    // preparación va por JintSandbox.PrepareScript, que fija el RegexTimeout del script preparado al
+    // presupuesto del sandbox (2 s); Engine.PrepareScript directo horneaba el default de 10 s. Lazy: un
+    // script con sintaxis inválida lanza al primer uso y se traduce a un Result de fallo.
+    private readonly Lazy<Prepared<Script>> _preparedScript;
 
     public string ConverterId => _converterId;
 
@@ -27,8 +32,8 @@ public sealed class ScriptableDownlinkConverter : IDownlinkConverter
             throw new ArgumentException("El script JavaScript no puede ser nulo ni vacío.", nameof(script));
 
         _converterId = converterId;
-        _script = script;
         _predicate = predicate;
+        _preparedScript = new Lazy<Prepared<Script>>(() => JintSandbox.PrepareScript(script));
     }
 
     public bool CanHandle(DownlinkCommandRequest command)
@@ -46,14 +51,9 @@ public sealed class ScriptableDownlinkConverter : IDownlinkConverter
     {
         try
         {
-            var engine = new Engine(options =>
-            {
-                options.LimitMemory(4 * 1024 * 1024);
-                options.TimeoutInterval(TimeSpan.FromSeconds(2));
-                options.MaxStatements(5000);
-            });
+            var engine = JintSandbox.CreateEngine();
 
-            engine.Execute(_script);
+            engine.Execute(_preparedScript.Value);
 
             var encodeFunc = engine.GetValue("encode");
             if (encodeFunc.IsUndefined() || !encodeFunc.IsCallable())

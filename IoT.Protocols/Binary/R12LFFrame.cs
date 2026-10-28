@@ -201,73 +201,123 @@ public sealed record R12LFFrame
     }
 
     /// <summary>
-    /// Decodifica tramas de identidad de tarjeta SIM / módem celular (SEEWORLD R12L-F §5.5).
-    /// Protocolo 0x94: InfoType (1B = 0x0A) + IMEI (8B BCD) + IMSI (8B BCD) + ICCID (10B BCD) = 27 bytes.
-    /// Protocolo 0x90: InfoType opcional (1B) + IMSI (8B BCD).
+    /// Decodifica las tramas de IDENTIDAD de SIM / módem celular de la familia Concox/GT06
+    /// (SEEWORLD R12L-F). Estas tramas NO llevan posición ni telemetría, sólo identidad.
+    ///   0x94 (ICCID info): según el "R12L-F protocol" §5.5 el contenido es
+    ///       InfoType(1 = 0x0A fijo) + IMEI(8) + IMSI(8) + ICCID(10) = 27 bytes, TODO en BCD
+    ///       (cada byte = 2 dígitos decimales, nibble alto primero). El IMEI/IMSI de 15
+    ///       dígitos se rellenan con un '0' a la izquierda (16 dígitos); un número de
+    ///       longitud impar se rellena con un nibble 0xF a la derecha.
+    ///   0x90 (IMSI info): el spec sólo lista el tipo (tabla §2), sin tabla de layout
+    ///       propia, por lo que se usa la MISMA convención de la familia (InfoType 0x0A
+    ///       opcional + IMSI BCD de 8 bytes). NO se inventan offsets: si la subcabecera
+    ///       documentada no está, se decodifica el bloque BCD disponible y la validación de
+    ///       plausibilidad decide.
+    ///
+    /// La decodificación sigue la convención ESTÁNDAR Concox/GT06 y DEBE validarse contra
+    /// una trama 0x79 0x90/0x94 REAL de un R12L-F físico. Entre tanto, la decodificación es
+    /// FAIL-SAFE: BCD estricto (un nibble no decimal 0xA-0xE invalida el bloque) + validación
+    /// de plausibilidad por campo. Si el contenido NO cuadra con el formato de ICCID/IMSI, el
+    /// campo se deja SIN asignar (null) en vez de poblar la identidad con basura. (El propio
+    /// vector de ejemplo del spec trae un nibble 0xB en el ICCID, que este guardado rechaza.)
     /// </summary>
     public (string? Imei, string? Imsi, string? Iccid) DecodeIccidPacket()
     {
-        if (InformationContent.Length < 8)
-            return (null, null, null);
-
-        if (ProtocolNumber == ProtocolIccid || ProtocolNumber == 0x94)
+        if (ProtocolNumber == ProtocolIccid)
         {
-            int offset = 0;
+            // Layout documentado §5.5: 0x0A + IMEI(8) + IMSI(8) + ICCID(10) = 27 bytes.
             if (InformationContent.Length >= 27 && InformationContent[0] == 0x0A)
             {
-                offset = 1;
+                var span = InformationContent.AsSpan();
+                string? imei = NormalizeFixed15(TryDecodeBcd(span.Slice(1, 8)));
+                string? imsi = NormalizeFixed15(TryDecodeBcd(span.Slice(9, 8)));
+                string? iccid = TryDecodeBcd(span.Slice(17, 10));
+                return (
+                    IsPlausibleImei(imei) ? imei : null,
+                    IsPlausibleImsi(imsi) ? imsi : null,
+                    IsPlausibleIccid(iccid) ? iccid : null);
             }
 
-            string? imei = null;
-            string? imsi = null;
-            string? iccid = null;
-
-            if (InformationContent.Length >= offset + 8)
-            {
-                var sbImei = new StringBuilder(16);
-                foreach (byte b in InformationContent.AsSpan(offset, 8))
-                    sbImei.Append(b.ToString("X2"));
-                string rawImei = sbImei.ToString();
-                imei = rawImei.StartsWith('0') ? rawImei[1..] : rawImei;
-                offset += 8;
-            }
-
-            if (InformationContent.Length >= offset + 8)
-            {
-                var sbImsi = new StringBuilder(16);
-                foreach (byte b in InformationContent.AsSpan(offset, 8))
-                    sbImsi.Append(b.ToString("X2"));
-                string rawImsi = sbImsi.ToString();
-                imsi = rawImsi.StartsWith('0') ? rawImsi[1..] : rawImsi;
-                offset += 8;
-            }
-
-            if (InformationContent.Length >= offset + 10)
-            {
-                var sbIccid = new StringBuilder(20);
-                foreach (byte b in InformationContent.AsSpan(offset, 10))
-                    sbIccid.Append(b.ToString("x2"));
-                iccid = sbIccid.ToString();
-            }
-
-            return (imei, imsi, iccid);
+            // Sin la subcabecera documentada no inventamos offsets: se intenta el bloque
+            // completo como ICCID BCD y la plausibilidad decide.
+            string? iccidOnly = TryDecodeBcd(InformationContent);
+            return (null, null, IsPlausibleIccid(iccidOnly) ? iccidOnly : null);
         }
-        else if (ProtocolNumber == ProtocolImsi || ProtocolNumber == 0x90)
+
+        if (ProtocolNumber == ProtocolImsi)
         {
-            int offset = (InformationContent.Length >= 9 && InformationContent[0] == 0x0A) ? 1 : 0;
-            if (InformationContent.Length >= offset + 8)
-            {
-                var sbImsi = new StringBuilder(16);
-                foreach (byte b in InformationContent.AsSpan(offset, 8))
-                    sbImsi.Append(b.ToString("X2"));
-                string rawImsi = sbImsi.ToString();
-                string imsi = rawImsi.StartsWith('0') ? rawImsi[1..] : rawImsi;
-                return (null, imsi, null);
-            }
+            // 0x90: InfoType 0x0A opcional + IMSI BCD (8 bytes). Si no está, bloque completo.
+            ReadOnlySpan<byte> body = InformationContent;
+            if (body.Length >= 9 && body[0] == 0x0A)
+                body = body[1..];
+            string? imsi = NormalizeFixed15(TryDecodeBcd(body.Length >= 8 ? body[..8] : body));
+            return (null, IsPlausibleImsi(imsi) ? imsi : null, null);
         }
 
         return (null, null, null);
     }
+
+    /// <summary>
+    /// Convierte un bloque BCD a dígitos decimales (cada byte = 2 dígitos, nibble alto
+    /// primero). El nibble 0xF es relleno de longitud impar y SÓLO se admite al final; un
+    /// nibble no decimal (0xA-0xE) o un dígito tras el relleno invalidan el bloque (devuelve
+    /// null) para no fabricar una identidad a partir de bytes que no son BCD.
+    /// </summary>
+    private static string? TryDecodeBcd(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length == 0)
+            return null;
+
+        var sb = new StringBuilder(bytes.Length * 2);
+        bool padSeen = false;
+        foreach (byte b in bytes)
+        {
+            if (!AppendBcdNibble(sb, (b >> 4) & 0x0F, ref padSeen)) return null;
+            if (!AppendBcdNibble(sb, b & 0x0F, ref padSeen)) return null;
+        }
+
+        return sb.Length > 0 ? sb.ToString() : null;
+    }
+
+    private static bool AppendBcdNibble(StringBuilder sb, int nibble, ref bool padSeen)
+    {
+        if (nibble == 0x0F)
+        {
+            padSeen = true; // relleno de longitud impar: válido sólo al final
+            return true;
+        }
+
+        if (nibble > 9 || padSeen)
+            return false; // 0xA-0xE no es decimal; un dígito tras el relleno es malformado
+
+        sb.Append((char)('0' + nibble));
+        return true;
+    }
+
+    /// <summary>
+    /// IMEI/IMSI son de 15 dígitos pero ocupan 8 bytes (16 nibbles); el spec §5.5 los rellena
+    /// con un '0' a la izquierda. Se quita ese cero de relleno para dejar 15 dígitos. Un
+    /// bloque que ya trae 15 (relleno 0xF al final, ya descartado) no se toca.
+    /// </summary>
+    private static string? NormalizeFixed15(string? digits)
+        => digits is { Length: 16 } && digits[0] == '0' ? digits[1..] : digits;
+
+    private static bool IsAllDigits(string s)
+    {
+        foreach (char c in s)
+            if (c is < '0' or > '9') return false;
+        return true;
+    }
+
+    // IMEI/IMSI plausibles = exactamente 15 dígitos decimales.
+    private static bool IsPlausibleImei(string? d) => d is { Length: 15 } && IsAllDigits(d);
+    private static bool IsPlausibleImsi(string? d) => d is { Length: 15 } && IsAllDigits(d);
+
+    // ICCID plausible = 19-20 dígitos decimales que empiezan por 89 (prefijo de
+    // telecomunicaciones ITU-T E.118). Es el guardado fail-safe contra contenido que no es
+    // un ICCID real.
+    private static bool IsPlausibleIccid(string? d)
+        => d is { Length: >= 19 and <= 20 } && IsAllDigits(d) && d.StartsWith("89", StringComparison.Ordinal);
 
     public (GeoPosition? Position, DateTime RecordedAt) DecodeLocationPacket()
         => DecodeLocationPacket(ProtocolNumber);

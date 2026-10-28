@@ -3,6 +3,7 @@ using System.Text.Json;
 using FluentAssertions;
 using IoT.Protocols.Binary;
 using IoT.Protocols.Tcp;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace IoT.Tests.IoT.Tests.Unit;
@@ -18,6 +19,57 @@ public sealed class TcpProtocolHandlerTests
     private static List<byte> Hex(string hex) => new(Convert.FromHexString(hex.Replace(" ", string.Empty)));
 
     private static string ToHex(byte[] bytes) => Convert.ToHexString(bytes);
+
+    // ---- Constructores de tramas 0x79 (longitud de 2 bytes) y vectores BCD -------------
+    // Replican el framing del equipo recalculando el CRC-ITU, para probar 0x90/0x94.
+    private static List<byte> BuildFrame79(byte protocol, byte[] content, ushort serial)
+    {
+        int length = content.Length + 5; // protocol + content + serial(2) + crc(2)
+        var body = new List<byte> { (byte)(length >> 8), (byte)(length & 0xFF), protocol };
+        body.AddRange(content);
+        body.Add((byte)(serial >> 8));
+        body.Add((byte)(serial & 0xFF));
+        ushort crc = R12LFCrc16.Compute(body.ToArray()); // Packet Length (2) .. Serial
+        var frame = new List<byte> { 0x79, 0x79 };
+        frame.AddRange(body);
+        frame.Add((byte)(crc >> 8));
+        frame.Add((byte)(crc & 0xFF));
+        frame.Add(0x0D);
+        frame.Add(0x0A);
+        return frame;
+    }
+
+    // IMEI/IMSI de 15 dígitos: BCD de 8 bytes con relleno '0' a la izquierda (spec §5.5).
+    private static byte[] BcdLeftPadded(string digits, int byteLen)
+    {
+        string padded = digits.PadLeft(byteLen * 2, '0');
+        var bytes = new byte[byteLen];
+        for (int i = 0; i < byteLen; i++)
+            bytes[i] = (byte)(((padded[i * 2] - '0') << 4) | (padded[i * 2 + 1] - '0'));
+        return bytes;
+    }
+
+    // ICCID: BCD con relleno de nibble 0xF a la derecha cuando la longitud es impar.
+    private static byte[] BcdRightPaddedF(string digits, int byteLen)
+    {
+        string padded = digits.PadRight(byteLen * 2, 'F');
+        var bytes = new byte[byteLen];
+        for (int i = 0; i < byteLen; i++)
+        {
+            int hi = padded[i * 2] == 'F' ? 0xF : padded[i * 2] - '0';
+            int lo = padded[i * 2 + 1] == 'F' ? 0xF : padded[i * 2 + 1] - '0';
+            bytes[i] = (byte)((hi << 4) | lo);
+        }
+        return bytes;
+    }
+
+    // Contenido documentado del 0x94: InfoType(0x0A) + IMEI(8) + IMSI(8) + ICCID(10).
+    private static byte[] Build0x94Content(string imei15, string imsi15, string iccid) =>
+        new byte[] { 0x0A }
+            .Concat(BcdLeftPadded(imei15, 8))
+            .Concat(BcdLeftPadded(imsi15, 8))
+            .Concat(BcdRightPaddedF(iccid, 10))
+            .ToArray();
 
     // =========================================================================
     // Dialecto Mictrack M558G-V2: posición 0x22 y alarma 0x26 (mismo cuerpo que
@@ -586,10 +638,12 @@ public sealed class TcpProtocolHandlerTests
     }
 
     [Fact]
-    public void Gt06_Iccid0x94_DecodesImeiImsiIccidCorrectly()
+    public void Gt06_Iccid0x94_RealSpecVector_DecodesImeiImsi_RejectsNonDecimalIccid()
     {
-        // Vector oficial del SEEWORLD R12L-F Protocol Spec (§5.5, línea 954):
-        // 79 79 00 20 94 0a 0358091088001558 0460041990205313 898607b9111730120313 0009 a072 0d 0a
+        // Vector del R12L-F Protocol Spec (§5.5, línea 954). IMEI/IMSI son BCD válidos, pero
+        // el ICCID del propio documento trae el byte 0xB9 (nibble 0xB, NO decimal): el guardado
+        // fail-safe lo rechaza en vez de emitir "898607b9..." (identidad con basura). IMEI/IMSI
+        // sí se pueblan. El layout exacto debe confirmarse con una trama real del R12L-F físico.
         var buf = Hex("79790020940a03580910880015580460041990205313898607b91117301203130009a0720d0a");
         var handler = new Gt06TcpHandler();
 
@@ -607,15 +661,91 @@ public sealed class TcpProtocolHandlerTests
         var root = doc.RootElement;
         root.GetProperty("imei").GetString().Should().Be("358091088001558");
         root.GetProperty("imsi").GetString().Should().Be("460041990205313");
-        root.GetProperty("iccid").GetString().Should().Be("898607b9111730120313");
+        root.GetProperty("iccid").ValueKind.Should().Be(JsonValueKind.Null,
+            "el ICCID del vector del spec no es BCD decimal (0xB9) y el fail-safe no lo puebla");
         root.GetProperty("packet_type").GetString().Should().Be("iccid_info");
         root.GetProperty("protocol_number").GetString().Should().Be("0x94");
         buf.Should().BeEmpty();
     }
 
     [Fact]
-    public void Gt06Adapter_Decodes0x94Frame_PopulatesAttributesAndDeviceIdentifier()
+    public void Gt06_Iccid0x94_CleanBcdVector_DecodesIccidAndEmitsAttribute()
     {
+        // (a) ICCID BCD LIMPIO (20 dígitos, empieza por 89): decodifica al string esperado y
+        // emite el atributo iccid. Mismo vector que §5.5 pero con el nibble corregido (0x69).
+        const string imei = "358091088001558";
+        const string imsi = "460041990205313";
+        const string iccid = "89860769111730120313";
+        var buf = BuildFrame79(0x94, Build0x94Content(imei, imsi, iccid), serial: 9);
+        var handler = new Gt06TcpHandler();
+
+        handler.TryReadFrame(buf, boundImei: imei, out var outcome).Should().BeTrue();
+        outcome!.Ingest.Should().BeTrue();
+        outcome.Ack.Should().BeNull();
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("imei").GetString().Should().Be(imei);
+        root.GetProperty("imsi").GetString().Should().Be(imsi);
+        root.GetProperty("iccid").GetString().Should().Be(iccid);
+        root.GetProperty("packet_type").GetString().Should().Be("iccid_info");
+    }
+
+    [Fact]
+    public void Gt06_Imsi0x90_BcdVector_DecodesImsiAndEmitsAttribute()
+    {
+        // (b) 0x90 (IMSI info): InfoType 0x0A + IMSI BCD de 15 dígitos -> imsi esperado.
+        const string imsi = "460041990205313";
+        byte[] content = new byte[] { 0x0A }.Concat(BcdLeftPadded(imsi, 8)).ToArray();
+        var buf = BuildFrame79(0x90, content, serial: 4);
+        var handler = new Gt06TcpHandler();
+
+        handler.TryReadFrame(buf, boundImei: "358091088001558", out var outcome).Should().BeTrue();
+        outcome!.Ingest.Should().BeTrue("la trama trae IDENTIDAD de SIM; se procesa sin exigir posición");
+        outcome.Ack.Should().BeNull("§5.5 no define ACK para 0x90");
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("imsi").GetString().Should().Be(imsi);
+        root.GetProperty("iccid").ValueKind.Should().Be(JsonValueKind.Null);
+        root.GetProperty("packet_type").GetString().Should().Be("imsi_info");
+    }
+
+    [Fact]
+    public void Gt06_IccidImsi_ImplausibleContent_FailSafe_LeavesIdentityNull_NoException()
+    {
+        // (c) FAIL-SAFE: contenido que NO cuadra -> Iccid/Imsi NO poblados (null), sin excepción.
+        var handler = new Gt06TcpHandler();
+
+        // (c1) ICCID de 20 díg pero con prefijo equivocado (no empieza por 89): se rechaza
+        //      por plausibilidad aunque sea BCD decimal válido.
+        byte[] wrongContent = Build0x94Content("358091088001558", "460041990205313", "12345678901234567890");
+        var buf1 = BuildFrame79(0x94, wrongContent, serial: 1);
+        handler.TryReadFrame(buf1, boundImei: "358091088001558", out var o1).Should().BeTrue();
+        using (var doc = JsonDocument.Parse(o1!.IngestPayload!))
+        {
+            doc.RootElement.GetProperty("iccid").ValueKind.Should().Be(JsonValueKind.Null,
+                "un ICCID de 20 díg que no empieza por 89 no es plausible");
+        }
+
+        // (c2) Contenido con nibbles no decimales (0xAA...) para 0x90: no decodifica y no lanza.
+        byte[] garbage = new byte[] { 0x0A, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xAB, 0xCD, 0xEF };
+        var buf2 = BuildFrame79(0x90, garbage, serial: 2);
+        Action act = () => handler.TryReadFrame(buf2, boundImei: "358091088001558", out _);
+        act.Should().NotThrow();
+        handler.TryReadFrame(BuildFrame79(0x90, garbage, serial: 3), boundImei: "358091088001558", out var o2).Should().BeTrue();
+        using (var doc = JsonDocument.Parse(o2!.IngestPayload!))
+        {
+            doc.RootElement.GetProperty("imsi").ValueKind.Should().Be(JsonValueKind.Null,
+                "contenido no BCD no puebla identidad");
+        }
+    }
+
+    [Fact]
+    public void Gt06Adapter_Decodes0x94Frame_PopulatesImeiImsi_RejectsNonDecimalIccid()
+    {
+        // Ruta hex del adapter con el vector del spec: IMEI/IMSI se pueblan; el ICCID con 0xB9
+        // NO (fail-safe), así que el atributo iccid queda ausente en vez de con basura.
         var adapter = new global::IoT.Protocols.Adapters.Gt06ProtocolAdapter("SEEWORLD", "R12L-F");
         const string rawHex = "79790020940a03580910880015580460041990205313898607b91117301203130009a0720d0a";
 
@@ -626,7 +756,98 @@ public sealed class TcpProtocolHandlerTests
         ev.DeviceIdentifier.Should().Be("358091088001558");
         ev.Attributes.Should().ContainKey("imei").WhoseValue.Should().Be("358091088001558");
         ev.Attributes.Should().ContainKey("imsi").WhoseValue.Should().Be("460041990205313");
-        ev.Attributes.Should().ContainKey("iccid").WhoseValue.Should().Be("898607b9111730120313");
+        ev.Attributes.Should().NotContainKey("iccid");
         ev.Attributes.Should().ContainKey("packet_type").WhoseValue.Should().Be("iccid_info");
+    }
+
+    [Fact]
+    public void Gt06Adapter_Decodes0x94Frame_CleanIccid_PopulatesIccidAttribute()
+    {
+        var adapter = new global::IoT.Protocols.Adapters.Gt06ProtocolAdapter("SEEWORLD", "R12L-F");
+        string rawHex = ToHex(BuildFrame79(0x94, Build0x94Content("358091088001558", "460041990205313", "89860769111730120313"), serial: 9).ToArray());
+
+        var ev = adapter.Decode("tcp/seeworld/r12l-f", rawHex).Value;
+
+        ev.Attributes.Should().ContainKey("iccid").WhoseValue.Should().Be("89860769111730120313");
+        ev.Attributes.Should().ContainKey("imsi").WhoseValue.Should().Be("460041990205313");
+    }
+
+    // =========================================================================
+    // SEGURIDAD: la identidad de la SESIÓN la fija el LOGIN (0x01). Una trama de
+    // identidad SIM 0x94/0x90 NUNCA puede re-identificar ni re-atribuir la sesión
+    // a otro IMEI (otro dispositivo/tenant) saltándose la autenticación del login.
+    // =========================================================================
+
+    [Fact]
+    public void Gt06_Iccid0x94_WithImeiDifferentFromBound_KeepsBoundIdentity_LogsDiscrepancy_NoReattribution()
+    {
+        // (a) Sesión autenticada con boundImei = X. Llega un 0x94 cuyo IMEI embebido = Y (otro
+        // equipo). La identidad/atribución DEBE seguir siendo X (no re-enlaza a Y), se registra
+        // la discrepancia (posible suplantación) y el ICCID/IMSI del 0x94 se adjunta a X.
+        const string boundImei = "358091088001558"; // X (identidad del login)
+        const string frameImei = "860123456789012"; // Y (IMEI de OTRO dispositivo)
+        const string imsi = "460041990205313";
+        const string iccid = "89860769111730120313";
+        var buf = BuildFrame79(0x94, Build0x94Content(frameImei, imsi, iccid), serial: 7);
+        var logger = new CapturingLogger<Gt06TcpHandler>();
+        var handler = new Gt06TcpHandler(logger);
+
+        handler.TryReadFrame(buf, boundImei: boundImei, out var outcome).Should().BeTrue();
+
+        outcome!.IdentifiesSession.Should().BeFalse("una trama de identidad SIM no re-identifica una sesión ya autenticada");
+        outcome.SessionImei.Should().Be(boundImei, "la identidad de la sesión la fija el login, no la trama");
+        outcome.IngestTopic.Should().Be($"devices/{boundImei}/telemetry", "la telemetría se atribuye a X, no a Y");
+        outcome.Ingest.Should().BeTrue();
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("imei").GetString().Should().Be(boundImei, "no se re-atribuye al IMEI de la trama");
+        root.GetProperty("imsi").GetString().Should().Be(imsi, "el IMSI del 0x94 se adjunta a X");
+        root.GetProperty("iccid").GetString().Should().Be(iccid, "el ICCID del 0x94 se adjunta a X");
+
+        logger.Entries.Should().Contain(e =>
+            e.Level == LogLevel.Warning && e.Message.Contains(frameImei) && e.Message.Contains(boundImei),
+            "se registra la discrepancia de IMEI como posible suplantación");
+    }
+
+    [Fact]
+    public void Gt06_Iccid0x94_WithImeiEqualToBound_PopulatesIccidImsi_WithoutChangingIdentity()
+    {
+        // (b) 0x94 cuyo IMEI embebido == boundImei: pobla ICCID/IMSI con normalidad, sin cambiar
+        // la identidad y sin marcar IdentifiesSession ni registrar discrepancia.
+        const string imei = "358091088001558";
+        const string imsi = "460041990205313";
+        const string iccid = "89860769111730120313";
+        var buf = BuildFrame79(0x94, Build0x94Content(imei, imsi, iccid), serial: 9);
+        var logger = new CapturingLogger<Gt06TcpHandler>();
+        var handler = new Gt06TcpHandler(logger);
+
+        handler.TryReadFrame(buf, boundImei: imei, out var outcome).Should().BeTrue();
+
+        outcome!.IdentifiesSession.Should().BeFalse();
+        outcome.SessionImei.Should().Be(imei);
+        outcome.IngestTopic.Should().Be($"devices/{imei}/telemetry");
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("imei").GetString().Should().Be(imei);
+        root.GetProperty("imsi").GetString().Should().Be(imsi);
+        root.GetProperty("iccid").GetString().Should().Be(iccid);
+
+        logger.Entries.Should().NotContain(e => e.Level == LogLevel.Warning,
+            "IMEI coincidente: no hay discrepancia que registrar");
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public readonly List<(LogLevel Level, string Message)> Entries = new();
+
+        IDisposable? ILogger.BeginScope<TState>(TState state) => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, formatter(state, exception)));
     }
 }

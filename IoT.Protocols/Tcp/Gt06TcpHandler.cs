@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using IoT.Protocols.Binary;
+using Microsoft.Extensions.Logging;
 
 namespace IoT.Protocols.Tcp;
 
@@ -12,6 +13,12 @@ namespace IoT.Protocols.Tcp;
 /// </summary>
 public class Gt06TcpHandler : ITcpProtocolHandler
 {
+    private readonly ILogger? _logger;
+
+    // ILogger OPCIONAL (default null) para no romper los call sites que hacen
+    // `new Gt06TcpHandler()` (tests, wiring de familias) ni la subclase MictrackTcpHandler.
+    public Gt06TcpHandler(ILogger<Gt06TcpHandler>? logger = null) => _logger = logger;
+
     public virtual string Family => "GT06";
 
     /// <summary>
@@ -203,12 +210,60 @@ public class Gt06TcpHandler : ITcpProtocolHandler
 
             case R12LFFrame.ProtocolIccid:
             case R12LFFrame.ProtocolImsi:
+                // Tramas 0x94 (ICCID) / 0x90 (IMSI): llevan IDENTIDAD de la SIM, NO posición
+                // ni telemetría, así que se procesan como atributo (iccid/imsi, en el
+                // allow-list CLIENT) sin exigir una posición. El decode es BCD fail-safe:
+                // si el contenido no cuadra con el formato (plausibilidad), el campo queda
+                // null y NO se puebla la identidad con basura (ver R12LFFrame.DecodeIccidPacket).
                 var (iccidImei, iccidImsi, iccidVal) = frame.DecodeIccidPacket();
-                string? effectiveImei = iccidImei ?? boundImei;
+
+                // SEGURIDAD: la identidad de la SESIÓN la fija el LOGIN (0x01) y es AUTORITATIVA
+                // durante toda la sesión. Una trama de identidad SIM (0x94/0x90) NUNCA
+                // re-identifica ni re-enlaza la sesión. Si el IMEI embebido pudiera sobrescribir
+                // el boundImei, un equipo ya logueado (o un atacante en su propia sesión TCP)
+                // enviaría un 0x94 con el IMEI de OTRO dispositivo/tenant para re-atribuirse su
+                // telemetría saltándose la autenticación del login.
+                string? sessionImei;
+                bool identifiesSession;
+                if (!string.IsNullOrWhiteSpace(boundImei))
+                {
+                    // Sesión YA autenticada: la identidad es SIEMPRE el boundImei del login. La
+                    // trama sólo puebla ICCID/IMSI del dispositivo ya enlazado; no identifica ni
+                    // sustituye la identidad.
+                    sessionImei = boundImei;
+                    identifiesSession = false;
+
+                    // Discrepancia: el IMEI embebido difiere del de la sesión -> se CONSERVA el
+                    // boundImei del login y se registra (posible suplantación); no se re-atribuye.
+                    if (!string.IsNullOrWhiteSpace(iccidImei) &&
+                        !string.Equals(iccidImei, boundImei, StringComparison.Ordinal))
+                        _logger?.LogWarning(
+                            "Trama GT06 {Proto} con IMEI embebido {FrameImei} distinto del IMEI autenticado de la sesión {BoundImei}; posible suplantación. Se conserva la identidad del login y NO se re-atribuye la telemetría.",
+                            canonical == R12LFFrame.ProtocolIccid ? "0x94 (ICCID)" : "0x90 (IMSI)",
+                            iccidImei, boundImei);
+                }
+                else
+                {
+                    // Caso borde: trama de identidad SIM sin login previo. NO se confía ciegamente
+                    // en el IMEI de la trama: se marca IdentifiesSession para que la capa de sesión
+                    // aplique la MISMA compuerta de adopción que el login 0x01 (registrado + Active,
+                    // tenant derivado del dispositivo). Sin IMEI plausible no identifica nada.
+                    sessionImei = string.IsNullOrWhiteSpace(iccidImei) ? null : iccidImei;
+                    identifiesSession = sessionImei != null;
+                }
+
+                if (canonical == R12LFFrame.ProtocolIccid && iccidVal is null && frame.InformationContent.Length > 0)
+                    _logger?.LogWarning(
+                        "Trama GT06 0x94 (ICCID) con {Len} bytes de contenido que no cuadran con un ICCID BCD plausible (19-20 dígitos, prefijo 89); identidad no poblada. Validar el layout contra una trama real del R12L-F físico.",
+                        frame.InformationContent.Length);
+                if (canonical == R12LFFrame.ProtocolImsi && iccidImsi is null && frame.InformationContent.Length > 0)
+                    _logger?.LogWarning(
+                        "Trama GT06 0x90 (IMSI) con {Len} bytes de contenido que no cuadran con un IMSI BCD de 15 dígitos; identidad no poblada. Validar el layout contra una trama real del R12L-F físico.",
+                        frame.InformationContent.Length);
 
                 var iccidPayload = new
                 {
-                    imei = effectiveImei ?? string.Empty,
+                    imei = sessionImei ?? string.Empty,
                     imsi = iccidImsi,
                     iccid = iccidVal,
                     packet_type = canonical == R12LFFrame.ProtocolIccid ? "iccid_info" : "imsi_info",
@@ -219,11 +274,11 @@ public class Gt06TcpHandler : ITcpProtocolHandler
 
                 outcome = new TcpFrameOutcome
                 {
-                    SessionImei = !string.IsNullOrWhiteSpace(effectiveImei) ? effectiveImei : null,
-                    IdentifiesSession = !string.IsNullOrWhiteSpace(effectiveImei),
+                    SessionImei = !string.IsNullOrWhiteSpace(sessionImei) ? sessionImei : null,
+                    IdentifiesSession = identifiesSession,
                     Ack = null, // Spec R12L-F §5.5 no define respuesta ACK para 0x94/0x90
-                    Ingest = !string.IsNullOrEmpty(effectiveImei),
-                    IngestTopic = $"devices/{effectiveImei}/telemetry",
+                    Ingest = !string.IsNullOrEmpty(sessionImei),
+                    IngestTopic = $"devices/{sessionImei}/telemetry",
                     IngestPayload = JsonSerializer.Serialize(iccidPayload),
                     TransportProtocol = string.Empty,
                 };

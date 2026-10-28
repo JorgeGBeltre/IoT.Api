@@ -637,6 +637,44 @@ namespace IoT.Infrastructure.Migrations
                     b.ToTable("permissions", (string)null);
                 });
 
+            modelBuilder.Entity("IoT.Domain.Entities.ProtocolConverterScript", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DownlinkScript")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("ProfileKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UplinkScript")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "ProfileKey")
+                        .IsUnique();
+
+                    b.ToTable("protocol_converter_scripts", (string)null);
+                });
+
             modelBuilder.Entity("IoT.Domain.Entities.Role", b =>
                 {
                     b.Property<Guid>("Id")

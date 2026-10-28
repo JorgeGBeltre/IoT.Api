@@ -61,6 +61,7 @@ public static class DependencyInjection
         services.AddScoped<IMcpFleetService, Services.McpFleetService>();
         services.AddScoped<IMqttBrokerConfigRepository, MqttBrokerConfigRepository>();
         services.AddScoped<ITenantSettingsRepository, TenantSettingsRepository>();
+        services.AddScoped<IProtocolConverterScriptRepository, ProtocolConverterScriptRepository>();
         services.AddScoped<IFirmwareVersionRecordRepository, FirmwareVersionRecordRepository>();
         services.AddScoped<IFirmwareOtaService, Services.FirmwareOtaService>();
         services.AddScoped<IDevicePresenceService, Services.DevicePresenceService>();
@@ -140,6 +141,12 @@ public static class DependencyInjection
 
         // Declarative Device Profiles Registry & Topic Routing (E2-02, E3-02)
         services.AddSingleton<IProtocolRegistry>(_ => ProtocolRegistry.CreateDefault());
+
+        // Convertidores dinámicos por tenant (adopción ThingsBoard, TB-2): la caché de conectores
+        // resueltos es de PROCESO (singleton); el resolver es scoped porque consulta la base vía el
+        // repositorio (DbContext scoped) al expirar el TTL.
+        services.AddSingleton<Protocols.ITenantConverterScriptCache, Protocols.TenantConverterScriptCache>();
+        services.AddScoped<IoT.Application.Protocols.ITenantConverterResolver, Protocols.TenantConverterResolver>();
         services.AddSingleton<IoT.Protocols.Routing.ITopicRoutingService, IoT.Protocols.Routing.TopicRoutingService>();
 
         // HTTP Device Transport (E3-04). Timeout acotado: un endpoint de dispositivo lento

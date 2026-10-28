@@ -5,6 +5,7 @@ using IoT.Domain.ValueObjects;
 using IoT.Protocols.Binary;
 using IoT.Protocols.Contracts;
 using IoT.Protocols.Routing;
+using Microsoft.Extensions.Logging;
 
 namespace IoT.Protocols.Adapters;
 
@@ -20,11 +21,15 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
 
     private readonly string _manufacturer;
     private readonly string _model;
+    private readonly ILogger? _logger;
 
-    public Gt06ProtocolAdapter(string manufacturer = "SEEWORLD", string model = "GT06")
+    // ILogger OPCIONAL (default null): preserva los call sites posicionales existentes
+    // (ProtocolRegistry, CompositeProtocolAdapter, tests) que sólo pasan manufacturer/model.
+    public Gt06ProtocolAdapter(string manufacturer = "SEEWORLD", string model = "GT06", ILogger? logger = null)
     {
         _manufacturer = manufacturer;
         _model = model;
+        _logger = logger;
     }
 
     public bool CanHandle(TransportMessage message)
@@ -190,16 +195,30 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
                         else if (frame.ProtocolNumber == R12LFFrame.ProtocolIccid ||
                                  frame.ProtocolNumber == R12LFFrame.ProtocolImsi)
                         {
+                            // Identidad de SIM (sin posición): BCD fail-safe. Un campo que no
+                            // supera la plausibilidad vuelve null y NO se emite el atributo,
+                            // en vez de poblar la identidad con basura.
                             var (iccidImei, iccidImsi, iccidVal) = frame.DecodeIccidPacket();
-                            attributes["packet_type"] = frame.ProtocolNumber == R12LFFrame.ProtocolIccid ? "iccid_info" : "imsi_info";
+                            bool isIccid = frame.ProtocolNumber == R12LFFrame.ProtocolIccid;
+                            attributes["packet_type"] = isIccid ? "iccid_info" : "imsi_info";
                             if (!string.IsNullOrEmpty(iccidImei))
+                            {
                                 chipId = iccidImei;
-                            if (!string.IsNullOrEmpty(iccidImei))
                                 attributes["imei"] = iccidImei;
+                            }
                             if (!string.IsNullOrEmpty(iccidImsi))
                                 attributes["imsi"] = iccidImsi;
                             if (!string.IsNullOrEmpty(iccidVal))
                                 attributes["iccid"] = iccidVal;
+
+                            if (isIccid && string.IsNullOrEmpty(iccidVal) && frame.InformationContent.Length > 0)
+                                _logger?.LogWarning(
+                                    "Trama GT06 0x94 (ICCID) con {Len} bytes que no cuadran con un ICCID BCD plausible (19-20 dígitos, prefijo 89); identidad no poblada. Validar el layout contra una trama real del R12L-F físico.",
+                                    frame.InformationContent.Length);
+                            if (!isIccid && string.IsNullOrEmpty(iccidImsi) && frame.InformationContent.Length > 0)
+                                _logger?.LogWarning(
+                                    "Trama GT06 0x90 (IMSI) con {Len} bytes que no cuadran con un IMSI BCD de 15 dígitos; identidad no poblada. Validar el layout contra una trama real del R12L-F físico.",
+                                    frame.InformationContent.Length);
                         }
                     }
                 }

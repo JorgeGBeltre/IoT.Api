@@ -92,6 +92,57 @@ public class DynamicProtocolConverterTests
     }
 
     [Fact]
+    public void ScriptableUplinkConverter_ReturnsControlledFailure_WhenDecodeRecursesWithoutBase()
+    {
+        // Recursión sin fondo EN EL CUERPO: con LimitRecursion del sandbox, Jint lanza
+        // RecursionDepthOverflowException (capturable) ANTES de agotar la pila del CLR. El convertidor
+        // debe devolver un fallo CONTROLADO (no colgarse, no StackOverflow que tumbe el proceso).
+        const string recursive = @"
+            function decode(payload, topic, metadata) {
+                return decode(payload, topic, metadata);
+            }
+        ";
+
+        var converter = new ScriptableUplinkConverter("RECURSIVE-CONVERTER", recursive);
+        var message = TransportMessage.Create("telemetry/test", "{}");
+
+        var result = converter.ConvertUplink(message);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("ScriptExecutionException");
+    }
+
+    [Fact]
+    public void ScriptableUplinkConverter_ReturnsControlledFailure_WhenRegexBacktracksCatastrophically()
+    {
+        // ReDoS en la RUTA CALIENTE PREPARADA: ConvertUplink ejecuta el AST preparado
+        // (Engine.PrepareScript). La Regex /^(a+)+$/ contra una cadena larga de 'a' seguida de '!' es un
+        // backtracking catastrófico (~2^N). Antes del fix, el script preparado horneaba el RegexTimeout
+        // default (10 s) e ignoraba Constraints.RegexTimeout, abortando en ~10 s. Tras fijar el
+        // RegexTimeout en la PREPARACIÓN (JintSandbox.PrepareScript) al presupuesto de 2 s, debe abortar
+        // con fallo controlado en ~2 s. El margen < 5 s demuestra ~2 s y NO ~10 s.
+        const string redos = @"
+            function decode(payload, topic, metadata) {
+                var s = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!';
+                /^(a+)+$/.test(s);
+                return { deviceId: 'X' };
+            }
+        ";
+
+        var converter = new ScriptableUplinkConverter("REDOS-CONVERTER", redos);
+        var message = TransportMessage.Create("telemetry/test", "{}");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = converter.ConvertUplink(message);
+        sw.Stop();
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("ScriptExecutionException");
+        // Presupuesto 2 s; < 5 s prueba que la ruta preparada honra ~2 s y NO el default horneado de 10 s.
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public void ScriptableUplinkConverter_ReturnsFailure_WhenDeviceIdIsMissing()
     {
         // Arrange

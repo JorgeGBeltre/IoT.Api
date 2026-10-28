@@ -69,6 +69,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<MqttBrokerConfig> MqttBrokers => Set<MqttBrokerConfig>();
     public DbSet<TenantSettings> TenantSettings => Set<TenantSettings>();
     public DbSet<FirmwareVersionRecord> FirmwareVersionRecords => Set<FirmwareVersionRecord>();
+    public DbSet<ProtocolConverterScript> ProtocolConverterScripts => Set<ProtocolConverterScript>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -382,6 +383,22 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
             builder.Property(f => f.UpdatedFromIp).HasMaxLength(45);
             builder.HasIndex(f => new { f.TenantId, f.FirmwareVersion }).IsUnique();
             builder.HasIndex(f => new { f.TenantId, f.TargetModel });
+        });
+
+        // ProtocolConverterScript Configuration (convertidor dinámico por tenant — adopción ThingsBoard).
+        // CONFIGURACIÓN a nivel de tenant (como mqtt_brokers / tenant_settings): ITenantScoped, NO
+        // ICustomerScoped. El filtro global por tenant se aplica en el foreach de abajo y su RLS es la
+        // política tenant_isolation estándar (ver migración AddProtocolConverterScripts). Un único
+        // convertidor por (tenant, clave de perfil).
+        modelBuilder.Entity<ProtocolConverterScript>(builder =>
+        {
+            builder.ToTable("protocol_converter_scripts");
+            builder.HasKey(s => s.Id);
+            builder.Property(s => s.ProfileKey).HasMaxLength(ProtocolConverterScript.MaxProfileKeyLength).IsRequired();
+            builder.Property(s => s.UplinkScript).HasColumnType("text").IsRequired();
+            builder.Property(s => s.DownlinkScript).HasColumnType("text");
+            builder.Property(s => s.IsEnabled).IsRequired();
+            builder.HasIndex(s => new { s.TenantId, s.ProfileKey }).IsUnique();
         });
 
         // AuditLog Configuration

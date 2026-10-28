@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using Acornima.Ast;
 using IoT.Domain.Common;
 using IoT.Domain.ValueObjects;
 using IoT.Protocols.Contracts;
@@ -19,6 +20,13 @@ public sealed class ScriptableUplinkConverter : IUplinkConverter
     private readonly string _script;
     private readonly Func<TransportMessage, bool>? _predicate;
 
+    // El AST se PREPARA una sola vez por instancia (análisis estático de Jint) y se reutiliza en cada
+    // trama: así, cuando el convertidor se cachea por (tenant, perfil, hash), no se re-parsea el script
+    // en cada mensaje. El motor Jint sí se crea por ejecución a propósito (Engine NO es thread-safe);
+    // ejecutar un script ya preparado es barato frente a re-compilarlo. Lazy: un script con sintaxis
+    // inválida lanza aquí y se traduce a un Result de fallo en ConvertUplink, como antes.
+    private readonly Lazy<Prepared<Script>> _preparedScript;
+
     public string ConverterId => _converterId;
 
     public ScriptableUplinkConverter(string converterId, string script, Func<TransportMessage, bool>? predicate = null)
@@ -31,6 +39,9 @@ public sealed class ScriptableUplinkConverter : IUplinkConverter
         _converterId = converterId;
         _script = script;
         _predicate = predicate;
+        // Preparación centralizada en JintSandbox: fija el RegexTimeout del script PREPARADO al mismo
+        // presupuesto (2 s). Engine.PrepareScript directo horneaba el default de 10 s en la Regex.
+        _preparedScript = new Lazy<Prepared<Script>>(() => JintSandbox.PrepareScript(_script));
     }
 
     public bool CanHandle(TransportMessage message)
@@ -52,15 +63,10 @@ public sealed class ScriptableUplinkConverter : IUplinkConverter
     {
         try
         {
-            var engine = new Engine(options =>
-            {
-                options.LimitMemory(4 * 1024 * 1024); // Máximo 4MB por ejecución
-                options.TimeoutInterval(TimeSpan.FromSeconds(2)); // Timeout estricto de 2s
-                options.MaxStatements(5000); // Protección contra bucles infinitos
-            });
+            var engine = JintSandbox.CreateEngine();
 
-            // Inyectar el script del usuario
-            engine.Execute(_script);
+            // Inyectar el script del usuario (AST preparado y reutilizado entre tramas)
+            engine.Execute(_preparedScript.Value);
 
             // Preparar metadata como objeto JS
             var metadataObj = new JsObject(engine);

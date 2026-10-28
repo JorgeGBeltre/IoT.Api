@@ -63,6 +63,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
     private readonly IUnprovisionedDeviceAuditThrottle? _unprovisionedAuditThrottle;
     private readonly IDeviceAttributeRepository? _attributeRepository;
     private readonly IOutboundWebhookDispatcher? _webhookDispatcher;
+    private readonly Protocols.ITenantConverterResolver? _converterResolver;
+    private readonly IProtocolRegistry? _protocolRegistry;
 
     public IngestTelemetryCommandHandler(
         ICompositeProtocolAdapter protocolAdapter,
@@ -79,7 +81,9 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         IDeviceCommandRepository? commandRepository = null,
         IUnprovisionedDeviceAuditThrottle? unprovisionedAuditThrottle = null,
         IDeviceAttributeRepository? attributeRepository = null,
-        IOutboundWebhookDispatcher? webhookDispatcher = null)
+        IOutboundWebhookDispatcher? webhookDispatcher = null,
+        Protocols.ITenantConverterResolver? converterResolver = null,
+        IProtocolRegistry? protocolRegistry = null)
     {
         _protocolAdapter = protocolAdapter;
         _deviceRepository = deviceRepository;
@@ -96,6 +100,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         _unprovisionedAuditThrottle = unprovisionedAuditThrottle;
         _attributeRepository = attributeRepository;
         _webhookDispatcher = webhookDispatcher;
+        _converterResolver = converterResolver;
+        _protocolRegistry = protocolRegistry;
     }
 
     public async Task<Result> Handle(IngestTelemetryCommand request, CancellationToken cancellationToken)
@@ -258,6 +264,61 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         {
             _logger.LogWarning("Device {ChipId} is suspended or revoked. Rejecting telemetry.", device.ChipId);
             return Result.Failure(new Error("Ingestion.DeviceNotActive", $"Device '{device.ChipId}' is not active."));
+        }
+
+        // === TB-2: Costura de convertidor dinámico por tenant (adopción ThingsBoard) =================
+        // Con el tenant del dispositivo ya resuelto y fijado, si ESTE tenant tiene un convertidor
+        // dinámico (script Jint) habilitado para el perfil/protocolo del mensaje, la decodificación de
+        // CONTENIDO (métricas/atributos/posición) la hace ese script, resuelto y ejecutado a través de
+        // un IProtocolConnector. La identidad (autenticada por el transporte), el instante (RecordedAt),
+        // el MessageId y el RawPayload los fija el pipeline NATIVO y el script no los toca: así dedup,
+        // anti-skew y la redacción ya aplicados siguen siendo coherentes.
+        //
+        // FAIL-SAFE (obligatorio en ruta caliente): cualquier fallo del script —sandbox excedido,
+        // excepción, salida inválida— o de su resolución NO interrumpe la ingesta: se registra y se
+        // conserva la decodificación nativa. Todo el bloque va envuelto para que jamás escape una
+        // excepción no controlada.
+        if (_converterResolver != null)
+        {
+            try
+            {
+                var connector = await ResolveTenantUplinkConnectorAsync(device.TenantId, request, cancellationToken);
+                if (connector != null)
+                {
+                    var scriptMsg = TransportMessage.Create(
+                        topicOrRoute: request.Topic,
+                        payload: request.Payload,
+                        transportProtocol: string.IsNullOrEmpty(request.TransportProtocol) ? "MQTT" : request.TransportProtocol!,
+                        source: request.Source);
+
+                    var scriptResult = connector.UplinkConverter.ConvertUplink(scriptMsg);
+                    if (scriptResult.IsSuccess)
+                    {
+                        var scriptEv = scriptResult.Value;
+                        ev.NumericMetrics = scriptEv.NumericMetrics;
+                        ev.Attributes = scriptEv.Attributes;
+                        ev.Position = scriptEv.Position;
+                        // El script re-interpreta el contenido: re-redactar los atributos resultantes
+                        // (la redacción del paso 1c se hizo sobre los atributos del decode nativo).
+                        IoT.Protocols.Security.TelemetryRedaction.RedactAttributes(ev.Attributes);
+                        _logger.LogDebug(
+                            "Telemetría de {ChipId} decodificada por el convertidor dinámico del tenant (conector '{Connector}').",
+                            device.ChipId, connector.ConnectorName);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "El convertidor dinámico del tenant para {ChipId} falló ({Code}); se usa la decodificación nativa. {Message}",
+                            device.ChipId, scriptResult.Error.Code, scriptResult.Error.Message);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Error resolviendo/ejecutando el convertidor dinámico del tenant para {ChipId}; se usa la decodificación nativa.",
+                    device.ChipId);
+            }
         }
 
         // E1-05: Guard clause against clock skew attacks (> 5 min future) and stale timestamps (> 7 days)
@@ -565,6 +626,34 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         {
             Common.Observability.IoTMetrics.TelemetryIngestionDuration.Record(stopwatch.Elapsed.TotalMilliseconds);
         }
+    }
+
+    /// <summary>
+    /// Resuelve el <see cref="IoT.Protocols.Contracts.IProtocolConnector"/> del convertidor dinámico
+    /// del tenant, probando claves de perfil candidatas en orden hasta encontrar un script habilitado:
+    ///   1. el hint de transporte (p.ej. "TCP-QUECLINK", "MQTT", "HTTP"), si viene informado;
+    ///   2. el ProfileId del perfil que el registro asocia al tópico del mensaje.
+    /// La primera coincidencia gana. Devuelve null si el tenant no personaliza ninguno de esos perfiles.
+    /// </summary>
+    private async Task<IoT.Protocols.Contracts.IProtocolConnector?> ResolveTenantUplinkConnectorAsync(
+        Guid tenantId, IngestTelemetryCommand request, CancellationToken ct)
+    {
+        if (_converterResolver == null) return null;
+
+        if (!string.IsNullOrWhiteSpace(request.TransportProtocol))
+        {
+            var byTransport = await _converterResolver.ResolveUplinkConnectorAsync(tenantId, request.TransportProtocol!, ct);
+            if (byTransport != null) return byTransport;
+        }
+
+        var profileId = _protocolRegistry?.FindProfileForTopic(request.Topic)?.ProfileId;
+        if (!string.IsNullOrWhiteSpace(profileId))
+        {
+            var byProfile = await _converterResolver.ResolveUplinkConnectorAsync(tenantId, profileId!, ct);
+            if (byProfile != null) return byProfile;
+        }
+
+        return null;
     }
 
     /// <summary>

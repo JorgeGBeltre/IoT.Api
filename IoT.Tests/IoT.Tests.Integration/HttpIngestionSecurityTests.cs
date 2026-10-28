@@ -12,6 +12,7 @@ using MediatR;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Xunit;
@@ -220,5 +221,112 @@ public class HttpIngestionSecurityTests
         // Assert
         result.Should().BeOfType<UnauthorizedObjectResult>();
         _mediatorMock.Verify(m => m.Send(It.IsAny<IngestTelemetryCommand>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GetDeviceAttributes_WhenDeviceNotFound_ReturnsNotFound()
+    {
+        // Arrange
+        _deviceRepoMock.Setup(r => r.GetByChipIdGlobalAsync("UNKNOWN", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Device?)null);
+
+        var controller = new HttpIngestionController(
+            _mediatorMock.Object,
+            _httpTransport,
+            _deviceRepoMock.Object,
+            _config,
+            _loggerMock.Object,
+            _apiKeyServiceMock.Object);
+
+        var scopeFactoryMock = new Mock<IServiceScopeFactory>();
+
+        // Act
+        var result = await controller.GetDeviceAttributes("UNKNOWN", null, scopeFactoryMock.Object, CancellationToken.None);
+
+        // Assert
+        result.Should().BeOfType<NotFoundResult>();
+    }
+
+    [Fact]
+    public async Task GetDeviceAttributes_WhenDeviceHasApiKey_AndHeaderMissing_ReturnsUnauthorized()
+    {
+        // Arrange
+        var tenantId = Guid.NewGuid();
+        var device = Device.Create(tenantId, "HTTP-DEV-ATTR", "00:11:22:33:44:55", "Test Device", "ESP32", "Generic").Value;
+        device.SetMqttApiKey("hashed_key_xyz", "fp_123", "admin");
+
+        _deviceRepoMock.Setup(r => r.GetByChipIdGlobalAsync("HTTP-DEV-ATTR", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(device);
+
+        var controller = new HttpIngestionController(
+            _mediatorMock.Object,
+            _httpTransport,
+            _deviceRepoMock.Object,
+            _config,
+            _loggerMock.Object,
+            _apiKeyServiceMock.Object);
+
+        controller.ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() };
+        var scopeFactoryMock = new Mock<IServiceScopeFactory>();
+
+        // Act
+        var result = await controller.GetDeviceAttributes("HTTP-DEV-ATTR", null, scopeFactoryMock.Object, CancellationToken.None);
+
+        // Assert
+        result.Should().BeOfType<UnauthorizedObjectResult>();
+    }
+
+    [Fact]
+    public async Task GetDeviceAttributes_WhenValid_ReturnsSharedAndClientAttributes_ExcludingServer()
+    {
+        // Arrange
+        var tenantId = Guid.NewGuid();
+        var device = Device.Create(tenantId, "HTTP-DEV-ATTR2", "00:11:22:33:44:56", "Test Device", "ESP32", "Generic").Value;
+
+        _deviceRepoMock.Setup(r => r.GetByChipIdGlobalAsync("HTTP-DEV-ATTR2", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(device);
+
+        var controller = new HttpIngestionController(
+            _mediatorMock.Object,
+            _httpTransport,
+            _deviceRepoMock.Object,
+            _config,
+            _loggerMock.Object,
+            _apiKeyServiceMock.Object);
+
+        controller.ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() };
+
+        var attrRepoMock = new Mock<IDeviceAttributeRepository>();
+        var attrs = new List<DeviceAttribute>
+        {
+            DeviceAttribute.Create(tenantId, device.Id, AttributeScope.Shared, "interval", "60").Value,
+            DeviceAttribute.Create(tenantId, device.Id, AttributeScope.Client, "firmware", "v1.2.0").Value,
+            DeviceAttribute.Create(tenantId, device.Id, AttributeScope.Server, "internal_secret", "classified").Value
+        };
+
+        attrRepoMock.Setup(r => r.ListByDeviceAsync(device.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(attrs);
+
+        var serviceProviderMock = new Mock<IServiceProvider>();
+        serviceProviderMock.Setup(sp => sp.GetService(typeof(IDeviceAttributeRepository)))
+            .Returns(attrRepoMock.Object);
+
+        var serviceScopeMock = new Mock<IServiceScope>();
+        serviceScopeMock.Setup(s => s.ServiceProvider).Returns(serviceProviderMock.Object);
+
+        var scopeFactoryMock = new Mock<IServiceScopeFactory>();
+        scopeFactoryMock.Setup(sf => sf.CreateScope()).Returns(serviceScopeMock.Object);
+
+        // Act
+        var result = await controller.GetDeviceAttributes("HTTP-DEV-ATTR2", null, scopeFactoryMock.Object, CancellationToken.None);
+
+        // Assert
+        var okResult = result.Should().BeOfType<OkObjectResult>().Subject;
+        var dict = okResult.Value.Should().BeOfType<Dictionary<string, Dictionary<string, string>>>().Subject;
+        dict.Should().ContainKey("shared");
+        dict["shared"].Should().ContainKey("interval").WhoseValue.Should().Be("60");
+        dict.Should().ContainKey("client");
+        dict["client"].Should().ContainKey("firmware").WhoseValue.Should().Be("v1.2.0");
+        dict.Should().NotContainKey("server");
     }
 }

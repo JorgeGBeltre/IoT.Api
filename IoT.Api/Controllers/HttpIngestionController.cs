@@ -4,11 +4,13 @@ using IoT.Application.Ingestion.Commands;
 using IoT.Domain.Enums;
 using IoT.Domain.Repositories;
 using IoT.Infrastructure.Http;
+using IoT.Infrastructure.Persistence;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace IoT.Api.Controllers;
 
@@ -190,5 +192,85 @@ public sealed class HttpIngestionController : ControllerBase
             created_at = command.CreatedAt,
             expires_at = command.ExpiresAt
         });
+    }
+
+    /// <summary>
+    /// Consulta los atributos de configuración (Shared y Client) desde el propio dispositivo por HTTP (ADR-015, P1c).
+    /// Los atributos de ámbito Server son privados de la plataforma y NUNCA se exponen al dispositivo físico.
+    /// </summary>
+    [HttpGet("/api/v1/devices/{chipId}/attributes")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDeviceAttributes(
+        string chipId,
+        [FromQuery] string? scope,
+        [FromServices] IServiceScopeFactory scopeFactory,
+        CancellationToken cancellationToken)
+    {
+        var device = await _deviceRepository.GetByChipIdGlobalAsync(chipId, cancellationToken);
+        if (device is null || device.AdminStatus != DeviceAdminStatus.Active)
+        {
+            _logger.LogWarning("Consulta de atributos HTTP rechazada: ChipId '{ChipId}' no registrado o inactivo.", chipId);
+            return NotFound();
+        }
+
+        bool requireKey = _configuration.GetValue<bool>("HttpIngestion:RequireDeviceKey", false) || device.HasMqttApiKey;
+        if (requireKey && _apiKeyService != null)
+        {
+            string? providedKey = Request.Headers["X-Device-Key"].FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(providedKey) && Request.Headers.TryGetValue("Authorization", out var authHeader))
+            {
+                var authStr = authHeader.ToString();
+                if (authStr.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                {
+                    providedKey = authStr.Substring(7).Trim();
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(providedKey) || string.IsNullOrEmpty(device.MqttApiKeyHash) || !_apiKeyService.Verify(providedKey, device.MqttApiKeyHash))
+            {
+                _logger.LogWarning("Consulta de atributos HTTP no autorizada para '{ChipId}': ApiKey inválida o ausente.", chipId);
+                return Unauthorized(new { error = "Valid device key required for querying attributes." });
+            }
+        }
+
+        AttributeScope? requestedScope = null;
+        if (!string.IsNullOrWhiteSpace(scope))
+        {
+            if (scope.Equals("shared", StringComparison.OrdinalIgnoreCase))
+            {
+                requestedScope = AttributeScope.Shared;
+            }
+            else if (scope.Equals("client", StringComparison.OrdinalIgnoreCase))
+            {
+                requestedScope = AttributeScope.Client;
+            }
+            else
+            {
+                return BadRequest(new { error = $"Ámbito inválido para dispositivo: '{scope}'. Use 'shared' o 'client'." });
+            }
+        }
+
+        using var tenantScope = scopeFactory.CreateTenantScope(device.TenantId);
+        var attributeRepo = tenantScope.ServiceProvider.GetRequiredService<IDeviceAttributeRepository>();
+
+        if (requestedScope.HasValue)
+        {
+            var list = await attributeRepo.GetByDeviceAndScopeAsync(device.Id, requestedScope.Value, cancellationToken);
+            var dict = list.ToDictionary(a => a.Key, a => a.Value);
+            return Ok(dict);
+        }
+        else
+        {
+            var list = await attributeRepo.ListByDeviceAsync(device.Id, cancellationToken);
+            var response = new Dictionary<string, Dictionary<string, string>>
+            {
+                ["shared"] = list.Where(a => a.Scope == AttributeScope.Shared).ToDictionary(a => a.Key, a => a.Value),
+                ["client"] = list.Where(a => a.Scope == AttributeScope.Client).ToDictionary(a => a.Key, a => a.Value)
+            };
+            return Ok(response);
+        }
     }
 }

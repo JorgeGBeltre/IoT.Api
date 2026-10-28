@@ -83,6 +83,16 @@ public sealed class CustomerRepository : ICustomerRepository
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<Customer>> GetDescendantsAsync(Guid tenantId, string parentPath, CancellationToken cancellationToken = default)
+    {
+        if (tenantId == Guid.Empty || string.IsNullOrWhiteSpace(parentPath))
+            return Array.Empty<Customer>();
+
+        return await _context.Customers
+            .FromSqlInterpolated($@"SELECT * FROM customers WHERE ""TenantId"" = {tenantId} AND ""Path"" <@ {parentPath}::ltree AND ""Path"" <> {parentPath}::ltree ORDER BY ""Level"" ASC")
+            .ToListAsync(cancellationToken);
+    }
+
     public async Task AddAsync(Customer customer, CancellationToken cancellationToken = default)
     {
         await _context.Customers.AddAsync(customer, cancellationToken);

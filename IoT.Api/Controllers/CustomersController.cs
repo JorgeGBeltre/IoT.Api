@@ -30,6 +30,8 @@ public sealed class CustomersController : ControllerBase
 
     public sealed record UpdateCustomerRequest(string? Name, bool? IsActive);
 
+    public sealed record ReparentCustomerRequest(Guid? NewParentCustomerId);
+
     /// <summary>Lista el subárbol visible de la sesión (lista plana; el cliente arma el árbol).</summary>
     [HttpGet]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -82,6 +84,26 @@ public sealed class CustomersController : ControllerBase
     {
         var result = await _mediator.Send(
             new UpdateCustomerCommand(id, request.Name, request.IsActive),
+            cancellationToken);
+        if (result.IsFailure)
+        {
+            return result.Error.Code == "Customer.NotFound"
+                ? NotFound(new { error = result.Error.Message })
+                : BadRequest(new { error = result.Error.Message });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>Reubica un customer bajo un nuevo padre en la jerarquía y actualiza su subárbol.</summary>
+    [HttpPost("{id:guid}/reparent")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ReparentCustomer(Guid id, [FromBody] ReparentCustomerRequest request, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(
+            new ReparentCustomerCommand(id, request.NewParentCustomerId),
             cancellationToken);
         if (result.IsFailure)
         {

@@ -48,8 +48,13 @@ public interface ICustomerRepository
     /// plana, RESPETANDO los filtros globales: el de EF por tenant y la RLS por subárbol. El cliente
     /// arma el árbol a partir de <c>ParentCustomerId</c>. Ordenada por <c>Level</c> y <c>Name</c> para
     /// una presentación estable.
-    /// </summary>
     Task<IReadOnlyList<Customer>> GetVisibleAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Obtiene todos los descendientes estrictos de <paramref name="parentPath"/> dentro del tenant,
+    /// ordenados por <c>Level</c> ascendente, para actualizar sus paths en cascada durante un reparenting.
+    /// </summary>
+    Task<IReadOnlyList<Customer>> GetDescendantsAsync(Guid tenantId, string parentPath, CancellationToken cancellationToken = default);
 
     /// <summary>Añade un nuevo <see cref="Customer"/> al contexto (se persiste con el UnitOfWork).</summary>
     Task AddAsync(Customer customer, CancellationToken cancellationToken = default);

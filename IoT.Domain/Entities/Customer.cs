@@ -96,6 +96,26 @@ public sealed class Customer : AggregateRoot<Guid>, ITenantScoped
         UpdatedAt = DateTime.UtcNow;
     }
 
+    /// <summary>
+    /// Actualiza el <see cref="Path"/> y <see cref="Level"/> de un nodo descendiente al reubicar su raíz
+    /// en la jerarquía (reparenting). Si este nodo era el que se movió, su path pasa a ser <paramref name="newRootPath"/>.
+    /// Si es un sub-descendiente, se sustituye el prefijo <paramref name="oldRootPath"/> por <paramref name="newRootPath"/>.
+    /// </summary>
+    public void UpdateSubtreePath(string oldRootPath, string newRootPath, int deltaLevel)
+    {
+        if (Path == oldRootPath)
+        {
+            Path = newRootPath;
+        }
+        else if (Path.StartsWith(oldRootPath + "."))
+        {
+            Path = newRootPath + Path[oldRootPath.Length..];
+        }
+
+        Level += deltaLevel;
+        UpdatedAt = DateTime.UtcNow;
+    }
+
     public void Rename(string name)
     {
         if (string.IsNullOrWhiteSpace(name)) return;

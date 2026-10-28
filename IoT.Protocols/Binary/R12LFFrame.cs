@@ -21,6 +21,8 @@ public sealed record R12LFFrame
     public const byte ProtocolStringInfo = 0x15;
     public const byte ProtocolAlarm = 0x16;
     public const byte ProtocolServerCommand = 0x80;
+    public const byte ProtocolImsi = 0x90;
+    public const byte ProtocolIccid = 0x94;
 
     public static bool TryParse(ReadOnlySpan<byte> buffer, out R12LFFrame? frame, out int consumedBytes)
     {
@@ -196,6 +198,75 @@ public sealed record R12LFFrame
         }
         string raw = sb.ToString();
         return raw.StartsWith('0') ? raw[1..] : raw;
+    }
+
+    /// <summary>
+    /// Decodifica tramas de identidad de tarjeta SIM / módem celular (SEEWORLD R12L-F §5.5).
+    /// Protocolo 0x94: InfoType (1B = 0x0A) + IMEI (8B BCD) + IMSI (8B BCD) + ICCID (10B BCD) = 27 bytes.
+    /// Protocolo 0x90: InfoType opcional (1B) + IMSI (8B BCD).
+    /// </summary>
+    public (string? Imei, string? Imsi, string? Iccid) DecodeIccidPacket()
+    {
+        if (InformationContent.Length < 8)
+            return (null, null, null);
+
+        if (ProtocolNumber == ProtocolIccid || ProtocolNumber == 0x94)
+        {
+            int offset = 0;
+            if (InformationContent.Length >= 27 && InformationContent[0] == 0x0A)
+            {
+                offset = 1;
+            }
+
+            string? imei = null;
+            string? imsi = null;
+            string? iccid = null;
+
+            if (InformationContent.Length >= offset + 8)
+            {
+                var sbImei = new StringBuilder(16);
+                foreach (byte b in InformationContent.AsSpan(offset, 8))
+                    sbImei.Append(b.ToString("X2"));
+                string rawImei = sbImei.ToString();
+                imei = rawImei.StartsWith('0') ? rawImei[1..] : rawImei;
+                offset += 8;
+            }
+
+            if (InformationContent.Length >= offset + 8)
+            {
+                var sbImsi = new StringBuilder(16);
+                foreach (byte b in InformationContent.AsSpan(offset, 8))
+                    sbImsi.Append(b.ToString("X2"));
+                string rawImsi = sbImsi.ToString();
+                imsi = rawImsi.StartsWith('0') ? rawImsi[1..] : rawImsi;
+                offset += 8;
+            }
+
+            if (InformationContent.Length >= offset + 10)
+            {
+                var sbIccid = new StringBuilder(20);
+                foreach (byte b in InformationContent.AsSpan(offset, 10))
+                    sbIccid.Append(b.ToString("x2"));
+                iccid = sbIccid.ToString();
+            }
+
+            return (imei, imsi, iccid);
+        }
+        else if (ProtocolNumber == ProtocolImsi || ProtocolNumber == 0x90)
+        {
+            int offset = (InformationContent.Length >= 9 && InformationContent[0] == 0x0A) ? 1 : 0;
+            if (InformationContent.Length >= offset + 8)
+            {
+                var sbImsi = new StringBuilder(16);
+                foreach (byte b in InformationContent.AsSpan(offset, 8))
+                    sbImsi.Append(b.ToString("X2"));
+                string rawImsi = sbImsi.ToString();
+                string imsi = rawImsi.StartsWith('0') ? rawImsi[1..] : rawImsi;
+                return (null, imsi, null);
+            }
+        }
+
+        return (null, null, null);
     }
 
     public (GeoPosition? Position, DateTime RecordedAt) DecodeLocationPacket()

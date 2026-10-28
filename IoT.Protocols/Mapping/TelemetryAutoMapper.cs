@@ -259,6 +259,8 @@ public static class TelemetryAutoMapper
         if (normalizedKey is "clientid" or "client_id" or "client") { target.ClientId = val.GetString(); return; }
         if (normalizedKey is "firmwareversion" or "firmware_version" or "version" or "fw_version") { target.FirmwareVersion = val.GetString(); return; }
         if (normalizedKey is "imei") { target.Imei = val.GetString(); return; }
+        if (normalizedKey is "imsi") { target.Imsi = val.GetString(); return; }
+        if (normalizedKey is "iccid") { target.Iccid = val.GetString(); return; }
         if (normalizedKey is "card_id" or "cardid") { target.CardId = val.GetString(); return; }
         if (normalizedKey is "alarm_code" or "alarm") { target.AlarmCode = val.GetString(); return; }
 

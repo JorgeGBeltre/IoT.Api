@@ -584,4 +584,49 @@ public sealed class TcpProtocolHandlerTests
         root.GetProperty("isValid").GetBoolean().Should().BeTrue("la trama trae fix GPS");
         root.GetProperty("protocol_number").GetString().Should().Be("0x16");
     }
+
+    [Fact]
+    public void Gt06_Iccid0x94_DecodesImeiImsiIccidCorrectly()
+    {
+        // Vector oficial del SEEWORLD R12L-F Protocol Spec (§5.5, línea 954):
+        // 79 79 00 20 94 0a 0358091088001558 0460041990205313 898607b9111730120313 0009 a072 0d 0a
+        var buf = Hex("79790020940a03580910880015580460041990205313898607b91117301203130009a0720d0a");
+        var handler = new Gt06TcpHandler();
+
+        bool ok = handler.TryReadFrame(buf, boundImei: null, out var outcome);
+
+        ok.Should().BeTrue("la trama 0x79 de 32 bytes con CRC-ITU debe parsear correctamente");
+        outcome.Should().NotBeNull();
+        outcome!.Ingest.Should().BeTrue();
+        outcome.Ack.Should().BeNull("la spec R12L-F §5.5 no define respuesta ACK para 0x94");
+        outcome.IdentifiesSession.Should().BeTrue();
+        outcome.SessionImei.Should().Be("358091088001558");
+        outcome.IngestTopic.Should().Be("devices/358091088001558/telemetry");
+
+        using var doc = JsonDocument.Parse(outcome.IngestPayload!);
+        var root = doc.RootElement;
+        root.GetProperty("imei").GetString().Should().Be("358091088001558");
+        root.GetProperty("imsi").GetString().Should().Be("460041990205313");
+        root.GetProperty("iccid").GetString().Should().Be("898607b9111730120313");
+        root.GetProperty("packet_type").GetString().Should().Be("iccid_info");
+        root.GetProperty("protocol_number").GetString().Should().Be("0x94");
+        buf.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Gt06Adapter_Decodes0x94Frame_PopulatesAttributesAndDeviceIdentifier()
+    {
+        var adapter = new global::IoT.Protocols.Adapters.Gt06ProtocolAdapter("SEEWORLD", "R12L-F");
+        const string rawHex = "79790020940a03580910880015580460041990205313898607b91117301203130009a0720d0a";
+
+        var result = adapter.Decode("tcp/seeworld/r12l-f", rawHex);
+
+        result.IsSuccess.Should().BeTrue();
+        var ev = result.Value;
+        ev.DeviceIdentifier.Should().Be("358091088001558");
+        ev.Attributes.Should().ContainKey("imei").WhoseValue.Should().Be("358091088001558");
+        ev.Attributes.Should().ContainKey("imsi").WhoseValue.Should().Be("460041990205313");
+        ev.Attributes.Should().ContainKey("iccid").WhoseValue.Should().Be("898607b9111730120313");
+        ev.Attributes.Should().ContainKey("packet_type").WhoseValue.Should().Be("iccid_info");
+    }
 }

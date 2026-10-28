@@ -187,11 +187,20 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
                                 }
                             }
                         }
-                        // #6 (DIFERIDO): las tramas extendidas 0x79 con protocolo 0x90 (IMSI) y
-                        // 0x94 (ICCID) no se decodifican aquí: el layout del contenido no está
-                        // confirmado para el R12L-F físico ni documentado en References/, y
-                        // adivinar los bytes poblaría Imsi/Iccid (identidad) con datos falsos.
-                        // Pendiente: confirmar el layout real y parsear el número.
+                        else if (frame.ProtocolNumber == R12LFFrame.ProtocolIccid ||
+                                 frame.ProtocolNumber == R12LFFrame.ProtocolImsi)
+                        {
+                            var (iccidImei, iccidImsi, iccidVal) = frame.DecodeIccidPacket();
+                            attributes["packet_type"] = frame.ProtocolNumber == R12LFFrame.ProtocolIccid ? "iccid_info" : "imsi_info";
+                            if (!string.IsNullOrEmpty(iccidImei))
+                                chipId = iccidImei;
+                            if (!string.IsNullOrEmpty(iccidImei))
+                                attributes["imei"] = iccidImei;
+                            if (!string.IsNullOrEmpty(iccidImsi))
+                                attributes["imsi"] = iccidImsi;
+                            if (!string.IsNullOrEmpty(iccidVal))
+                                attributes["iccid"] = iccidVal;
+                        }
                     }
                 }
                 catch
@@ -262,6 +271,12 @@ public sealed class Gt06ProtocolAdapter : IDeviceProtocolAdapter
 
                 if (root.TryGetProperty("is_alarm", out var alm) && alm.ValueKind == JsonValueKind.True)
                     attributes["packet_type"] = "alarm";
+
+                if (root.TryGetProperty("imsi", out var imsiElem) && imsiElem.ValueKind == JsonValueKind.String)
+                    attributes["imsi"] = imsiElem.GetString()!;
+
+                if (root.TryGetProperty("iccid", out var iccidElem) && iccidElem.ValueKind == JsonValueKind.String)
+                    attributes["iccid"] = iccidElem.GetString()!;
             }
 
             if (string.IsNullOrEmpty(chipId))

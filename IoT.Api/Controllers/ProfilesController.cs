@@ -77,4 +77,28 @@ public sealed class ProfilesController : ControllerBase
 
         return Ok(dto);
     }
+
+    public sealed record ProtocolConnectorDto(
+        string ConnectorName,
+        string TransportType,
+        string UplinkConverterId,
+        string UplinkConverterType,
+        string? DownlinkConverterId,
+        bool HasDownlinkConverter);
+
+    [HttpGet("connectors")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public IActionResult GetAllConnectors()
+    {
+        var connectors = _registry.GetAllConnectors();
+        var dtos = connectors.Select(c => new ProtocolConnectorDto(
+            c.ConnectorName,
+            c.TransportType,
+            c.UplinkConverter.ConverterId,
+            c.UplinkConverter.GetType().Name,
+            c.DownlinkConverter?.ConverterId,
+            c.DownlinkConverter != null)).ToList();
+
+        return Ok(dtos);
+    }
 }

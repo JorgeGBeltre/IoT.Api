@@ -58,6 +58,22 @@ public sealed class CompositeProtocolAdapter : ICompositeProtocolAdapter
 
     public Result<NormalizedTelemetryEvent> Decode(TransportMessage message)
     {
+        // 0. Si el mensaje invoca explícitamente un Conector / Convertidor (TB-1 / TB-3)
+        if (_registry != null && (message.Headers.ContainsKey("connector") || message.Headers.ContainsKey("converter")))
+        {
+            var connector = _registry.FindConnector(message);
+            if (connector != null && connector.UplinkConverter.CanHandle(message))
+            {
+                var convRes = connector.UplinkConverter.ConvertUplink(message);
+                if (convRes.IsSuccess)
+                {
+                    convRes.Value.MessageId = message.MessageId;
+                    convRes.Value.ReceivedAt = message.ReceivedAt;
+                    return convRes;
+                }
+            }
+        }
+
         // 1. Intentar resolver vía perfil declarativo en el registro. Sólo se usa el
         //    adaptador del perfil si DE VERDAD puede manejar el mensaje (CanHandle); de lo
         //    contrario se cae al loop de adaptadores. Evita que un match de tópico enrute a

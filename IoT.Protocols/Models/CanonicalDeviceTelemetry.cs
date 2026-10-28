@@ -238,6 +238,8 @@ public sealed class CanonicalDeviceTelemetry
         if (!string.IsNullOrWhiteSpace(ClientId)) attributes["client_id"] = ClientId;
         if (!string.IsNullOrWhiteSpace(FirmwareVersion)) attributes["firmware_version"] = FirmwareVersion;
         if (!string.IsNullOrWhiteSpace(Imei)) attributes["imei"] = Imei;
+        if (!string.IsNullOrWhiteSpace(Imsi)) attributes["imsi"] = Imsi;
+        if (!string.IsNullOrWhiteSpace(Iccid)) attributes["iccid"] = Iccid;
         if (!string.IsNullOrWhiteSpace(CardId)) attributes["card_id"] = CardId;
         if (!string.IsNullOrWhiteSpace(AlarmCode)) attributes["alarm_code"] = AlarmCode;
 

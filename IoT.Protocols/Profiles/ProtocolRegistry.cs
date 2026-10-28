@@ -8,22 +8,32 @@ public sealed class ProtocolRegistry : IProtocolRegistry
 {
     private readonly Dictionary<string, IDeviceProfile> _profilesById = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<IDeviceProfile> _profiles = [];
+    private readonly Dictionary<string, IProtocolConnector> _connectorsByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<IProtocolConnector> _connectors = [];
 
     public ProtocolRegistry()
     {
     }
 
-    public ProtocolRegistry(IEnumerable<IDeviceProfile> initialProfiles)
+    public ProtocolRegistry(IEnumerable<IDeviceProfile> initialProfiles, IEnumerable<IProtocolConnector>? initialConnectors = null)
     {
         foreach (var profile in initialProfiles)
         {
             RegisterProfile(profile);
         }
+
+        if (initialConnectors != null)
+        {
+            foreach (var connector in initialConnectors)
+            {
+                RegisterConnector(connector);
+            }
+        }
     }
 
     public static ProtocolRegistry CreateDefault()
     {
-        return new ProtocolRegistry(
+        var registry = new ProtocolRegistry(
         [
             // Perfiles nativos iniciales
             new GlpPressureProfile(),
@@ -78,6 +88,17 @@ public sealed class ProtocolRegistry : IProtocolRegistry
             // Mictrack
             new GenericTrackerProfile("mictrack-m558g-v2", "Mictrack", "M558G-V2", "TCP (GT06)", new Gt06ProtocolAdapter("Mictrack", "M558G-V2"), "Mictrack")
         ]);
+
+        // Registrar Conectores nativos iniciales (TB-1)
+        registry.RegisterConnector(new ProtocolConnector("MQTT-DEFAULT", "MQTT", new MqttV5JsonAdapter()));
+        registry.RegisterConnector(new ProtocolConnector("TCP-GT06", "TCP", new Gt06ProtocolAdapter("SEEWORLD", "R12L-F")));
+        registry.RegisterConnector(new ProtocolConnector("TCP-QUECLINK", "TCP", new QueclinkTrackProtocolAdapter("GV300")));
+        registry.RegisterConnector(new ProtocolConnector("TCP-COBAN", "TCP", new CobanProtocolAdapter("TK103")));
+        registry.RegisterConnector(new ProtocolConnector("TCP-ISTARTEK", "TCP", new IStartekProtocolAdapter("VT900")));
+        registry.RegisterConnector(new ProtocolConnector("TCP-JOINTECH", "TCP", new JointechProtocolAdapter("JT701D")));
+        registry.RegisterConnector(new ProtocolConnector("HTTP-WEBHOOK", "HTTP", new StrategyBasedProtocolAdapter()));
+
+        return registry;
     }
 
     public void RegisterProfile(IDeviceProfile profile)
@@ -97,6 +118,63 @@ public sealed class ProtocolRegistry : IProtocolRegistry
     public IReadOnlyList<IDeviceProfile> GetAllProfiles()
     {
         return _profiles.AsReadOnly();
+    }
+
+    public void RegisterConnector(IProtocolConnector connector)
+    {
+        _connectorsByName[connector.ConnectorName] = connector;
+        if (!_connectors.Contains(connector))
+        {
+            _connectors.Add(connector);
+        }
+    }
+
+    public IProtocolConnector? GetConnector(string connectorName)
+    {
+        return _connectorsByName.TryGetValue(connectorName, out var connector) ? connector : null;
+    }
+
+    public IReadOnlyList<IProtocolConnector> GetAllConnectors()
+    {
+        return _connectors.AsReadOnly();
+    }
+
+    public IProtocolConnector? FindConnector(TransportMessage message)
+    {
+        // 1. Por cabecera explícita 'connector'
+        if (message.Headers.TryGetValue("connector", out var connName) && !string.IsNullOrWhiteSpace(connName))
+        {
+            if (_connectorsByName.TryGetValue(connName, out var byName))
+                return byName;
+        }
+
+        // 2. Por cabecera explícita 'converter'
+        if (message.Headers.TryGetValue("converter", out var convId) && !string.IsNullOrWhiteSpace(convId))
+        {
+            foreach (var conn in _connectors)
+            {
+                if (string.Equals(conn.UplinkConverter.ConverterId, convId, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(conn.ConnectorName, convId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return conn;
+                }
+            }
+        }
+
+        // 3. Por concordancia de transporte y CanHandle del convertidor
+        if (!string.IsNullOrWhiteSpace(message.TransportProtocol))
+        {
+            foreach (var conn in _connectors)
+            {
+                if (string.Equals(conn.TransportType, message.TransportProtocol, StringComparison.OrdinalIgnoreCase) &&
+                    conn.UplinkConverter.CanHandle(message))
+                {
+                    return conn;
+                }
+            }
+        }
+
+        return null;
     }
 
     public IDeviceProfile? FindProfileForTopic(string topic)

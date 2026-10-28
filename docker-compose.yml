@@ -53,6 +53,50 @@ services:
       retries: 5
       start_period: 5s
 
+  # Programador de backup automatizado para PostgreSQL (D-18)
+  # Ejecuta pg_dump comprimido periódicamente y rota copias mayores a RETENTION_DAYS
+  iot-postgres-backup:
+    image: postgres:16-alpine
+    container_name: iot-postgres-backup
+    restart: unless-stopped
+    depends_on:
+      iot-postgres:
+        condition: service_healthy
+    environment:
+      - PGHOST=iot-postgres-db
+      - PGPORT=5432
+      - PGDATABASE=${POSTGRES_DB:?POSTGRES_DB es obligatorio}
+      - PGUSER=${POSTGRES_USER:?POSTGRES_USER es obligatorio}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
+      - BACKUP_INTERVAL_SECONDS=${BACKUP_INTERVAL_SECONDS:-86400}
+      - RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
+    volumes:
+      - iot_postgres_backups:/backups
+    networks:
+      - iot-network
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "==> [iot-postgres-backup] Servicio programador iniciado (intervalo: $${BACKUP_INTERVAL_SECONDS}s, retención: $${RETENTION_DAYS}días)."
+        mkdir -p /backups
+        while true; do
+          TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+          echo "==> [iot-postgres-backup] Ejecutando backup automatizado: backup_$${TIMESTAMP}.dump..."
+          if pg_dump -h "$$PGHOST" -p "$$PGPORT" -U "$$PGUSER" -d "$$PGDATABASE" -F c -b -f "/backups/backup_$${TIMESTAMP}.dump"; then
+            echo "==> [iot-postgres-backup] Backup exitoso: backup_$${TIMESTAMP}.dump ($$(du -sh /backups/backup_$${TIMESTAMP}.dump | cut -f1))"
+            find /backups -name 'backup_*.dump' -mtime "+$$RETENTION_DAYS" -exec rm -f {} +
+          else
+            echo "==> [iot-postgres-backup] ERROR: Fallo al ejecutar pg_dump"
+          fi
+          echo "==> [iot-postgres-backup] Próximo backup en $${BACKUP_INTERVAL_SECONDS} segundos..."
+          sleep "$$BACKUP_INTERVAL_SECONDS"
+        done
+
   # El broker MQTT es EMBEBIDO en el proceso iot-api (MQTTnet.Server), no hay
   # broker externo. iot-api publica el puerto 1883 directamente. Ver EmbeddedMqttBroker.
 

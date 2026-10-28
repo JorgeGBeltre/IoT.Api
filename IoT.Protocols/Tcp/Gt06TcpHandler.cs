@@ -201,13 +201,35 @@ public class Gt06TcpHandler : ITcpProtocolHandler
                 };
                 return true;
 
+            case R12LFFrame.ProtocolIccid:
+            case R12LFFrame.ProtocolImsi:
+                var (iccidImei, iccidImsi, iccidVal) = frame.DecodeIccidPacket();
+                string? effectiveImei = iccidImei ?? boundImei;
+
+                var iccidPayload = new
+                {
+                    imei = effectiveImei ?? string.Empty,
+                    imsi = iccidImsi,
+                    iccid = iccidVal,
+                    packet_type = canonical == R12LFFrame.ProtocolIccid ? "iccid_info" : "imsi_info",
+                    protocol_number = $"0x{frame.ProtocolNumber:X2}",
+                    serial_number = frame.SerialNumber,
+                    timestamp = DateTime.UtcNow.ToString("o")
+                };
+
+                outcome = new TcpFrameOutcome
+                {
+                    SessionImei = !string.IsNullOrWhiteSpace(effectiveImei) ? effectiveImei : null,
+                    IdentifiesSession = !string.IsNullOrWhiteSpace(effectiveImei),
+                    Ack = null, // Spec R12L-F §5.5 no define respuesta ACK para 0x94/0x90
+                    Ingest = !string.IsNullOrEmpty(effectiveImei),
+                    IngestTopic = $"devices/{effectiveImei}/telemetry",
+                    IngestPayload = JsonSerializer.Serialize(iccidPayload),
+                    TransportProtocol = string.Empty,
+                };
+                return true;
+
             default:
-                // #6 (DIFERIDO): las tramas extendidas 0x79 con protocolo 0x90 (IMSI) y 0x94
-                // (ICCID) caen aquí. El layout del contenido (BCD vs ASCII, posible subcabecera
-                // tipo/longitud) NO está confirmado para el R12L-F físico ni documentado en
-                // References/, así que no se decodifica el número para no poblar Imsi/Iccid con
-                // bytes adivinados. Pendiente: confirmar el layout contra el equipo real y
-                // parsear el número desde frame.InformationContent.
                 outcome = new TcpFrameOutcome { Ingest = false };
                 return true;
         }

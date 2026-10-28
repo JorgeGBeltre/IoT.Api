@@ -2,12 +2,13 @@ using IoT.Domain.Common;
 
 namespace IoT.Protocols.Contracts;
 
-public interface IDeviceProtocolAdapter
+public interface IDeviceProtocolAdapter : IUplinkConverter
 {
     string ProtocolName { get; }
-
-    bool CanHandle(TransportMessage message);
+    string IUplinkConverter.ConverterId => ProtocolName;
     Result<NormalizedTelemetryEvent> Decode(TransportMessage message);
+
+    Result<NormalizedTelemetryEvent> IUplinkConverter.ConvertUplink(TransportMessage message) => Decode(message);
 
     // Backward-compatible overloads for string-based topic and payload
     bool CanHandle(string topic, string payload) =>

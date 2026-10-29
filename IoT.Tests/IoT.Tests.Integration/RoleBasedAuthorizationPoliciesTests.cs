@@ -248,6 +248,16 @@ public class RoleBasedAuthorizationPoliciesTests
     }
 
     [Fact]
+    public void GatewaysController_RequiresBrokerManagePolicyAtClassLevel()
+    {
+        // GET /api/v1/gateways publica el host público + los puertos de los listeners (infraestructura
+        // de conexión). Comparte el gate de brokers: antes era [Authorize] desnudo y cualquier usuario
+        // autenticado del tenant leía host:port.
+        typeof(GatewaysController).GetCustomAttribute<AuthorizeAttribute>()!
+            .Policy.Should().Be(AuthorizationPolicies.BrokerManage);
+    }
+
+    [Fact]
     public void UsersController_RequiresTenantAdminPolicy()
     {
         typeof(UsersController).GetCustomAttribute<AuthorizeAttribute>()!

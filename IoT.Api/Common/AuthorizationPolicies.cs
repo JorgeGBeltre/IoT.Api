@@ -124,7 +124,10 @@ public static class AuthorizationPolicies
     /// configuración a un perfil de plataforma/sistema sin alterar quién administra usuarios, auditoría
     /// o ajustes. Antes el listado (<c>GET</c>) sólo exigía sesión válida, de modo que un perfil de sólo
     /// lectura (Operator/Viewer) podía leer <c>host:port</c> de cada broker llamando a la API; esta
-    /// política cierra esa fuga cubriendo también la lectura.
+    /// política cierra esa fuga cubriendo también la lectura. El MISMO gate protege además
+    /// <see cref="IoT.Api.Controllers.GatewaysController"/> (<c>GET /api/v1/gateways</c>), que publica el host público y
+    /// los puertos de los listeners —la otra vía por la que un perfil de menor privilegio podía leer
+    /// la infraestructura de conexión de la plataforma—.
     ///
     /// Gate por ROL EXCLUSIVAMENTE (ver <see cref="AddBrokerManagePolicy"/>): a diferencia del resto de
     /// políticas, NO admite un permiso fino como puente. Es deliberado: si admitiera <c>settings.manage</c>

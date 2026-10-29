@@ -1,3 +1,4 @@
+using IoT.Api.Common;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -13,8 +14,16 @@ namespace IoT.Api.Controllers;
 /// apuntaban al listener de otra familia (un Queclink al handler de iStartek, un Coban al
 /// de Jointech)—. Cualquier equipo dado de alta siguiendo la UI nunca llegaba a conectar.
 /// Con este endpoint la UI lee los puertos reales y deja de inventarlos.
+///
+/// AUTORIZACIÓN: expone INFRAESTRUCTURA de conexión (host público + puertos de los listeners),
+/// la misma categoría que <see cref="BrokersController"/>, así que comparte su gate
+/// <see cref="AuthorizationPolicies.BrokerManage"/>: sólo admin/superadmin (configurable con
+/// <c>Authorization:BrokerManageRoles</c>) pueden leerlo. Antes el <c>[Authorize]</c> desnudo
+/// dejaba que cualquier usuario autenticado del tenant leyera host:port. El único consumidor en la
+/// UI es la página de Integraciones (ya restringida a admin); el alta de dispositivos NO usa este
+/// endpoint (deriva el host del navegador y el puerto del catálogo).
 /// </summary>
-[Authorize]
+[Authorize(Policy = AuthorizationPolicies.BrokerManage)]
 [ApiController]
 [Route("api/v1/gateways")]
 public sealed class GatewaysController : ControllerBase

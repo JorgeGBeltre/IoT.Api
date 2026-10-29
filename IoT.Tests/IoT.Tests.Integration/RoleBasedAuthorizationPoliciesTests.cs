@@ -36,6 +36,10 @@ public class RoleBasedAuthorizationPoliciesTests
                 policy => policy
                     .RequireAuthenticatedUser()
                     .RequireAssertion(ctx => AuthorizationPolicies.HasAnyRole(ctx.User, tenantAdminRoles)));
+
+            // BrokerManage se registra con el MISMO helper que producción (Program.cs), de modo que el
+            // test ejercita el registro REAL (gate sólo-rol) y no una reimplementación que pudiera diverger.
+            AuthorizationPolicies.AddBrokerManagePolicy(options, configuration);
         });
 
         return services.BuildServiceProvider().GetRequiredService<IAuthorizationService>();
@@ -122,6 +126,62 @@ public class RoleBasedAuthorizationPoliciesTests
     }
 
     // =========================================================================
+    // BrokerManage Policy Tests (gating de infraestructura de brokers)
+    // =========================================================================
+
+    [Theory]
+    [InlineData("Admin")]
+    [InlineData("admin")]
+    [InlineData("Superadmin")]
+    [InlineData("Platform Super Admin")] // Alineado con el gate del frontend (/brokers superadmin)
+    public async Task BrokerManage_AllowsAdminAndPlatformSuperByDefault(string role)
+    {
+        var authz = BuildAuthorizationService(EmptyConfig());
+        var result = await authz.AuthorizeAsync(UserWithRole(role), null, AuthorizationPolicies.BrokerManage);
+        result.Succeeded.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("Operator")]
+    [InlineData("Viewer")]
+    [InlineData("Auditor")]
+    public async Task BrokerManage_DeniesLowerPrivilegeRoles(string role)
+    {
+        // Regresión del hueco corregido: un perfil de menor privilegio ya no puede leer host:port.
+        var authz = BuildAuthorizationService(EmptyConfig());
+        var result = await authz.AuthorizeAsync(UserWithRole(role), null, AuthorizationPolicies.BrokerManage);
+        result.Succeeded.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task BrokerManage_DeniesAnonymous()
+    {
+        var authz = BuildAuthorizationService(EmptyConfig());
+        var anonymous = new ClaimsPrincipal(new ClaimsIdentity());
+        var result = await authz.AuthorizeAsync(anonymous, null, AuthorizationPolicies.BrokerManage);
+        result.Succeeded.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task BrokerManage_CanBeRestrictedToPlatformSuperAdminByConfiguration()
+    {
+        // La perilla documentada: limitar brokers a un superadmin de plataforma sin tocar código
+        // ni afectar a TenantAdmin. Con la config puesta, "Admin" deja de bastar y sólo pasa el super.
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Authorization:BrokerManageRoles"] = "Platform Super Admin"
+            })
+            .Build();
+        var authz = BuildAuthorizationService(config);
+
+        (await authz.AuthorizeAsync(UserWithRole("Admin"), null, AuthorizationPolicies.BrokerManage))
+            .Succeeded.Should().BeFalse();
+        (await authz.AuthorizeAsync(UserWithRole("Platform Super Admin"), null, AuthorizationPolicies.BrokerManage))
+            .Succeeded.Should().BeTrue();
+    }
+
+    // =========================================================================
     // Endpoint Decoration Tests (Reflective Verification)
     // =========================================================================
 
@@ -160,17 +220,30 @@ public class RoleBasedAuthorizationPoliciesTests
     }
 
     [Fact]
-    public void BrokersController_MutatingEndpoints_RequireTenantAdminPolicy()
+    public void BrokersController_RequiresBrokerManagePolicyAtClassLevel()
     {
+        // La política está a NIVEL DE CLASE a propósito: así cubre también la LECTURA (GetAll/GetById),
+        // que es donde estaba la fuga de host:port. No debe degradarse a per-método.
+        typeof(BrokersController).GetCustomAttribute<AuthorizeAttribute>()!
+            .Policy.Should().Be(AuthorizationPolicies.BrokerManage);
+    }
+
+    [Fact]
+    public void BrokersController_ReadEndpoints_AreNotAnonymous()
+    {
+        // Regresión directa del defecto: GET lista y GET por id ya no son accesibles sin la política.
         var methods = typeof(BrokersController).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
 
-        foreach (var name in new[] { nameof(BrokersController.Create), nameof(BrokersController.Update), nameof(BrokersController.Delete) })
+        foreach (var name in new[]
+                 {
+                     nameof(BrokersController.GetAll), nameof(BrokersController.GetById),
+                     nameof(BrokersController.Create), nameof(BrokersController.Update), nameof(BrokersController.Delete)
+                 })
         {
             var method = methods.FirstOrDefault(m => m.Name == name);
-            method.Should().NotBeNull();
-            method!.GetCustomAttributes<AuthorizeAttribute>()
-                .Select(a => a.Policy)
-                .Should().Contain(AuthorizationPolicies.TenantAdmin, $"El método {name} debe requerir TenantAdmin");
+            method.Should().NotBeNull($"El controlador debe exponer {name}");
+            method!.GetCustomAttributes<AllowAnonymousAttribute>()
+                .Should().BeEmpty($"El método {name} no debe permitir acceso anónimo");
         }
     }
 

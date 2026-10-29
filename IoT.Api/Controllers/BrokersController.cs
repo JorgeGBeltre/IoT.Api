@@ -10,8 +10,13 @@ namespace IoT.Api.Controllers;
 /// Gestión de endpoints MQTT configurados por el tenant. Cada broker es un
 /// endpoint individual (host:port + protocolo + autenticación) que la plataforma
 /// puede consumir para ingesta de telemetría y despacho de comandos.
+///
+/// TODO el controlador —incluida la LECTURA— exige la política <see cref="AuthorizationPolicies.BrokerManage"/>:
+/// la configuración de brokers es infraestructura (expone host:port) y no debe ser legible por perfiles
+/// de menor privilegio. Antes el listado sólo llevaba un <c>[Authorize]</c> desnudo y cualquier usuario
+/// autenticado del tenant podía leer host:port.
 /// </summary>
-[Authorize]
+[Authorize(Policy = AuthorizationPolicies.BrokerManage)]
 [RequireTenantDataPlane]
 [ApiController]
 [Route("api/v1/brokers")]
@@ -46,7 +51,6 @@ public sealed class BrokersController : ControllerBase
     }
 
     [HttpPost]
-    [Authorize(Policy = AuthorizationPolicies.TenantAdmin)]
     [ProducesResponseType(StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> Create([FromBody] UpsertBrokerRequest request, CancellationToken ct)
@@ -76,7 +80,6 @@ public sealed class BrokersController : ControllerBase
     }
 
     [HttpPut("{id:guid}")]
-    [Authorize(Policy = AuthorizationPolicies.TenantAdmin)]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -97,7 +100,6 @@ public sealed class BrokersController : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
-    [Authorize(Policy = AuthorizationPolicies.TenantAdmin)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)

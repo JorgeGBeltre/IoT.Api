@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Authorization;
+
 namespace IoT.Api.Common;
 
 /// <summary>
@@ -115,6 +117,35 @@ public static class AuthorizationPolicies
     /// </summary>
     public static readonly string[] DefaultCustomerAdminRoles = { "Admin" };
 
+    /// <summary>
+    /// Gestión de las pasarelas de conexión (brokers MQTT): listarlas, crearlas, editarlas y
+    /// borrarlas. Es configuración de INFRAESTRUCTURA del tenant (host:port, protocolo, credenciales),
+    /// no datos operativos, así que se separa de <see cref="TenantAdmin"/> para poder restringirla por
+    /// configuración a un perfil de plataforma/sistema sin alterar quién administra usuarios, auditoría
+    /// o ajustes. Antes el listado (<c>GET</c>) sólo exigía sesión válida, de modo que un perfil de sólo
+    /// lectura (Operator/Viewer) podía leer <c>host:port</c> de cada broker llamando a la API; esta
+    /// política cierra esa fuga cubriendo también la lectura.
+    ///
+    /// Gate por ROL EXCLUSIVAMENTE (ver <see cref="AddBrokerManagePolicy"/>): a diferencia del resto de
+    /// políticas, NO admite un permiso fino como puente. Es deliberado: si admitiera <c>settings.manage</c>
+    /// por OR, fijar <c>BrokerManageRoles</c> a un superadmin de plataforma NO restringiría de verdad
+    /// (cualquier admin con <c>settings.manage</c> seguiría pasando). Al ser sólo-rol, los roles
+    /// configurados son la ÚNICA puerta. Si en el futuro se quiere gestión por permiso, el camino correcto
+    /// es un permiso DEDICADO (p. ej. <c>brokers.manage</c>) sembrado aparte, no reutilizar settings.manage.
+    /// </summary>
+    public const string BrokerManage = "BrokerManage";
+
+    /// <summary>
+    /// Roles admitidos por defecto para <see cref="BrokerManage"/>. Incluye el administrador del tenant
+    /// —que ya era quien creaba/editaba/borraba brokers— y los nombres de superadmin de plataforma que ya
+    /// reconoce y deja ver <c>/brokers</c> el frontend ("Superadmin", "Platform Super Admin"), para que el
+    /// gate del backend quede ALINEADO con el de la UI y no bloquee a quien la UI sí deja entrar. Sólo
+    /// excluye a los perfiles de menor privilegio (Operator/Viewer/Auditor). Para limitar los brokers
+    /// EXCLUSIVAMENTE a un superadmin de plataforma, fíjese <c>Authorization:BrokerManageRoles</c>
+    /// (p. ej. <c>["Platform Super Admin"]</c>) sin tocar código ni afectar al resto de la administración.
+    /// </summary>
+    public static readonly string[] DefaultBrokerManageRoles = { "Admin", "Superadmin", "Platform Super Admin" };
+
     public static string[] ResolveDeviceManageRoles(IConfiguration configuration) =>
         ResolveRoles(configuration, "Authorization:DeviceManageRoles", DefaultDeviceManageRoles);
 
@@ -123,6 +154,26 @@ public static class AuthorizationPolicies
 
     public static string[] ResolveCustomerAdminRoles(IConfiguration configuration) =>
         ResolveRoles(configuration, "Authorization:CustomerAdminRoles", DefaultCustomerAdminRoles);
+
+    public static string[] ResolveBrokerManageRoles(IConfiguration configuration) =>
+        ResolveRoles(configuration, "Authorization:BrokerManageRoles", DefaultBrokerManageRoles);
+
+    /// <summary>
+    /// Registra la política <see cref="BrokerManage"/> con su mecánica DEFINITIVA. Existe como método
+    /// compartido para que la API (Program.cs) y las pruebas usen EXACTAMENTE el mismo registro y un
+    /// test no pueda validar por error una variante distinta de la de producción (que fue justo lo que
+    /// enmascaró el puente por <c>settings.manage</c>). Gate por ROL exclusivamente: los roles resueltos
+    /// de <c>Authorization:BrokerManageRoles</c> son la única puerta.
+    /// </summary>
+    public static void AddBrokerManagePolicy(AuthorizationOptions options, IConfiguration configuration)
+    {
+        var roles = ResolveBrokerManageRoles(configuration);
+        options.AddPolicy(
+            BrokerManage,
+            policy => policy
+                .RequireAuthenticatedUser()
+                .RequireAssertion(ctx => HasAnyRole(ctx.User, roles)));
+    }
 
     public static string[] ResolveFirmwareManageRoles(IConfiguration configuration) =>
         ResolveRoles(configuration, "Authorization:FirmwareManageRoles", DefaultFirmwareManageRoles);

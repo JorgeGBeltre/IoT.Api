@@ -228,6 +228,12 @@ builder.Services.AddAuthorization(options =>
                 ctx.User,
                 IoT.Domain.Common.StandardPermissions.CustomersManage,
                 customerAdminRoles)));
+
+    // Gestionar las pasarelas de conexión (brokers MQTT) es configuración de infraestructura: antes el
+    // listado sólo exigía sesión válida y filtraba host:port a cualquier perfil. Gate por ROL (los roles
+    // configurados son la ÚNICA puerta, sin puente por permiso) para que fijar Authorization:BrokerManageRoles
+    // a un perfil de plataforma lo restrinja de verdad. Registro compartido con las pruebas (misma mecánica).
+    IoT.Api.Common.AuthorizationPolicies.AddBrokerManagePolicy(options, builder.Configuration);
 });
 
 // 7. Swagger / OpenAPI Documentation

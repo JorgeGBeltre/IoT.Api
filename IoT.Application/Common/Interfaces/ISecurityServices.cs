@@ -87,5 +87,6 @@ public interface IPermissionService
         Guid tenantId,
         Guid userId,
         string roleName,
+        Guid? roleId = null,
         CancellationToken cancellationToken = default);
 }

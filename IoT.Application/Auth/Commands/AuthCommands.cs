@@ -108,7 +108,7 @@ public sealed class LoginCommandHandler : IRequestHandler<LoginCommand, Result<A
         }
 
         var permissions = _permissionService != null
-            ? await _permissionService.GetEffectivePermissionsAsync(user.TenantId, user.Id, user.RoleName, cancellationToken)
+            ? await _permissionService.GetEffectivePermissionsAsync(user.TenantId, user.Id, user.RoleName, user.RoleId, cancellationToken)
             : StandardPermissions.GetDefaultPermissionsForRole(user.RoleName);
 
         var tokenResult = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath, permissions);
@@ -309,6 +309,7 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
     private readonly IUnitOfWork _unitOfWork;
     private readonly ITenantContext? _tenantContext;
     private readonly ICustomerRepository? _customerRepository;
+    private readonly IPermissionService? _permissionService;
 
     public ChangeTemporaryPasswordCommandHandler(
         IUserRepository userRepository,
@@ -317,7 +318,8 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
         IAuditLogRepository auditLogRepository,
         IUnitOfWork unitOfWork,
         ITenantContext? tenantContext = null,
-        ICustomerRepository? customerRepository = null)
+        ICustomerRepository? customerRepository = null,
+        IPermissionService? permissionService = null)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
@@ -326,6 +328,7 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
         _unitOfWork = unitOfWork;
         _tenantContext = tenantContext;
         _customerRepository = customerRepository;
+        _permissionService = permissionService;
     }
 
     public async Task<Result<AuthTokenResult>> Handle(ChangeTemporaryPasswordCommand request, CancellationToken cancellationToken)
@@ -388,7 +391,16 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
             customerPath = customer?.Path;
         }
 
-        var token = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath);
+        // Igual que en el login: el token reemitido tras el cambio de clave temporal lleva los
+        // permisos efectivos del usuario (RBAC fino, ADR-013 D3). Antes se usaba la sobrecarga sin
+        // permisos, dejando la sesión post-cambio con autorización sólo-por-rol hasta el próximo
+        // login (H1/A de la auditoría RBAC). Fail-closed: sin IPermissionService (p. ej. en tests)
+        // se cae a los permisos por defecto del rol.
+        var permissions = _permissionService != null
+            ? await _permissionService.GetEffectivePermissionsAsync(user.TenantId, user.Id, user.RoleName, user.RoleId, cancellationToken)
+            : StandardPermissions.GetDefaultPermissionsForRole(user.RoleName);
+
+        var token = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath, permissions);
         return Result<AuthTokenResult>.Success(token);
     }
 }

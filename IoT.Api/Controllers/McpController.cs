@@ -18,15 +18,18 @@ public sealed class McpController : ControllerBase
 {
     private readonly IMcpFleetService _mcpFleetService;
     private readonly ITenantContext _tenantContext;
+    private readonly IAuthorizationService _authorizationService;
     private readonly ILogger<McpController> _logger;
 
     public McpController(
         IMcpFleetService mcpFleetService,
         ITenantContext tenantContext,
+        IAuthorizationService authorizationService,
         ILogger<McpController> logger)
     {
         _mcpFleetService = mcpFleetService;
         _tenantContext = tenantContext;
+        _authorizationService = authorizationService;
         _logger = logger;
     }
 
@@ -187,6 +190,26 @@ public sealed class McpController : ControllerBase
 
             case "send_device_command":
             {
+                // Accionamiento FÍSICO (corte de combustible, reinicio, relé): exige la MISMA
+                // política DeviceCommand que protege CommandsController. El [Authorize] de este
+                // controlador es desnudo a propósito —los tres tools de LECTURA
+                // (list_fleet_status, get_device_telemetry, get_device_events) deben seguir
+                // abiertos a perfiles de sólo consulta—, así que el gate de ESCRITURA se aplica
+                // aquí, por herramienta, de forma imperativa. Sin este chequeo cualquier usuario
+                // autenticado del tenant —incluido un Viewer de sólo lectura— podía despachar
+                // comandos físicos por MCP, saltándose el gate declarativo de CommandsController.
+                var deviceCommandAuthz = await _authorizationService.AuthorizeAsync(
+                    User, AuthorizationPolicies.DeviceCommand);
+                if (!deviceCommandAuthz.Succeeded)
+                {
+                    _logger.LogWarning(
+                        "MCP: send_device_command DENEGADO por autorización (política DeviceCommand) en el tenant {TenantId}.",
+                        tenantId);
+                    return BuildMcpToolResult(
+                        "No autorizado: enviar comandos a dispositivos requiere la capacidad DeviceCommand (rol Admin u Operator).",
+                        isError: true);
+                }
+
                 if (args.ValueKind != JsonValueKind.Object ||
                     !args.TryGetProperty("deviceId", out var dIdProp) ||
                     !Guid.TryParse(dIdProp.GetString(), out var deviceGuid) ||

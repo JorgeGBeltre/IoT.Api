@@ -1,3 +1,4 @@
+using IoT.Application.Common.Interfaces;
 using IoT.Domain.Common;
 using IoT.Domain.Repositories;
 using MediatR;
@@ -19,10 +20,14 @@ public sealed record GetCurrentUserProfileQuery(Guid UserId, Guid TenantId) : IR
 public sealed class GetCurrentUserProfileQueryHandler : IRequestHandler<GetCurrentUserProfileQuery, Result<UserProfileDto>>
 {
     private readonly IUserRepository _userRepository;
+    private readonly IPermissionService? _permissionService;
 
-    public GetCurrentUserProfileQueryHandler(IUserRepository userRepository)
+    public GetCurrentUserProfileQueryHandler(
+        IUserRepository userRepository,
+        IPermissionService? permissionService = null)
     {
         _userRepository = userRepository;
+        _permissionService = permissionService;
     }
 
     public async Task<Result<UserProfileDto>> Handle(GetCurrentUserProfileQuery request, CancellationToken cancellationToken)
@@ -33,7 +38,14 @@ public sealed class GetCurrentUserProfileQueryHandler : IRequestHandler<GetCurre
             return Result<UserProfileDto>.Failure(new Error("User.NotFound", "Usuario no encontrado en la empresa actual."));
         }
 
-        var permissions = user.UserPermissions.Where(p => p.IsGranted).Select(p => p.Permission?.Code ?? "").ToList();
+        // Permisos EFECTIVOS del usuario (los mismos que viajan en el JWT: permisos del rol +
+        // overrides UserPermission), para que la UI coincida con lo que realmente se autoriza. Antes
+        // sólo se devolvían los grants per-user (siempre vacíos hoy) → el perfil divergía del
+        // enforcement (H4 de la auditoría RBAC). Fail-closed: sin IPermissionService se cae a los
+        // permisos por defecto del rol.
+        var permissions = _permissionService != null
+            ? await _permissionService.GetEffectivePermissionsAsync(user.TenantId, user.Id, user.RoleName, user.RoleId, cancellationToken)
+            : StandardPermissions.GetDefaultPermissionsForRole(user.RoleName);
 
         var dto = new UserProfileDto(
             user.Id,

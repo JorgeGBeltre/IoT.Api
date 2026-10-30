@@ -32,21 +32,30 @@ public sealed class PermissionService : IPermissionService
         Guid tenantId,
         Guid userId,
         string roleName,
+        Guid? roleId = null,
         CancellationToken cancellationToken = default)
     {
         using (_tenantContext.BeginSystemOperation())
         {
             var permissionsSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // 1. Cargar permisos asociados al rol del usuario en la base de datos
-            var rolePermissions = await _context.RolePermissions
+            // 1. Cargar permisos del rol del usuario, SIEMPRE acotados a su tenant.
+            //    Se resuelve por RoleId (identidad exacta del rol) cuando está disponible; si el
+            //    usuario aún no tiene RoleId vinculado (alta reciente, antes del backfill del
+            //    seeder), se cae a la coincidencia por nombre DENTRO del mismo tenant. En ningún
+            //    caso se cruzan tenants: se eliminó la antigua rama cross-tenant por IsSystemRole
+            //    (defensa en profundidad; hoy no se crean roles de sistema, H2 de la auditoría RBAC).
+            var rolePermQuery = _context.RolePermissions
                 .IgnoreQueryFilters()
                 .Include(rp => rp.Role)
                 .Include(rp => rp.Permission)
-                .Where(rp => (rp.TenantId == tenantId || (rp.Role != null && rp.Role.IsSystemRole))
-                             && rp.Role != null
-                             && rp.Role.Name.ToLower() == roleName.Trim().ToLower()
-                             && rp.Permission != null)
+                .Where(rp => rp.TenantId == tenantId && rp.Role != null && rp.Permission != null);
+
+            rolePermQuery = roleId.HasValue && roleId.Value != Guid.Empty
+                ? rolePermQuery.Where(rp => rp.RoleId == roleId.Value)
+                : rolePermQuery.Where(rp => rp.Role!.Name.ToLower() == roleName.Trim().ToLower());
+
+            var rolePermissions = await rolePermQuery
                 .Select(rp => rp.Permission!.Code)
                 .ToListAsync(cancellationToken);
 

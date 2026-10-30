@@ -218,6 +218,19 @@ public static class AuthorizationPolicies
     /// <summary>
     /// ¿Tiene el usuario el permiso fino requerido (claim "permission") o alguno de los roles de fallback?
     /// Permite adopción gradual de RBAC fino (decisión D3) preservando compatibilidad absoluta.
+    ///
+    /// ESTADO REAL (auditoría RBAC fino, 2026-10-29; decisión "C-lean", 2026-10-30): HOY esto es
+    /// AUTORITATIVO POR ROL. La relación es un OR: el permiso fino sólo PUEDE AÑADIR por encima del
+    /// rol, nunca QUITAR por debajo. Como (a) los permisos efectivos de cada usuario se derivan de
+    /// su rol —no hay runtime que conceda/revoque <c>UserPermission</c> ni cree roles a medida— y
+    /// (b) el conjunto de roles de fallback de cada política coincide con los roles que ya tendrían
+    /// el permiso, el claim <c>permission</c> jamás cambia por sí solo una decisión: si el rol pasa,
+    /// pasa; si no, el permiso fino tampoco está presente para rescatarlo. En particular, una
+    /// revocación por usuario NO sería efectiva mientras el rol siga en el fallback (esto es el
+    /// hallazgo "B" de la auditoría, deliberadamente NO corregido en C-lean). Para que el permiso
+    /// fino pueda DENEGAR hace falta un cambio de modelo aparte ("B": claim de denegación con
+    /// precedencia + superficie de grant/revoke + quitar el OR de rol), que NO se ha adoptado.
+    /// Trátese, pues, el fallback de rol como la puerta real.
     /// </summary>
     public static bool HasPermissionOrRole(System.Security.Claims.ClaimsPrincipal user, string permissionCode, string[] fallbackRoles)
     {

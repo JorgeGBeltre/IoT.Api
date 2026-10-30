@@ -143,6 +143,11 @@ public class SecurityAndMultiTenantIntegrationTests
         _jwtMock.Setup(j => j.GenerateToken(user, tenantId, It.IsAny<Guid?>(), It.IsAny<string?>()))
             .Returns(new AuthTokenResult("new_jwt_token", tenantId, user.Id, user.Username, user.Email, user.RoleName, false, DateTime.UtcNow.AddDays(7)));
 
+        // El token reemitido tras el cambio de clave temporal ahora lleva los permisos efectivos
+        // (arreglo A de la auditoría RBAC): el handler invoca la sobrecarga de 5 argumentos.
+        _jwtMock.Setup(j => j.GenerateToken(user, tenantId, It.IsAny<Guid?>(), It.IsAny<string?>(), It.IsAny<IEnumerable<string>?>()))
+            .Returns(new AuthTokenResult("new_jwt_token", tenantId, user.Id, user.Username, user.Email, user.RoleName, false, DateTime.UtcNow.AddDays(7)));
+
         var handler = new ChangeTemporaryPasswordCommandHandler(
             _userRepoMock.Object,
             _hasherMock.Object,
@@ -157,6 +162,7 @@ public class SecurityAndMultiTenantIntegrationTests
 
         // Assert
         result.IsSuccess.Should().BeTrue();
+        result.Value.Token.Should().Be("new_jwt_token");
         user.MustChangePassword.Should().BeFalse();
         user.PasswordHash.Should().Be("new_bcrypt_hash_xyz");
         _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);

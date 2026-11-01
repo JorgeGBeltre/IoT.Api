@@ -150,6 +150,7 @@ public sealed class ProductionBootstrapSeederTests : IAsyncLifetime
         public (string PlainKey, string Hash, string Fingerprint) Generate() => ("plain", "hash", "ffffffff");
         public bool Verify(string plainKey, string hash) => true;
         public string ComputeHash(string plainKey) => "stub-" + plainKey;
+        public (string Hash, string Fingerprint) DeriveFromKnownKey(string plainKey) => ("stub-" + plainKey, "ffffffff");
     }
 
     private sealed class StubEnvironment : IHostEnvironment

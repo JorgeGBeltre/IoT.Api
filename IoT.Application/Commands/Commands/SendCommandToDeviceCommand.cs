@@ -142,7 +142,14 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
             ?? $"devices/{device.ChipId}/commands";
 
         uint expirySeconds = (uint)(_topicRoutingService?.GetDefaultCommandExpiry(device.Model).TotalSeconds ?? 300);
-        string serializedEnvelope = JsonSerializer.Serialize(envelope);
+
+        // El envelope genérico vale para los dispositivos de la plataforma, pero algunos firmwares
+        // (p.ej. Toour/Fligo) sólo entienden su propio formato {"EventType":...}; su CommandParser
+        // descarta cualquier otra cosa. Si el perfil del dispositivo define una codificación propia
+        // se usa esa; si no, el envelope genérico.
+        string serializedEnvelope =
+            _topicRoutingService?.BuildCommandPayload(device.Model, request.CommandName, request.PayloadJson)
+            ?? JsonSerializer.Serialize(envelope);
 
         try
         {

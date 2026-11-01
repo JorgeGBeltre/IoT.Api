@@ -15,6 +15,14 @@ public interface IDeviceApiKeyService
     bool Verify(string plainKey, string hash);
 
     /// <summary>
+    /// Deriva el hash y la huella de una clave YA conocida (gestionada fuera de la plataforma),
+    /// para IMPORTARLA como credencial de un dispositivo sin acuñar una aleatoria. Usa la MISMA
+    /// derivación que <see cref="Generate"/> (SHA-256 hex + huella = primeros 8 hex), de modo que
+    /// la credencial importada es indistinguible de una acuñada frente al broker. No genera clave.
+    /// </summary>
+    (string Hash, string Fingerprint) DeriveFromKnownKey(string plainKey);
+
+    /// <summary>
     /// Calcula el hash de una clave para BUSCARLA por él (lectura indexada). Se expone,
     /// frente a <see cref="Verify"/>, para resolver qué tenant posee una credencial de
     /// bootstrap sin barrer todos los tenants. Es seguro porque la clave es un secreto

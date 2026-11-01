@@ -27,6 +27,16 @@ public interface IDeviceProfile
     IReadOnlyList<string> TelemetryTopicPatterns { get; }
     string CommandTopicPattern { get; }
     string? AttributeTopicPattern => null;
+
+    /// <summary>
+    /// Codifica el payload de un comando de bajada en el formato que ESTE firmware entiende, o
+    /// devuelve null para usar el envelope genérico de la plataforma. La mayoría de dispositivos
+    /// usan el envelope genérico; sólo los que hablan un formato propio (p.ej. <c>{"EventType":…}</c>,
+    /// como Toour/Fligo) lo sobreescriben. <paramref name="payloadJson"/> es el cuerpo opcional del
+    /// comando (un objeto JSON) que el perfil puede incrustar como detalle.
+    /// </summary>
+    string? EncodeCommandPayload(string commandName, string? payloadJson) => null;
+
     IDeviceProtocolAdapter Adapter { get; }
     bool SupportsTransport(string transportName);
 }

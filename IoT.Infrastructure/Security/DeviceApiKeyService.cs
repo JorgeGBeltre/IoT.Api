@@ -19,9 +19,16 @@ public sealed class DeviceApiKeyService : IDeviceApiKeyService
         Span<byte> bytes = stackalloc byte[32];
         RandomNumberGenerator.Fill(bytes);
         string plainKey = Prefix + Base64UrlEncode(bytes);
-        string hash = ComputeHash(plainKey);
-        string fingerprint = hash[..8];
+        var (hash, fingerprint) = DeriveFromKnownKey(plainKey);
         return (plainKey, hash, fingerprint);
+    }
+
+    public (string Hash, string Fingerprint) DeriveFromKnownKey(string plainKey)
+    {
+        string hash = ComputeHash(plainKey);
+        // La huella son los primeros 8 hex del hash: identifica la versión de la clave sin
+        // revelarla. Es la ÚNICA fuente de esta convención (Generate la reutiliza).
+        return (hash, hash[..8]);
     }
 
     public bool Verify(string plainKey, string hash)

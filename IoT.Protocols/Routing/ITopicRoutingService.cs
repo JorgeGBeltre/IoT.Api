@@ -5,6 +5,13 @@ namespace IoT.Protocols.Routing;
 public interface ITopicRoutingService
 {
     string BuildCommandTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null);
+
+    /// <summary>
+    /// Codifica el payload de un comando para el perfil dado, o null si el perfil usa el envelope
+    /// genérico de la plataforma. Resuelve el perfil igual que <see cref="BuildCommandTopic"/>.
+    /// </summary>
+    string? BuildCommandPayload(string? profileIdOrModel, string commandName, string? payloadJson = null);
+
     string BuildAttributeTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null);
     IReadOnlyList<string> GetAllTelemetrySubscriptionPatterns();
     TimeSpan GetDefaultCommandExpiry(string? profileIdOrModel = null);
@@ -36,6 +43,19 @@ public sealed class TopicRoutingService : ITopicRoutingService
         return pattern
             .Replace("{deviceId}", chipId, StringComparison.OrdinalIgnoreCase)
             .Replace("{tenantId}", tenantId?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public string? BuildCommandPayload(string? profileIdOrModel, string commandName, string? payloadJson = null)
+    {
+        if (string.IsNullOrWhiteSpace(profileIdOrModel) || string.IsNullOrWhiteSpace(commandName))
+            return null;
+
+        var profile = _registry.GetProfile(profileIdOrModel) ??
+                      _registry.GetAllProfiles().FirstOrDefault(p =>
+                          string.Equals(p.Model, profileIdOrModel, StringComparison.OrdinalIgnoreCase) ||
+                          string.Equals(p.ProfileId, profileIdOrModel, StringComparison.OrdinalIgnoreCase));
+
+        return profile?.EncodeCommandPayload(commandName, payloadJson);
     }
 
     public string BuildAttributeTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null)

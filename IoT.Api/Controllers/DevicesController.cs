@@ -579,4 +579,34 @@ public sealed class DevicesController : ControllerBase
 
         return Ok(result.Value);
     }
+
+    public sealed record ImportDeviceApiKeyRequest(string ApiKey);
+
+    /// <summary>
+    /// Importa una ApiKey MQTT YA conocida (gestionada fuera de la plataforma) como credencial
+    /// per-device del dispositivo, en vez de acuñar una aleatoria. Pensado para flotas cuyo
+    /// firmware trae una clave de fábrica compartida: se registra cada ChipId con esa clave y el
+    /// equipo autentica por la vía per-device sin tocar el firmware. Devuelve sólo la huella
+    /// (nunca el texto plano). Misma política que la rotación (<see
+    /// cref="AuthorizationPolicies.DeviceManage"/>).
+    /// </summary>
+    [HttpPost("{id:guid}/credentials/import")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ImportDeviceCredentials(Guid id, [FromBody] ImportDeviceApiKeyRequest request, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(
+            new ImportDeviceApiKeyCommand(_tenantContext.TenantId, id, request.ApiKey, User.Identity?.Name),
+            cancellationToken);
+        if (result.IsFailure)
+        {
+            return result.Error.Code == "Device.NotFound"
+                ? NotFound(new { error = result.Error.Message })
+                : BadRequest(new { error = result.Error.Message });
+        }
+
+        return Ok(new { fingerprint = result.Value });
+    }
 }

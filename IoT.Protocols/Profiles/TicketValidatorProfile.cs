@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using IoT.Domain.Enums;
 using IoT.Protocols.Adapters;
 using IoT.Protocols.Contracts;
@@ -44,6 +46,50 @@ public sealed class TicketValidatorProfile : IDeviceProfile
     // "commands/<id>", que es donde PUBLICA. Con el patrón anterior los comandos de la
     // plataforma se publicaban en un tópico que el equipo no escuchaba: no llegaba ninguno.
     public string CommandTopicPattern => "event/{deviceId}";
+
+    // El firmware de Toour/Fligo sólo procesa comandos con el sobre {"EventType":...,"Details":...}
+    // (References/Dispositivos/Toour_IoT/src/src/Infrastructure/Mqtt/CommandParser.cpp:19-39); todo
+    // lo demás lo descarta. Mapeamos el nombre de comando de la plataforma al EventType que el equipo
+    // reconoce. Un comando no mapeado devuelve null y la plataforma usa su envelope genérico.
+    private static readonly IReadOnlyDictionary<string, string> CommandToEventType =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["REBOOT"] = "REBOOT",
+            ["RESTART"] = "REBOOT",
+            ["GET_STATUS"] = "GET_STATUS",
+            ["STATUS"] = "GET_STATUS",
+            ["GET_TELEMETRY"] = "GET_TELEMETRY",
+            ["TELEMETRY"] = "GET_TELEMETRY",
+            ["UpdateFirmwareDevice"] = "UpdateFirmwareDevice",
+            ["OTA"] = "UpdateFirmwareDevice",
+            ["DeviceConfigValidationResponse"] = "DeviceConfigValidationResponse",
+            ["TicketValidationResult"] = "TicketValidationResult",
+        };
+
+    public string? EncodeCommandPayload(string commandName, string? payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(commandName) ||
+            !CommandToEventType.TryGetValue(commandName.Trim(), out var eventType))
+        {
+            return null;
+        }
+
+        // El cuerpo opcional del comando (p.ej. {"IsValid":true,"Message":"ok"} para
+        // TicketValidationResult) se incrusta como Details; si no viene o es inválido, Details={}.
+        JsonNode? details = null;
+        if (!string.IsNullOrWhiteSpace(payloadJson))
+        {
+            try { details = JsonNode.Parse(payloadJson); }
+            catch (JsonException) { details = null; }
+        }
+
+        var root = new JsonObject
+        {
+            ["EventType"] = eventType,
+            ["Details"] = details ?? new JsonObject()
+        };
+        return root.ToJsonString();
+    }
 
     public IDeviceProtocolAdapter Adapter { get; }
 

@@ -205,4 +205,149 @@ public sealed class ProvisionDeviceCommandTests
         added.CustomerId.Should().Be(sessionCustomer, "con nodo de sesión no se resuelve el raíz");
         m.Customers.Verify(r => r.GetRootCustomerIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    [Fact]
+    public async Task Handle_MultiModeProvisioning_BuildsAllTransportBundlesAndPersistsAttributes()
+    {
+        var m = NewMocks();
+        var rootId = Guid.NewGuid();
+        var attrs = new Mock<IDeviceAttributeRepository>();
+        m.Devices.Setup(r => r.GetByChipIdAsync(T1, Chip, It.IsAny<CancellationToken>())).ReturnsAsync((Device?)null);
+        m.Devices.Setup(r => r.ExistsByChipIdGlobalAsync(Chip, It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        m.Customers.Setup(r => r.GetRootCustomerIdAsync(T1, It.IsAny<CancellationToken>())).ReturnsAsync(rootId);
+
+        var handler = new ProvisionDeviceCommandHandler(
+            m.Devices.Object,
+            m.Customers.Object,
+            m.ApiKeys.Object,
+            m.Conn.Object,
+            m.Tenant.Object,
+            m.Uow.Object,
+            m.Revoker.Object,
+            attrs.Object);
+
+        var deviceParams = new Dictionary<string, string?>
+        {
+            ["startup"] = "stay",
+            ["pulse"] = "on",
+            ["pulseWidth"] = "1500",
+            ["sledOnline"] = "off",
+            ["apn"] = "internet.itelcel.com"
+        };
+
+        var result = await handler.Handle(
+            new ProvisionDeviceCommand(
+                T1,
+                Chip,
+                "24:6F:28:AA:BB:CC",
+                "Interruptor Principal",
+                "MQTT-Relay-BLE",
+                "Custom IoT",
+                new[] { CapabilityType.Switch },
+                "operador@t1",
+                FirmwareVersion: "3.7.1",
+                PairingMode: "softap",
+                DeviceKey: "a2a11068-7a28-411f-8c04-d9637c19b1e2",
+                BindToken: "bt_custom_token_123",
+                WifiSsid: "PlantaWiFi",
+                WifiPassword: "WifiPassword123",
+                DeviceParameters: deviceParams),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.DeviceKey.Should().Be("a2a11068-7a28-411f-8c04-d9637c19b1e2");
+        result.Value.BindToken.Should().Be("bt_custom_token_123");
+        result.Value.PairingMode.Should().Be("softap");
+        result.Value.Bundles.Should().NotBeNull();
+
+        var bundles = result.Value.Bundles!;
+        bundles.BleSchemaAJson.Should().Contain("\"ssid\":\"PlantaWiFi\"");
+        bundles.BleSchemaAJson.Should().Contain("\"account\":\"iotk_PLAINTEXT\"");
+        bundles.BleSchemaAJson.Should().Contain("\"bind_token\":\"bt_custom_token_123\"");
+        bundles.BleSchemaAKeyValue.Should().Contain("ssid=PlantaWiFi;pass=WifiPassword123;server=broker.example.com;port=8883;account=iotk_PLAINTEXT;bind_token=bt_custom_token_123;apn=internet.itelcel.com");
+        bundles.BleSchemaBJson.Should().Contain("\"action\":\"provision\"");
+        bundles.SoftApPayloadJson.Should().Contain("\"mqtt_broker\":\"broker.example.com\"");
+        bundles.SoftApPayloadJson.Should().Contain("\"devicekey\":\"a2a11068-7a28-411f-8c04-d9637c19b1e2\"");
+        bundles.SerialAtCommands.Should().Contain(c => c.StartsWith("AT+PROV="));
+
+        // Verificar que el sobre cifrado LAN /zeroconf/config se descifra exactamente con el mismo deviceKey
+        global::IoT.Application.Common.Security.LanZeroconfCrypto.TryExtractDataJson(
+            bundles.LanZeroconfConfigEncryptedJson,
+            "a2a11068-7a28-411f-8c04-d9637c19b1e2",
+            out var decryptedLanJson,
+            out var decryptErr).Should().BeTrue(decryptErr);
+        decryptedLanJson.Should().Contain("\"ssid\":\"PlantaWiFi\"");
+        decryptedLanJson.Should().Contain("\"account\":\"iotk_PLAINTEXT\"");
+        decryptedLanJson.Should().Contain("\"startup\":\"stay\"");
+
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), AttributeScope.Server, "device_key", "a2a11068-7a28-411f-8c04-d9637c19b1e2", It.IsAny<CancellationToken>()), Times.Once);
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), AttributeScope.Server, "bind_token", "bt_custom_token_123", It.IsAny<CancellationToken>()), Times.Once);
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), AttributeScope.Shared, "startup", "stay", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ClaimDeviceCommand_ValidatesBindTokenInConstantTime_AndRejectsMismatch()
+    {
+        var m = NewMocks();
+        var attrs = new Mock<IDeviceAttributeRepository>();
+        var existing = Device.Create(T1, Chip, "24:6F:28:00:00:01", "Sensor GLP", "MQTT-PressureLevelSensor", "Custom IoT").Value;
+        existing.AssignToCustomer(Guid.NewGuid());
+
+        m.Devices.Setup(r => r.GetByChipIdAsync(T1, Chip, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+        attrs.Setup(a => a.GetByDeviceAndScopeAsync(existing.Id, AttributeScope.Server, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[]
+            {
+                DeviceAttribute.Create(T1, existing.Id, AttributeScope.Server, "bind_token", "bt_secret_9999").Value
+            });
+        attrs.Setup(a => a.GetByDeviceAndScopeAsync(existing.Id, AttributeScope.Client, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<DeviceAttribute>());
+
+        var claimHandler = new ClaimDeviceCommandHandler(
+            m.Devices.Object,
+            m.Customers.Object,
+            attrs.Object,
+            m.ApiKeys.Object,
+            m.Conn.Object,
+            m.Tenant.Object,
+            m.Uow.Object,
+            m.Revoker.Object);
+
+        // 1. Token incorrecto -> rechazado
+        var badRes = await claimHandler.Handle(
+            new ClaimDeviceCommand(T1, Chip, "bt_wrong_0000"),
+            CancellationToken.None);
+        badRes.IsFailure.Should().BeTrue();
+        badRes.Error.Code.Should().Be("Device.InvalidClaimSecret");
+
+        // 2. Token correcto -> reclamado con rotación de ApiKey
+        var okRes = await claimHandler.Handle(
+            new ClaimDeviceCommand(T1, Chip, "bt_secret_9999"),
+            CancellationToken.None);
+        okRes.IsSuccess.Should().BeTrue();
+        okRes.Value.Credentials.MqttUsername.Should().Be("iotk_PLAINTEXT");
+        okRes.Value.BindToken.Should().Be("bt_secret_9999");
+    }
+
+    [Theory]
+    [InlineData("192.168.4.1", 80, true)]
+    [InlineData("10.10.7.1", 80, true)]
+    [InlineData("192.168.1.50", 8081, true)]
+    [InlineData("172.16.0.25", 8081, true)]
+    [InlineData("vesis_a1b2c3.local", 8081, true)]
+    [InlineData("127.0.0.1", 8081, false)]
+    [InlineData("169.254.169.254", 80, false)]
+    [InlineData("8.8.8.8", 8081, false)]
+    [InlineData("http://192.168.4.1/ap", 80, false)]
+    public void LanZeroconfConnectorService_ValidateLanTargetHost_EnforcesRfc1918AndBlocksSsrf(
+        string host,
+        int port,
+        bool expectedAllowed)
+    {
+        var httpFactory = new Mock<System.Net.Http.IHttpClientFactory>();
+        var logger = new Mock<Microsoft.Extensions.Logging.ILogger<global::IoT.Infrastructure.Services.LanZeroconfConnectorService>>();
+        var svc = new global::IoT.Infrastructure.Services.LanZeroconfConnectorService(httpFactory.Object, logger.Object);
+
+        var res = svc.ValidateLanTargetHost(host, port);
+        res.IsSuccess.Should().Be(expectedAllowed);
+    }
 }

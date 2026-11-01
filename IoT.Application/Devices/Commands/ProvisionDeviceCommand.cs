@@ -10,29 +10,13 @@ using MediatR;
 namespace IoT.Application.Devices.Commands;
 
 /// <summary>
-/// Aprovisionamiento en UN solo paso (emparejamiento rápido): registra —o reutiliza— un
-/// dispositivo por su ChipId dentro del tenant del usuario autenticado, lo deja asignado a un
-/// nodo <see cref="Customer"/>, acuña su ApiKey MQTT por-dispositivo y devuelve el PAQUETE de
-/// conexión que la app inyecta en el equipo por BLE/SoftAP: broker host/puerto/TLS,
-/// clientId = ChipId, cuenta = ApiKey en texto plano (visible UNA sola vez) y prefijo de tópicos.
-///
-/// No introduce credenciales, estados ni rutas de adopción nuevas: COMPONE piezas ya decididas
-/// e implementadas —pre-registro (ADR-013; la ingesta nunca auto-crea equipos), credencial
-/// por-dispositivo revocable (Decisión #9) y binding a Customer al crear (ADR-013 E8.4a)— que
-/// hoy exigen 2-3 llamadas (POST /devices + rotate + opcional /customer) y que el texto plano
-/// sólo salga de rotate.
-///
-/// La "cuenta" que inyecta el firmware ES esta ApiKey: el broker la verifica contra
-/// Device.MqttApiKeyHash y exige clientId == ChipId y AdminStatus == Active, aceptando la clave
-/// en el username o el password (password vacío admitido). bind_token/device_key/ota_key del
-/// firmware viven sólo en el equipo (BLE/LAN) y NUNCA llegan al broker, así que no se modelan
-/// aquí: la posesión de esta ApiKey, acuñada durante un claim autenticado, es la prueba del
-/// vínculo. Es genérico para cualquier ESP32 con el mismo contrato (username=cuenta,
-/// clientId=ChipId): no hay ramas por firmware.
-///
-/// Reutilizar un ChipId ya presente EN ESTE tenant re-empareja (rota la ApiKey y cierra la
-/// sesión viva); un ChipId registrado en OTRO tenant se rechaza con el mismo error no-filtrante
-/// del alta normal (unicidad global de IMEI/ChipId).
+/// Aprovisionamiento multi-modo en UN solo paso (BLE GATT Schema A/B, Compatible SoftAP HTTP,
+/// Red Local LAN :8081 /zeroconf/*, Cable USB Web Serial AT+ y Reclamación por BindToken):
+/// registra —o reutiliza— un dispositivo por su ChipId dentro del tenant del usuario autenticado,
+/// lo deja asignado a un nodo <see cref="Customer"/>, acuña su ApiKey MQTT por-dispositivo,
+/// persiste los atributos iniciales (<c>device_key</c>, <c>bind_token</c> y configuración
+/// compartida del equipo) y devuelve el PAQUETE de conexión y las tramas listas para cada
+/// transporte de adopción.
 /// </summary>
 public sealed record ProvisionDeviceCommand(
     Guid TenantId,
@@ -42,7 +26,14 @@ public sealed record ProvisionDeviceCommand(
     string? Model,
     string? Manufacturer,
     IReadOnlyList<CapabilityType>? Capabilities,
-    string? IssuedBy) : IRequest<Result<DeviceProvisioningResultDto>>;
+    string? IssuedBy,
+    string? FirmwareVersion = null,
+    string? PairingMode = null,
+    string? DeviceKey = null,
+    string? BindToken = null,
+    string? WifiSsid = null,
+    string? WifiPassword = null,
+    IReadOnlyDictionary<string, string?>? DeviceParameters = null) : IRequest<Result<DeviceProvisioningResultDto>>;
 
 public sealed class ProvisionDeviceCommandHandler
     : IRequestHandler<ProvisionDeviceCommand, Result<DeviceProvisioningResultDto>>
@@ -54,6 +45,8 @@ public sealed class ProvisionDeviceCommandHandler
     private readonly ITenantContext _tenantContext;
     private readonly IUnitOfWork _unitOfWork;
     private readonly IMqttSessionRevoker? _sessionRevoker;
+    private readonly IDeviceAttributeRepository? _attributeRepository;
+    private readonly ISharedAttributePushDispatcher? _pushDispatcher;
 
     public ProvisionDeviceCommandHandler(
         IDeviceRepository deviceRepository,
@@ -62,7 +55,9 @@ public sealed class ProvisionDeviceCommandHandler
         IMqttConnectionInfoProvider connectionInfo,
         ITenantContext tenantContext,
         IUnitOfWork unitOfWork,
-        IMqttSessionRevoker? sessionRevoker = null)
+        IMqttSessionRevoker? sessionRevoker = null,
+        IDeviceAttributeRepository? attributeRepository = null,
+        ISharedAttributePushDispatcher? pushDispatcher = null)
     {
         _deviceRepository = deviceRepository;
         _customerRepository = customerRepository;
@@ -71,6 +66,8 @@ public sealed class ProvisionDeviceCommandHandler
         _tenantContext = tenantContext;
         _unitOfWork = unitOfWork;
         _sessionRevoker = sessionRevoker;
+        _attributeRepository = attributeRepository;
+        _pushDispatcher = pushDispatcher;
     }
 
     public async Task<Result<DeviceProvisioningResultDto>> Handle(ProvisionDeviceCommand request, CancellationToken cancellationToken)
@@ -82,6 +79,12 @@ public sealed class ProvisionDeviceCommandHandler
                 new Error("Device.InvalidChipId", "ChipId is required."));
         }
 
+        string resolvedDeviceKey = NormalizeDeviceKey(request.DeviceKey);
+        string resolvedBindToken = NormalizeBindToken(request.BindToken);
+        string resolvedPairingMode = string.IsNullOrWhiteSpace(request.PairingMode)
+            ? "ble"
+            : request.PairingMode.Trim().ToLowerInvariant();
+
         // ¿Ya existe EN ESTE tenant? -> re-emparejamiento: se rota la ApiKey y se vuelve a
         // entregar el paquete. Cubre el equipo reseteado de fábrica que vuelve a parear y la
         // app que perdió la clave anterior (el texto plano sólo se muestra una vez).
@@ -89,6 +92,10 @@ public sealed class ProvisionDeviceCommandHandler
         if (existing is not null)
         {
             AssignCapabilities(existing, request.Capabilities);
+            if (!string.IsNullOrWhiteSpace(request.FirmwareVersion))
+            {
+                existing.UpdateFirmwareVersion(request.FirmwareVersion);
+            }
 
             var (rePlainKey, reError) = MintApiKey(existing, request.IssuedBy);
             if (reError is not null)
@@ -97,6 +104,13 @@ public sealed class ProvisionDeviceCommandHandler
             }
 
             _deviceRepository.Update(existing);
+            await PersistProvisioningAttributesAsync(
+                existing,
+                resolvedDeviceKey,
+                resolvedBindToken,
+                resolvedPairingMode,
+                request.DeviceParameters,
+                cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             // Rotar la clave debe cerrar la sesión viva: si no, la credencial anterior seguiría
@@ -107,9 +121,24 @@ public sealed class ProvisionDeviceCommandHandler
                     existing.ChipId, "la ApiKey MQTT del dispositivo se rotó al re-emparejar", cancellationToken);
             }
 
+            await PushSharedAttributesBestEffortAsync(existing, request.DeviceParameters, cancellationToken);
+
+            var reCreds = DeviceCredentialsMapper.ToDto(existing, _connectionInfo, rePlainKey);
+            var reBundles = DeviceProvisioningBundleBuilder.Build(
+                reCreds,
+                resolvedDeviceKey,
+                resolvedBindToken,
+                request.WifiSsid,
+                request.WifiPassword,
+                request.DeviceParameters);
+
             return Result<DeviceProvisioningResultDto>.Success(new DeviceProvisioningResultDto(
                 Created: false,
-                Credentials: DeviceCredentialsMapper.ToDto(existing, _connectionInfo, rePlainKey)));
+                Credentials: reCreds,
+                DeviceKey: resolvedDeviceKey,
+                BindToken: resolvedBindToken,
+                PairingMode: resolvedPairingMode,
+                Bundles: reBundles));
         }
 
         // Unicidad GLOBAL del ChipId/IMEI: un equipo físico vive en un solo tenant. Mismo
@@ -121,7 +150,7 @@ public sealed class ProvisionDeviceCommandHandler
                 new Error("Device.ChipIdTaken", $"ChipId '{chipId}' ya está registrado en la plataforma."));
         }
 
-        // El alta por BLE/SoftAP sólo descubre el ChipId (MAC eFuse); MacAddress y Name son
+        // El alta por BLE/SoftAP/LAN/Serial puede descubrir sólo el ChipId; MacAddress y Name son
         // obligatorios en Device.Create, así que se completan con valores derivados del ChipId
         // cuando la app no los manda (Model/Manufacturer ya tienen defaults en el dominio).
         var createResult = Device.Create(
@@ -130,7 +159,8 @@ public sealed class ProvisionDeviceCommandHandler
             string.IsNullOrWhiteSpace(request.MacAddress) ? chipId : request.MacAddress!,
             string.IsNullOrWhiteSpace(request.Name) ? $"Dispositivo {chipId}" : request.Name!,
             request.Model ?? string.Empty,
-            request.Manufacturer ?? string.Empty);
+            request.Manufacturer ?? string.Empty,
+            request.FirmwareVersion);
         if (createResult.IsFailure)
         {
             return Result<DeviceProvisioningResultDto>.Failure(createResult.Error);
@@ -159,11 +189,133 @@ public sealed class ProvisionDeviceCommandHandler
         }
 
         await _deviceRepository.AddAsync(device, cancellationToken);
+        await PersistProvisioningAttributesAsync(
+            device,
+            resolvedDeviceKey,
+            resolvedBindToken,
+            resolvedPairingMode,
+            request.DeviceParameters,
+            cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        await PushSharedAttributesBestEffortAsync(device, request.DeviceParameters, cancellationToken);
+
+        var creds = DeviceCredentialsMapper.ToDto(device, _connectionInfo, plainKey);
+        var bundles = DeviceProvisioningBundleBuilder.Build(
+            creds,
+            resolvedDeviceKey,
+            resolvedBindToken,
+            request.WifiSsid,
+            request.WifiPassword,
+            request.DeviceParameters);
 
         return Result<DeviceProvisioningResultDto>.Success(new DeviceProvisioningResultDto(
             Created: true,
-            Credentials: DeviceCredentialsMapper.ToDto(device, _connectionInfo, plainKey)));
+            Credentials: creds,
+            DeviceKey: resolvedDeviceKey,
+            BindToken: resolvedBindToken,
+            PairingMode: resolvedPairingMode,
+            Bundles: bundles));
+    }
+
+    private async Task PersistProvisioningAttributesAsync(
+        Device device,
+        string deviceKey,
+        string bindToken,
+        string pairingMode,
+        IReadOnlyDictionary<string, string?>? deviceParameters,
+        CancellationToken cancellationToken)
+    {
+        if (_attributeRepository is null)
+            return;
+
+        await _attributeRepository.UpsertAsync(
+            device.TenantId, device.Id, AttributeScope.Server, "device_key", deviceKey, cancellationToken);
+        await _attributeRepository.UpsertAsync(
+            device.TenantId, device.Id, AttributeScope.Server, "bind_token", bindToken, cancellationToken);
+        await _attributeRepository.UpsertAsync(
+            device.TenantId, device.Id, AttributeScope.Server, "pairing_mode", pairingMode, cancellationToken);
+
+        if (deviceParameters is null)
+            return;
+
+        foreach (var (key, value) in deviceParameters)
+        {
+            if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(value))
+                continue;
+
+            string trimmedKey = key.Trim();
+            if (string.Equals(trimmedKey, "ota_hmac_key", StringComparison.OrdinalIgnoreCase))
+            {
+                await _attributeRepository.UpsertAsync(
+                    device.TenantId, device.Id, AttributeScope.Server, "ota_hmac_key", value.Trim(), cancellationToken);
+                continue;
+            }
+
+            if (string.Equals(trimmedKey, "password", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmedKey, "pass", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmedKey, "wifi_password", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            await _attributeRepository.UpsertAsync(
+                device.TenantId, device.Id, AttributeScope.Shared, trimmedKey, value.Trim(), cancellationToken);
+        }
+    }
+
+    private async Task PushSharedAttributesBestEffortAsync(
+        Device device,
+        IReadOnlyDictionary<string, string?>? deviceParameters,
+        CancellationToken cancellationToken)
+    {
+        if (_pushDispatcher is null || deviceParameters is null || deviceParameters.Count == 0)
+            return;
+
+        var sharedOnly = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in deviceParameters)
+        {
+            if (string.IsNullOrWhiteSpace(k) || string.IsNullOrWhiteSpace(v))
+                continue;
+            if (string.Equals(k, "ota_hmac_key", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(k, "password", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(k, "pass", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            sharedOnly[k.Trim()] = v.Trim();
+        }
+
+        if (sharedOnly.Count == 0)
+            return;
+
+        try
+        {
+            await _pushDispatcher.PushSharedAttributesAsync(device, sharedOnly, cancellationToken);
+        }
+        catch
+        {
+            // Despacho best-effort: el equipo puede estar aún en proceso de reinicio tras el emparejamiento.
+        }
+    }
+
+    private static string NormalizeDeviceKey(string? rawDeviceKey)
+    {
+        if (!string.IsNullOrWhiteSpace(rawDeviceKey) &&
+            !string.Equals(rawDeviceKey.Trim(), "00000000-0000-0000-0000-000000000000", StringComparison.OrdinalIgnoreCase))
+        {
+            return rawDeviceKey.Trim();
+        }
+        return Guid.NewGuid().ToString("D");
+    }
+
+    private static string NormalizeBindToken(string? rawBindToken)
+    {
+        if (!string.IsNullOrWhiteSpace(rawBindToken))
+        {
+            return rawBindToken.Trim();
+        }
+        return $"bt_{Guid.NewGuid():N}"[..19];
     }
 
     private static void AssignCapabilities(Device device, IReadOnlyList<CapabilityType>? capabilities)

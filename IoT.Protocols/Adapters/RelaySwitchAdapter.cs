@@ -65,8 +65,12 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
             var metrics = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
             var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+            ExtractPowerAndConfigFields(root, metrics, attributes);
+
             if (root.TryGetProperty("Details", out var detailsElem))
             {
+                ExtractPowerAndConfigFields(detailsElem, metrics, attributes);
+
                 if (detailsElem.TryGetProperty("rssi", out var rssiElem) && rssiElem.TryGetDouble(out var rssi))
                     metrics["rssi_dbm"] = rssi;
 
@@ -164,6 +168,64 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
 
         attributes[$"{switchName}_state"] = on ? "on" : "off";
         metrics[$"{switchName}_state_binary"] = on ? 1.0 : 0.0;
+    }
+
+    private static void ExtractPowerAndConfigFields(
+        JsonElement elem,
+        Dictionary<string, double> metrics,
+        Dictionary<string, string> attributes)
+    {
+        if (elem.ValueKind != JsonValueKind.Object)
+            return;
+
+        if ((elem.TryGetProperty("voltageV", out var vElem) || elem.TryGetProperty("voltage_v", out vElem) || elem.TryGetProperty("voltage", out vElem)) &&
+            vElem.TryGetDouble(out var vVal))
+        {
+            metrics["voltage_v"] = vVal;
+        }
+
+        if ((elem.TryGetProperty("currentA", out var cElem) || elem.TryGetProperty("current_a", out cElem) || elem.TryGetProperty("current", out cElem)) &&
+            cElem.TryGetDouble(out var cVal))
+        {
+            metrics["current_a"] = cVal;
+        }
+
+        if ((elem.TryGetProperty("powerW", out var pElem) || elem.TryGetProperty("activePowerW", out pElem) || elem.TryGetProperty("power_w", out pElem) || elem.TryGetProperty("power", out pElem)) &&
+            pElem.TryGetDouble(out var pVal))
+        {
+            metrics["power_w"] = pVal;
+        }
+
+        if ((elem.TryGetProperty("energyWh", out var eElem) || elem.TryGetProperty("energy_wh", out eElem)) &&
+            eElem.TryGetDouble(out var eVal))
+        {
+            metrics["energy_wh"] = eVal;
+        }
+        else if ((elem.TryGetProperty("energyKwh", out var kElem) || elem.TryGetProperty("energy_kwh", out kElem)) &&
+                 kElem.TryGetDouble(out var kVal))
+        {
+            metrics["energy_kwh"] = kVal;
+            metrics["energy_wh"] = kVal * 1000.0;
+        }
+
+        foreach (var attrKey in new[] { "startup", "pulse", "sledOnline", "bind_token", "fwVersion", "rstReason" })
+        {
+            if (elem.TryGetProperty(attrKey, out var aElem))
+            {
+                if (aElem.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(aElem.GetString()))
+                    attributes[attrKey] = aElem.GetString()!;
+                else if (aElem.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    attributes[attrKey] = aElem.GetBoolean() ? "on" : "off";
+                else if (aElem.ValueKind == JsonValueKind.Number)
+                    attributes[attrKey] = aElem.GetRawText();
+            }
+        }
+
+        if (elem.TryGetProperty("pulseWidth", out var pwElem) && pwElem.TryGetDouble(out var pwVal))
+        {
+            metrics["pulse_width_ms"] = pwVal;
+            attributes["pulseWidth"] = ((int)pwVal).ToString();
+        }
     }
 
     private static bool LooksLikeJson(string payload)

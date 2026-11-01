@@ -83,6 +83,54 @@ public sealed class DevicesController : ControllerBase
         return CreatedAtAction(nameof(GetDeviceById), new { id = result.Value }, new { id = result.Value });
     }
 
+    public sealed record ProvisionDeviceRequest(
+        string ChipId,
+        string? MacAddress,
+        string? Name,
+        string? Model,
+        string? Manufacturer,
+        IReadOnlyList<CapabilityType>? Capabilities);
+
+    /// <summary>
+    /// Aprovisionamiento en un solo paso (emparejamiento). Registra —o reutiliza— el dispositivo
+    /// por su ChipId en el tenant del usuario, acuña su ApiKey MQTT y devuelve el PAQUETE de
+    /// conexión que la app inyecta en el equipo por BLE/SoftAP: broker host/puerto/TLS,
+    /// clientId = ChipId, cuenta = ApiKey en texto plano (UNA sola vez) y prefijo de tópicos.
+    /// Reutilizar un ChipId ya presente en el tenant ROTA su clave (re-emparejar, 200); un ChipId
+    /// de otro tenant se rechaza. Misma política que el alta y la rotación (<see
+    /// cref="AuthorizationPolicies.DeviceManage"/>); el recorte por subárbol lo imponen la carga
+    /// scoped y la RLS, no la política de rol.
+    /// </summary>
+    [HttpPost("provision")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> ProvisionDevice([FromBody] ProvisionDeviceRequest request, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(
+            new ProvisionDeviceCommand(
+                _tenantContext.TenantId,
+                request.ChipId,
+                request.MacAddress,
+                request.Name,
+                request.Model,
+                request.Manufacturer,
+                request.Capabilities,
+                User.Identity?.Name),
+            cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return BadRequest(new { error = result.Error.Message });
+        }
+
+        var provisioning = result.Value;
+        return provisioning.Created
+            ? CreatedAtAction(nameof(GetDeviceById), new { id = provisioning.Credentials.DeviceId }, provisioning)
+            : Ok(provisioning);
+    }
+
     /// <summary>Credenciales MQTT del dispositivo (datos de conexión + huella de la ApiKey, sin el texto plano).</summary>
     [HttpGet("{id:guid}/credentials")]
     [Authorize(Policy = AuthorizationPolicies.DeviceManage)]

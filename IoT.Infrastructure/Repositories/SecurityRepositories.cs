@@ -23,6 +23,16 @@ public sealed class UserRepository : IUserRepository
             .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
     }
 
+    public async Task<User?> GetByIdSystemAsync(Guid tenantId, Guid id, CancellationToken cancellationToken = default)
+    {
+        return await _context.Users
+            .IgnoreQueryFilters()
+            .Include(u => u.Role)
+            .Include(u => u.UserPermissions)
+            .ThenInclude(up => up.Permission)
+            .FirstOrDefaultAsync(u => u.TenantId == tenantId && u.Id == id, cancellationToken);
+    }
+
     public async Task<User?> GetByUsernameAsync(Guid tenantId, string username, CancellationToken cancellationToken = default)
     {
         return await _context.Users

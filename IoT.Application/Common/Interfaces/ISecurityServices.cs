@@ -53,10 +53,17 @@ public sealed record AuthTokenResult(
     string Role,
     bool MustChangePassword,
     DateTime ExpiresAt,
-    IReadOnlyList<string>? Permissions = null)
+    IReadOnlyList<string>? Permissions = null,
+    string? RefreshToken = null,
+    DateTime? RefreshExpiresAt = null)
 {
     public string RoleName => Role;
 }
+
+public sealed record RefreshTokenClaims(
+    Guid UserId,
+    Guid TenantId,
+    string SecurityStamp);
 
 public interface IJwtTokenGenerator
 {
@@ -79,6 +86,8 @@ public interface IJwtTokenGenerator
         Guid? customerId,
         string? customerPath,
         IEnumerable<string>? permissions);
+
+    RefreshTokenClaims? ValidateRefreshToken(string refreshToken) => null;
 }
 
 public interface IPermissionService

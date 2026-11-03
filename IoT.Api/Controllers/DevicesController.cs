@@ -609,4 +609,69 @@ public sealed class DevicesController : ControllerBase
 
         return Ok(new { fingerprint = result.Value });
     }
+
+    public sealed record UpdateDeviceRequest(
+        string? Name = null,
+        string? Model = null,
+        string? Manufacturer = null,
+        string? Room = null);
+
+    [HttpPatch("{id:guid}")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateDevice(Guid id, [FromBody] UpdateDeviceRequest request, CancellationToken cancellationToken)
+    {
+        Guid? userId = Guid.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value, out var uid)
+            ? uid
+            : null;
+
+        var result = await _mediator.Send(
+            new UpdateDeviceCommand(
+                _tenantContext.TenantId,
+                id,
+                request.Name,
+                request.Model,
+                request.Manufacturer,
+                request.Room,
+                userId,
+                User.Identity?.Name),
+            cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error.Code == "Device.NotFound"
+                ? NotFound(new { error = result.Error.Message })
+                : BadRequest(new { error = result.Error.Message });
+        }
+
+        return Ok(result.Value);
+    }
+
+    [HttpDelete("{id:guid}")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> DeleteDevice(Guid id, CancellationToken cancellationToken)
+    {
+        Guid? userId = Guid.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value, out var uid)
+            ? uid
+            : null;
+
+        var result = await _mediator.Send(
+            new DeleteDeviceCommand(
+                _tenantContext.TenantId,
+                id,
+                userId,
+                User.Identity?.Name),
+            cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return NotFound(new { error = result.Error.Message });
+        }
+
+        return NoContent();
+    }
 }

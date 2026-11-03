@@ -180,6 +180,29 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped, ICustomerScoped
         UpdatedAt = DateTime.UtcNow;
     }
 
+    public Result Rename(string newName)
+    {
+        if (string.IsNullOrWhiteSpace(newName))
+            return Result.Failure(new Error("Device.InvalidName", "El nombre del dispositivo es obligatorio."));
+
+        var trimmed = newName.Trim();
+        if (trimmed.Length > 120)
+            return Result.Failure(new Error("Device.InvalidName", "El nombre del dispositivo no puede superar 120 caracteres."));
+
+        Name = trimmed;
+        UpdatedAt = DateTime.UtcNow;
+        return Result.Success();
+    }
+
+    public void UpdateHardwareInfo(string? model, string? manufacturer)
+    {
+        if (!string.IsNullOrWhiteSpace(model))
+            Model = model.Trim();
+        if (!string.IsNullOrWhiteSpace(manufacturer))
+            Manufacturer = manufacturer.Trim();
+        UpdatedAt = DateTime.UtcNow;
+    }
+
     public void SetAdminStatus(DeviceAdminStatus status)
     {
         AdminStatus = status;

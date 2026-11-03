@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using IoT.Application.Common.Interfaces;
 using IoT.Domain.Common;
@@ -402,5 +404,328 @@ public sealed class ChangeTemporaryPasswordCommandHandler : IRequestHandler<Chan
 
         var token = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath, permissions);
         return Result<AuthTokenResult>.Success(token);
+    }
+}
+
+public sealed record RefreshTokenCommand(
+    string RefreshToken,
+    string? IpAddress = null,
+    string? UserAgent = null) : IRequest<Result<AuthTokenResult>>;
+
+public sealed class RefreshTokenCommandHandler : IRequestHandler<RefreshTokenCommand, Result<AuthTokenResult>>
+{
+    private readonly IUserRepository _userRepository;
+    private readonly IJwtTokenGenerator _jwtTokenGenerator;
+    private readonly ILogger<RefreshTokenCommandHandler> _logger;
+    private readonly ITenantContext? _tenantContext;
+    private readonly ITenantRepository? _tenantRepository;
+    private readonly ICustomerRepository? _customerRepository;
+    private readonly IPermissionService? _permissionService;
+
+    public RefreshTokenCommandHandler(
+        IUserRepository userRepository,
+        IJwtTokenGenerator jwtTokenGenerator,
+        ILogger<RefreshTokenCommandHandler> logger,
+        ITenantContext? tenantContext = null,
+        ITenantRepository? tenantRepository = null,
+        ICustomerRepository? customerRepository = null,
+        IPermissionService? permissionService = null)
+    {
+        _userRepository = userRepository;
+        _jwtTokenGenerator = jwtTokenGenerator;
+        _logger = logger;
+        _tenantContext = tenantContext;
+        _tenantRepository = tenantRepository;
+        _customerRepository = customerRepository;
+        _permissionService = permissionService;
+    }
+
+    public async Task<Result<AuthTokenResult>> Handle(RefreshTokenCommand request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.RefreshToken))
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidRefreshToken", "El token de renovación es obligatorio."));
+        }
+
+        var claims = _jwtTokenGenerator.ValidateRefreshToken(request.RefreshToken);
+        if (claims is null)
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidRefreshToken", "La sesión ha expirado o el token de renovación no es válido."));
+        }
+
+        if (_tenantContext != null)
+        {
+            _tenantContext.IsSystemOperation = true;
+        }
+
+        if (_tenantRepository is not null)
+        {
+            var tenant = await _tenantRepository.GetByIdAsync(claims.TenantId, cancellationToken);
+            if (tenant is null || !tenant.IsActive)
+            {
+                return Result<AuthTokenResult>.Failure(new Error("Auth.TenantInactive", "La organización asociada a la cuenta no está activa."));
+            }
+        }
+
+        var user = await _userRepository.GetByIdSystemAsync(claims.TenantId, claims.UserId, cancellationToken)
+            ?? await _userRepository.GetByIdAsync(claims.UserId, cancellationToken);
+
+        if (user is null || user.TenantId != claims.TenantId || !user.IsActive)
+        {
+            _logger.LogWarning("Refresh token rejected for inactive or missing user {UserId}", claims.UserId);
+            return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidRefreshToken", "La cuenta no está activa o la sesión fue revocada."));
+        }
+
+        if (user.IsLockedOut)
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.LockedOut", "La cuenta está bloqueada temporalmente."));
+        }
+
+        var expectedBytes = Encoding.UTF8.GetBytes(user.SecurityStamp ?? string.Empty);
+        var providedBytes = Encoding.UTF8.GetBytes(claims.SecurityStamp ?? string.Empty);
+        if (expectedBytes.Length == 0 ||
+            expectedBytes.Length != providedBytes.Length ||
+            !CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes))
+        {
+            _logger.LogWarning("Refresh token rejected due to rotated SecurityStamp for user {UserId}", user.Id);
+            return Result<AuthTokenResult>.Failure(new Error("Auth.RefreshRevoked", "La sesión fue revocada por un cambio de seguridad. Inicie sesión nuevamente."));
+        }
+
+        string? customerPath = null;
+        if (_customerRepository is not null && user.CustomerId.HasValue && user.CustomerId.Value != Guid.Empty)
+        {
+            var customer = await _customerRepository.GetByIdAsync(user.CustomerId.Value, cancellationToken);
+            customerPath = customer?.Path;
+        }
+
+        var permissions = _permissionService != null
+            ? await _permissionService.GetEffectivePermissionsAsync(user.TenantId, user.Id, user.RoleName, user.RoleId, cancellationToken)
+            : StandardPermissions.GetDefaultPermissionsForRole(user.RoleName);
+
+        var rotated = _jwtTokenGenerator.GenerateToken(user, user.TenantId, user.CustomerId, customerPath, permissions);
+        return Result<AuthTokenResult>.Success(rotated);
+    }
+}
+
+public sealed record RegisterAccountCommand(
+    string FullName,
+    string Email,
+    string Password,
+    string? OrganizationName = null,
+    string? Username = null,
+    string? IpAddress = null,
+    string? UserAgent = null) : IRequest<Result<AuthTokenResult>>;
+
+public sealed class RegisterAccountCommandHandler : IRequestHandler<RegisterAccountCommand, Result<AuthTokenResult>>
+{
+    private readonly ITenantRepository _tenantRepository;
+    private readonly ICustomerRepository _customerRepository;
+    private readonly IUserRepository _userRepository;
+    private readonly IPasswordHasher _passwordHasher;
+    private readonly IJwtTokenGenerator _jwtTokenGenerator;
+    private readonly IAuditLogRepository _auditLogRepository;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly ILogger<RegisterAccountCommandHandler> _logger;
+    private readonly ITenantContext? _tenantContext;
+    private readonly IPermissionService? _permissionService;
+
+    public RegisterAccountCommandHandler(
+        ITenantRepository tenantRepository,
+        ICustomerRepository customerRepository,
+        IUserRepository userRepository,
+        IPasswordHasher passwordHasher,
+        IJwtTokenGenerator jwtTokenGenerator,
+        IAuditLogRepository auditLogRepository,
+        IUnitOfWork unitOfWork,
+        ILogger<RegisterAccountCommandHandler> logger,
+        ITenantContext? tenantContext = null,
+        IPermissionService? permissionService = null)
+    {
+        _tenantRepository = tenantRepository;
+        _customerRepository = customerRepository;
+        _userRepository = userRepository;
+        _passwordHasher = passwordHasher;
+        _jwtTokenGenerator = jwtTokenGenerator;
+        _auditLogRepository = auditLogRepository;
+        _unitOfWork = unitOfWork;
+        _logger = logger;
+        _tenantContext = tenantContext;
+        _permissionService = permissionService;
+    }
+
+    public async Task<Result<AuthTokenResult>> Handle(RegisterAccountCommand request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.FullName))
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidName", "El nombre completo es obligatorio."));
+        }
+
+        var normalizedEmail = request.Email?.Trim().ToLowerInvariant() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(normalizedEmail) || !Regex.IsMatch(normalizedEmail, @"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.InvalidEmail", "Ingrese un correo electrónico válido."));
+        }
+
+        try
+        {
+            _passwordHasher.ValidateComplexity(request.Password);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Password.PolicyViolation", ex.Message));
+        }
+
+        if (_tenantContext != null)
+        {
+            _tenantContext.IsSystemOperation = true;
+        }
+
+        var existingByEmail = await _userRepository.FindByUsernameOrEmailGlobalAsync(normalizedEmail, cancellationToken);
+        if (existingByEmail is not null)
+        {
+            return Result<AuthTokenResult>.Failure(new Error("Auth.EmailAlreadyRegistered", "Ya existe una cuenta asociada a este correo electrónico."));
+        }
+
+        var desiredUsername = !string.IsNullOrWhiteSpace(request.Username)
+            ? request.Username.Trim()
+            : normalizedEmail;
+
+        if (!string.Equals(desiredUsername, normalizedEmail, StringComparison.OrdinalIgnoreCase))
+        {
+            var existingByUsername = await _userRepository.FindByUsernameOrEmailGlobalAsync(desiredUsername, cancellationToken);
+            if (existingByUsername is not null)
+            {
+                return Result<AuthTokenResult>.Failure(new Error("Auth.UsernameTaken", "El nombre de usuario elegido ya está en uso."));
+            }
+        }
+
+        var orgName = !string.IsNullOrWhiteSpace(request.OrganizationName)
+            ? request.OrganizationName.Trim()
+            : $"Hogar de {request.FullName.Trim()}";
+
+        var slug = Regex.Replace(orgName.ToUpperInvariant(), @"[^A-Z0-9]+", "-").Trim('-');
+        if (slug.Length > 10) slug = slug[..10].TrimEnd('-');
+        if (string.IsNullOrEmpty(slug)) slug = "ESPACIO";
+
+        string tenantCode = $"{slug}-{RandomNumberGenerator.GetHexString(6)}";
+        if (await _tenantRepository.GetByCodeAsync(tenantCode, cancellationToken) is not null)
+        {
+            tenantCode = $"{slug}-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
+        }
+
+        var tenantResult = Tenant.Create(orgName, tenantCode);
+        if (tenantResult.IsFailure)
+        {
+            return Result<AuthTokenResult>.Failure(tenantResult.Error);
+        }
+
+        var tenant = tenantResult.Value;
+        var rootCustomerResult = Customer.Create(tenant.Id, orgName, parent: null, code: "ROOT");
+        if (rootCustomerResult.IsFailure)
+        {
+            return Result<AuthTokenResult>.Failure(rootCustomerResult.Error);
+        }
+
+        var rootCustomer = rootCustomerResult.Value;
+        var passwordHash = _passwordHasher.Hash(request.Password);
+        var userResult = User.Create(
+            tenant.Id,
+            desiredUsername,
+            normalizedEmail,
+            passwordHash,
+            request.FullName.Trim(),
+            roleName: "Admin",
+            mustChangePassword: false);
+
+        if (userResult.IsFailure)
+        {
+            return Result<AuthTokenResult>.Failure(userResult.Error);
+        }
+
+        var user = userResult.Value;
+        user.AssignToCustomer(rootCustomer.Id);
+
+        await _tenantRepository.AddAsync(tenant, cancellationToken);
+        await _customerRepository.AddAsync(rootCustomer, cancellationToken);
+        await _userRepository.AddAsync(user, cancellationToken);
+        await _auditLogRepository.AddAsync(new AuditLog(
+            Guid.NewGuid(),
+            tenant.Id,
+            user.Id,
+            user.Username,
+            "AccountRegistered",
+            $"Registro de cuenta y espacio '{orgName}'.",
+            request.IpAddress,
+            request.UserAgent), cancellationToken);
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        var permissions = _permissionService != null
+            ? await _permissionService.GetEffectivePermissionsAsync(tenant.Id, user.Id, user.RoleName, user.RoleId, cancellationToken)
+            : StandardPermissions.GetDefaultPermissionsForRole(user.RoleName);
+
+        var tokenResult = _jwtTokenGenerator.GenerateToken(user, tenant.Id, rootCustomer.Id, rootCustomer.Path, permissions);
+        _logger.LogInformation("Registered new account {UserId} under isolated Tenant {TenantId}", user.Id, tenant.Id);
+
+        return Result<AuthTokenResult>.Success(tokenResult);
+    }
+}
+
+public sealed record LogoutCommand(
+    Guid UserId,
+    Guid TenantId,
+    string? IpAddress = null,
+    string? UserAgent = null) : IRequest<Result>;
+
+public sealed class LogoutCommandHandler : IRequestHandler<LogoutCommand, Result>
+{
+    private readonly IUserRepository _userRepository;
+    private readonly IAuditLogRepository _auditLogRepository;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly ITenantContext? _tenantContext;
+
+    public LogoutCommandHandler(
+        IUserRepository userRepository,
+        IAuditLogRepository auditLogRepository,
+        IUnitOfWork unitOfWork,
+        ITenantContext? tenantContext = null)
+    {
+        _userRepository = userRepository;
+        _auditLogRepository = auditLogRepository;
+        _unitOfWork = unitOfWork;
+        _tenantContext = tenantContext;
+    }
+
+    public async Task<Result> Handle(LogoutCommand request, CancellationToken cancellationToken)
+    {
+        if (request.UserId == Guid.Empty || request.TenantId == Guid.Empty)
+        {
+            return Result.Success();
+        }
+
+        if (_tenantContext != null)
+        {
+            _tenantContext.IsSystemOperation = true;
+        }
+
+        var user = await _userRepository.GetByIdSystemAsync(request.TenantId, request.UserId, cancellationToken)
+            ?? await _userRepository.GetByIdAsync(request.UserId, cancellationToken);
+        if (user is not null && user.TenantId == request.TenantId)
+        {
+            user.RotateSecurityStamp();
+            _userRepository.Update(user);
+            await _auditLogRepository.AddAsync(new AuditLog(
+                Guid.NewGuid(),
+                user.TenantId,
+                user.Id,
+                user.Username,
+                "Logout",
+                "Cierre de sesión y revocación de tokens de renovación.",
+                request.IpAddress,
+                request.UserAgent), cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        return Result.Success();
     }
 }

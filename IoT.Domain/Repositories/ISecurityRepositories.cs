@@ -5,6 +5,7 @@ namespace IoT.Domain.Repositories;
 public interface IUserRepository
 {
     Task<User?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<User?> GetByIdSystemAsync(Guid tenantId, Guid id, CancellationToken cancellationToken = default);
     Task<User?> GetByUsernameAsync(Guid tenantId, string username, CancellationToken cancellationToken = default);
     Task<User?> GetByEmailAsync(Guid tenantId, string email, CancellationToken cancellationToken = default);
     Task<User?> FindByUsernameOrEmailGlobalAsync(string identifier, CancellationToken cancellationToken = default);

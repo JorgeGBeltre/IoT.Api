@@ -132,6 +132,12 @@ public sealed class User : AggregateRoot<Guid>, ITenantScoped, ICustomerScoped
         UpdatedAt = DateTime.UtcNow;
     }
 
+    public void RotateSecurityStamp()
+    {
+        SecurityStamp = Guid.NewGuid().ToString("N");
+        UpdatedAt = DateTime.UtcNow;
+    }
+
     /// <summary>Asigna el usuario a un nodo <see cref="Customer"/> de la jerarquía (ADR-013).</summary>
     public void AssignToCustomer(Guid customerId)
     {

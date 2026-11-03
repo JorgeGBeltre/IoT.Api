@@ -70,17 +70,79 @@ public sealed class AuthController : ControllerBase
             });
         }
 
-        // Set secure HTTP-only cookie
-        var cookieOptions = new CookieOptions
-        {
-            HttpOnly = true,
-            Secure = Request.IsHttps,
-            SameSite = SameSiteMode.Lax,
-            Path = "/",
-            Expires = DateTimeOffset.UtcNow.AddDays(7)
-        };
-        Response.Cookies.Append("iot_auth_token", result.Value.Token, cookieOptions);
+        AppendSessionCookies(result.Value);
 
+        return Ok(result.Value);
+    }
+
+    public sealed record RegisterAccountDto(
+        string FullName,
+        string Email,
+        string Password,
+        string? OrganizationName = null,
+        string? Username = null);
+
+    [HttpPost("register")]
+    [AllowAnonymous]
+    public async Task<IActionResult> Register([FromBody] RegisterAccountDto request, CancellationToken cancellationToken)
+    {
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString();
+        var userAgent = Request.Headers.UserAgent.ToString();
+
+        var result = await _mediator.Send(new RegisterAccountCommand(
+            request.FullName,
+            request.Email,
+            request.Password,
+            request.OrganizationName,
+            request.Username,
+            ip,
+            userAgent), cancellationToken);
+
+        if (result.IsFailure)
+        {
+            var status = result.Error.Code is "Auth.EmailAlreadyRegistered" or "Auth.UsernameTaken"
+                ? StatusCodes.Status409Conflict
+                : StatusCodes.Status400BadRequest;
+
+            return StatusCode(status, new ProblemDetails
+            {
+                Title = "No se pudo completar el registro",
+                Detail = result.Error.Message,
+                Status = status
+            });
+        }
+
+        AppendSessionCookies(result.Value);
+        return StatusCode(StatusCodes.Status201Created, result.Value);
+    }
+
+    public sealed record RefreshSessionDto(string? RefreshToken = null);
+
+    [HttpPost("refresh")]
+    [AllowAnonymous]
+    public async Task<IActionResult> Refresh([FromBody] RefreshSessionDto? request, CancellationToken cancellationToken)
+    {
+        var refreshToken = !string.IsNullOrWhiteSpace(request?.RefreshToken)
+            ? request!.RefreshToken!
+            : Request.Cookies["iot_refresh_token"] ?? string.Empty;
+
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString();
+        var userAgent = Request.Headers.UserAgent.ToString();
+
+        var result = await _mediator.Send(new RefreshTokenCommand(refreshToken, ip, userAgent), cancellationToken);
+        if (result.IsFailure)
+        {
+            Response.Cookies.Delete("iot_auth_token", new CookieOptions { Path = "/" });
+            Response.Cookies.Delete("iot_refresh_token", new CookieOptions { Path = "/api/v1/auth" });
+            return Unauthorized(new ProblemDetails
+            {
+                Title = "Sesión expirada",
+                Detail = result.Error.Message,
+                Status = StatusCodes.Status401Unauthorized
+            });
+        }
+
+        AppendSessionCookies(result.Value);
         return Ok(result.Value);
     }
 
@@ -193,9 +255,47 @@ public sealed class AuthController : ControllerBase
 
     [HttpPost("logout")]
     [Authorize]
-    public IActionResult Logout()
+    public async Task<IActionResult> Logout(CancellationToken cancellationToken)
     {
-        Response.Cookies.Delete("iot_auth_token");
+        var sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
+        if (Guid.TryParse(sub, out var userId) && _tenantContext.TenantId != Guid.Empty)
+        {
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString();
+            var userAgent = Request.Headers.UserAgent.ToString();
+            await _mediator.Send(new LogoutCommand(userId, _tenantContext.TenantId, ip, userAgent), cancellationToken);
+        }
+
+        Response.Cookies.Delete("iot_auth_token", new CookieOptions { Path = "/" });
+        Response.Cookies.Delete("iot_refresh_token", new CookieOptions { Path = "/api/v1/auth" });
         return Ok(new { success = true, message = "Sesión cerrada exitosamente." });
+    }
+
+    private void AppendSessionCookies(AuthTokenResult session)
+    {
+        var accessCookieOptions = new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = Request.IsHttps,
+            SameSite = SameSiteMode.Lax,
+            Path = "/",
+            Expires = new DateTimeOffset(DateTime.SpecifyKind(session.ExpiresAt, DateTimeKind.Utc))
+        };
+        Response.Cookies.Append("iot_auth_token", session.Token, accessCookieOptions);
+
+        if (!string.IsNullOrWhiteSpace(session.RefreshToken))
+        {
+            var refreshExpires = session.RefreshExpiresAt.HasValue
+                ? new DateTimeOffset(DateTime.SpecifyKind(session.RefreshExpiresAt.Value, DateTimeKind.Utc))
+                : DateTimeOffset.UtcNow.AddDays(14);
+            var refreshCookieOptions = new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = Request.IsHttps,
+                SameSite = SameSiteMode.Lax,
+                Path = "/api/v1/auth",
+                Expires = refreshExpires
+            };
+            Response.Cookies.Append("iot_refresh_token", session.RefreshToken, refreshCookieOptions);
+        }
     }
 }

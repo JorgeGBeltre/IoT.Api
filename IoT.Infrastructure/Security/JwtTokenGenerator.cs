@@ -122,6 +122,34 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
         var token = tokenHandler.CreateToken(tokenDescriptor);
         string encodedToken = tokenHandler.WriteToken(token);
 
+        int refreshExpirationDays = 14;
+        if (int.TryParse(_configuration["Jwt:RefreshExpirationDays"], out int rd) && rd > 0)
+        {
+            refreshExpirationDays = rd;
+        }
+
+        var refreshExpiresAt = DateTime.UtcNow.AddDays(refreshExpirationDays);
+        string baseAudience = _configuration["Jwt:Audience"] ?? "IoT-Frontend";
+        var refreshClaims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
+            new("tenant_id", tenantId.ToString()),
+            new("sst", user.SecurityStamp),
+            new("token_use", "refresh")
+        };
+
+        var refreshDescriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(refreshClaims),
+            Expires = refreshExpiresAt,
+            Issuer = _configuration["Jwt:Issuer"] ?? "IoT-SaaS-Platform",
+            Audience = $"{baseAudience}:refresh",
+            SigningCredentials = credentials
+        };
+
+        string encodedRefreshToken = tokenHandler.WriteToken(tokenHandler.CreateToken(refreshDescriptor));
+
         return new AuthTokenResult(
             encodedToken,
             tenantId,
@@ -131,6 +159,76 @@ public sealed class JwtTokenGenerator : IJwtTokenGenerator
             user.RoleName,
             user.MustChangePassword,
             expiresAt,
-            permList);
+            permList,
+            encodedRefreshToken,
+            refreshExpiresAt);
+    }
+
+    public RefreshTokenClaims? ValidateRefreshToken(string refreshToken)
+    {
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            return null;
+        }
+
+        string? secretKey = _configuration["Jwt:SecretKey"];
+        if (string.IsNullOrWhiteSpace(secretKey) || secretKey.Length < 32)
+        {
+            return null;
+        }
+
+        string issuer = _configuration["Jwt:Issuer"] ?? "IoT-SaaS-Platform";
+        string baseAudience = _configuration["Jwt:Audience"] ?? "IoT-Frontend";
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey));
+
+        var validationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = key,
+            ValidateIssuer = true,
+            ValidIssuer = issuer,
+            ValidateAudience = true,
+            ValidAudience = $"{baseAudience}:refresh",
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1)
+        };
+
+        try
+        {
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var principal = tokenHandler.ValidateToken(refreshToken, validationParameters, out var validatedToken);
+            if (validatedToken is not JwtSecurityToken jwt ||
+                !string.Equals(jwt.Header.Alg, SecurityAlgorithms.HmacSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var tokenUse = principal.FindFirst("token_use")?.Value;
+            if (!string.Equals(tokenUse, "refresh", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var sub = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+            var tenantRaw = principal.FindFirst("tenant_id")?.Value;
+            var securityStamp = principal.FindFirst("sst")?.Value;
+
+            if (!Guid.TryParse(sub, out var userId) ||
+                !Guid.TryParse(tenantRaw, out var tenantId) ||
+                userId == Guid.Empty ||
+                tenantId == Guid.Empty ||
+                string.IsNullOrWhiteSpace(securityStamp))
+            {
+                return null;
+            }
+
+            return new RefreshTokenClaims(userId, tenantId, securityStamp);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Refresh token validation failed.");
+            return null;
+        }
     }
 }

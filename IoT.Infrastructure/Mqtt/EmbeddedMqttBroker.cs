@@ -28,7 +28,7 @@ namespace IoT.Infrastructure.Mqtt;
 /// Implementa <see cref="IMqttPublisher"/> para el push dirigido server→device
 /// (comandos / OTA) mediante InjectApplicationMessage.
 /// </summary>
-public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqttSessionRevoker
+public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqttSessionRevoker, IMqttPeerEndpointRegistry
 {
     private readonly IConfiguration _configuration;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -87,6 +87,38 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     /// Permite que el pipeline use la identidad ya autenticada cuando el tópico no la lleva.
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _authenticatedChipIds = new(StringComparer.Ordinal);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _authenticatedPeerIps = new(StringComparer.OrdinalIgnoreCase);
+
+    public string? GetPeerIpByChipId(string chipId)
+    {
+        if (string.IsNullOrWhiteSpace(chipId))
+        {
+            return null;
+        }
+        return _authenticatedPeerIps.TryGetValue(chipId.Trim(), out var ip) ? ip : null;
+    }
+
+    private static string? ExtractPeerIp(string? rawEndpoint)
+    {
+        if (string.IsNullOrWhiteSpace(rawEndpoint))
+        {
+            return null;
+        }
+        if (System.Net.IPEndPoint.TryParse(rawEndpoint.Trim(), out var ipEndPoint))
+        {
+            var addr = ipEndPoint.Address.IsIPv4MappedToIPv6
+                ? ipEndPoint.Address.MapToIPv4()
+                : ipEndPoint.Address;
+            return addr.ToString();
+        }
+        int colonIdx = rawEndpoint.LastIndexOf(':');
+        string candidate = colonIdx > 0 ? rawEndpoint[..colonIdx].Trim('[', ']') : rawEndpoint.Trim();
+        if (System.Net.IPAddress.TryParse(candidate, out var parsedAddr))
+        {
+            return (parsedAddr.IsIPv4MappedToIPv6 ? parsedAddr.MapToIPv4() : parsedAddr).ToString();
+        }
+        return null;
+    }
 
     /// <summary>
     /// Clientes conectados con una credencial de bootstrap (simulador y herramientas del
@@ -683,6 +715,11 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         if (authenticatedPerDevice)
         {
             _authenticatedChipIds[e.ClientId] = chipId;
+            var peerIp = ExtractPeerIp(e.RemoteEndPoint?.ToString());
+            if (!string.IsNullOrWhiteSpace(peerIp))
+            {
+                _authenticatedPeerIps[chipId] = peerIp;
+            }
             _bootstrapClientIds.TryRemove(e.ClientId, out _);
             _bootstrapTenantIds.TryRemove(e.ClientId, out _);
             if (!string.IsNullOrEmpty(deviceKeyFingerprint))
@@ -956,6 +993,10 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         // Se libera la identidad autenticada de ESTA conexión. En el takeover de arriba no
         // se toca, porque la entrada ya pertenece a la conexión nueva (mismo ClientId).
         _authenticatedChipIds.TryRemove(e.ClientId, out var disconnectedChipId);
+        if (!string.IsNullOrWhiteSpace(disconnectedChipId))
+        {
+            _authenticatedPeerIps.TryRemove(disconnectedChipId, out _);
+        }
         _bootstrapClientIds.TryRemove(e.ClientId, out _);
         _connectedClientIds.TryRemove(e.ClientId, out _);
         _sessionKeyFingerprints.TryRemove(e.ClientId, out _);

@@ -20,3 +20,13 @@ public interface IMqttClientMap
     /// </summary>
     Task<bool> RemoveAsync(string chipId, string? expectedClientId = null, CancellationToken ct = default);
 }
+
+/// <summary>
+/// Registro en memoria de la dirección IP de origen (peer endpoint) de la sesión MQTT activa
+/// de cada dispositivo autenticado por <c>ChipId</c>. Se emplea como fuente complementaria de
+/// verificación de red local cuando el equipo opera detrás de la misma subred LAN.
+/// </summary>
+public interface IMqttPeerEndpointRegistry
+{
+    string? GetPeerIpByChipId(string chipId);
+}

@@ -40,6 +40,9 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                payload.Contains("BUTTON_PRESS", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("RELAY_TOGGLE_ALL", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("TIMER_TRIGGER", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("TIMERS_UPDATED", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("WIFI_UPDATED", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("WIFI_UPDATE_FAILED", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("PULSE_AUTO_OFF", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -442,7 +445,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
             metrics["energy_wh"] = kVal * 1000.0;
         }
 
-        foreach (var attrKey in new[] { "startup", "pulse", "sledOnline", "bind_token", "fwVersion", "rstReason" })
+        foreach (var attrKey in new[] { "startup", "pulse", "sledOnline", "bind_token", "fwVersion", "rstReason", "wifi_ssid", "wifi_bssid", "local_ip" })
         {
             if (elem.TryGetProperty(attrKey, out var aElem))
             {

@@ -36,7 +36,15 @@ public static class DeviceClientAttributeMapping
         "protocol_version",
         "imei",
         "iccid",
-        "imsi"
+        "imsi",
+        "wifi_ssid",
+        "wifi_bssid",
+        "local_ip",
+        "startup",
+        "pulse",
+        "pulseWidth",
+        "sledOnline",
+        "channel_count"
     };
 
     /// <summary>

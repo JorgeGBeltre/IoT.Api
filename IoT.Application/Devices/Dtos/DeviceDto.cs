@@ -25,7 +25,9 @@ public sealed record DeviceDto(
     string? CustomerName,
     IReadOnlyDictionary<string, double>? LatestMetrics = null,
     string? FirmwareVersion = null,
-    int? ChannelCount = null);
+    int? ChannelCount = null,
+    string? WifiSsid = null,
+    string? LocalIp = null);
 
 public static class SwitchChannelCountResolver
 {

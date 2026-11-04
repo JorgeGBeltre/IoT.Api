@@ -93,6 +93,19 @@ public sealed class RelaySwitchProfile : IDeviceProfile
             return "sync_states";
         }
 
+        if (string.Equals(cmd, "set_timers", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(cmd, "timers", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(payloadJson))
+            {
+                return "{\"action\":\"set_timers\",\"timers\":[]}";
+            }
+            string trimmedTimers = payloadJson.Trim();
+            return trimmedTimers.StartsWith('[')
+                ? $"{{\"action\":\"set_timers\",\"timers\":{trimmedTimers}}}"
+                : trimmedTimers;
+        }
+
         var (channel, state) = ParseChannelAndState(payloadJson);
 
         if (string.Equals(cmd, "toggle_all", StringComparison.OrdinalIgnoreCase))

@@ -674,4 +674,123 @@ public sealed class DevicesController : ControllerBase
 
         return NoContent();
     }
+
+    [HttpGet("{id:guid}/timers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetDeviceTimers(Guid id, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(
+            new GetDeviceTimersQuery(_tenantContext.TenantId, id),
+            cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error.Code == "Device.NotFound"
+                ? NotFound(new { error = result.Error.Message })
+                : BadRequest(new { error = result.Error.Message });
+        }
+
+        return Ok(result.Value);
+    }
+
+    public sealed record UpdateDeviceTimersRequest(
+        IReadOnlyList<DeviceTimerItemDto>? Timers);
+
+    [HttpPut("{id:guid}/timers")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateDeviceTimers(
+        Guid id,
+        [FromBody] UpdateDeviceTimersRequest request,
+        CancellationToken cancellationToken)
+    {
+        Guid? userId = Guid.TryParse(
+            User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value,
+            out var uid)
+            ? uid
+            : null;
+
+        var result = await _mediator.Send(
+            new UpsertDeviceTimersCommand(
+                _tenantContext.TenantId,
+                id,
+                request.Timers,
+                userId,
+                User.Identity?.Name),
+            cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error.Code == "Device.NotFound"
+                ? NotFound(new { error = result.Error.Message })
+                : BadRequest(new { error = result.Error.Message });
+        }
+
+        return Ok(result.Value);
+    }
+
+    public sealed record ChangeDeviceWifiRequest(
+        string Ssid,
+        string? Password = null,
+        string? ClientWifiSsid = null,
+        string? LanProof = null,
+        string? ClientPlatform = null);
+
+    /// <summary>
+    /// Cambia la red Wi-Fi del dispositivo enviando las nuevas credenciales sobre MQTT 5.0
+    /// (<c>devices/{chipId}/wifi/command</c>) únicamente si el teléfono o PC solicitante se
+    /// encuentra conectado a la misma red Wi-Fi / subred LAN local que el dispositivo.
+    /// </summary>
+    [HttpPost("{id:guid}/wifi")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> ChangeDeviceWifi(
+        Guid id,
+        [FromBody] ChangeDeviceWifiRequest request,
+        CancellationToken cancellationToken)
+    {
+        Guid? userId = Guid.TryParse(
+            User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value,
+            out var uid)
+            ? uid
+            : null;
+
+        string? callerIp = HttpContext.Connection.RemoteIpAddress?.ToString();
+        string? userAgent = Request.Headers.UserAgent.ToString();
+
+        var result = await _mediator.Send(
+            new ChangeDeviceWifiCommand(
+                _tenantContext.TenantId,
+                id,
+                request.Ssid,
+                request.Password,
+                callerIp,
+                request.ClientWifiSsid,
+                request.LanProof,
+                request.ClientPlatform,
+                userId,
+                User.Identity?.Name,
+                userAgent),
+            cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return result.Error.Code switch
+            {
+                "Device.NotFound" => NotFound(new { error = result.Error.Message, code = result.Error.Code }),
+                "Device.WifiNotSameNetwork" => StatusCode(StatusCodes.Status403Forbidden, new { error = result.Error.Message, code = result.Error.Code }),
+                "Device.Offline" => Conflict(new { error = result.Error.Message, code = result.Error.Code }),
+                _ => BadRequest(new { error = result.Error.Message, code = result.Error.Code })
+            };
+        }
+
+        return Accepted(result.Value);
+    }
 }

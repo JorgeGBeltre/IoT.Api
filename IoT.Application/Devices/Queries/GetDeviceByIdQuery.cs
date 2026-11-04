@@ -14,17 +14,23 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
     private readonly ICustomerRepository _customerRepository;
     private readonly IStateCacheService _stateCache;
     private readonly ITelemetryStore? _telemetryStore;
+    private readonly IDeviceAttributeRepository? _attributeRepository;
+    private readonly IMqttPeerEndpointRegistry? _peerEndpointRegistry;
 
     public GetDeviceByIdQueryHandler(
         IDeviceRepository deviceRepository,
         ICustomerRepository customerRepository,
         IStateCacheService stateCache,
-        ITelemetryStore? telemetryStore = null)
+        ITelemetryStore? telemetryStore = null,
+        IDeviceAttributeRepository? attributeRepository = null,
+        IMqttPeerEndpointRegistry? peerEndpointRegistry = null)
     {
         _deviceRepository = deviceRepository;
         _customerRepository = customerRepository;
         _stateCache = stateCache;
         _telemetryStore = telemetryStore;
+        _attributeRepository = attributeRepository;
+        _peerEndpointRegistry = peerEndpointRegistry;
     }
 
     public async Task<Result<DeviceDto>> Handle(GetDeviceByIdQuery request, CancellationToken cancellationToken)
@@ -58,6 +64,28 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
         }
 
         int? channelCount = SwitchChannelCountResolver.Resolve(d, latestMetrics);
+        string? wifiSsid = null;
+        string? localIp = null;
+
+        if (_attributeRepository is not null)
+        {
+            var attrs = await _attributeRepository.ListByDeviceAsync(d.Id, cancellationToken);
+            foreach (var attr in attrs)
+            {
+                if (string.Equals(attr.Key, "wifi_ssid", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(attr.Value))
+                    wifiSsid = attr.Value;
+                else if (string.Equals(attr.Key, "local_ip", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(attr.Value))
+                    localIp = attr.Value;
+                else if (string.Equals(attr.Key, "channel_count", StringComparison.OrdinalIgnoreCase) &&
+                         int.TryParse(attr.Value, out int attrCh) && attrCh is >= 1 and <= 16)
+                    channelCount = Math.Max(channelCount ?? 1, attrCh);
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(localIp) && _peerEndpointRegistry is not null)
+        {
+            localIp = _peerEndpointRegistry.GetPeerIpByChipId(d.ChipId);
+        }
 
         var dto = new DeviceDto(
             d.Id,
@@ -77,7 +105,9 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
             customerName,
             latestMetrics,
             d.FirmwareVersion,
-            channelCount);
+            channelCount,
+            wifiSsid,
+            localIp);
 
         return Result<DeviceDto>.Success(dto);
     }

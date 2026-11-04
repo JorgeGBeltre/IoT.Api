@@ -31,7 +31,14 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         return payload.Contains("devices_count", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("desired_state", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("device_switch", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("\"relays\"", StringComparison.OrdinalIgnoreCase);
+               payload.Contains("\"relays\"", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("LAN_ZEROCONF_SWITCH", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("DEVICE_COMMAND", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("DEVICE_SET_COMMAND", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("BUTTON_PRESS", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("RELAY_TOGGLE_ALL", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("TIMER_TRIGGER", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("PULSE_AUTO_OFF", StringComparison.OrdinalIgnoreCase);
     }
 
     public Result<NormalizedTelemetryEvent> Decode(string topic, string payload)
@@ -72,13 +79,19 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                 ExtractPowerAndConfigFields(detailsElem, metrics, attributes);
 
                 if (detailsElem.TryGetProperty("rssi", out var rssiElem) && rssiElem.TryGetDouble(out var rssi))
+                {
                     metrics["rssi_dbm"] = rssi;
+                    metrics["wifi_rssi"] = rssi;
+                }
 
                 if (detailsElem.TryGetProperty("free_heap", out var heapElem) && heapElem.TryGetDouble(out var heap))
                     metrics["free_heap_bytes"] = heap;
 
                 if (detailsElem.TryGetProperty("uptime", out var upElem) && upElem.TryGetDouble(out var uptime))
+                {
                     metrics["uptime_seconds"] = uptime;
+                    metrics["uptime_sec"] = uptime;
+                }
 
                 if (detailsElem.TryGetProperty("sync_completed", out var syncElem) &&
                     (syncElem.ValueKind == JsonValueKind.True || syncElem.ValueKind == JsonValueKind.False))
@@ -133,6 +146,28 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                         }
                     }
                 }
+
+                // Eventos de conmutación del relé (events/<chipId>): Details.info = { event, description, state }
+                if (detailsElem.TryGetProperty("info", out var infoElem) && infoElem.ValueKind == JsonValueKind.Object)
+                {
+                    if (infoElem.TryGetProperty("event", out var evNameElem) && evNameElem.ValueKind == JsonValueKind.String)
+                    {
+                        var evName = evNameElem.GetString();
+                        if (!string.IsNullOrWhiteSpace(evName))
+                        {
+                            attributes["last_event"] = evName;
+                        }
+                    }
+
+                    if (infoElem.TryGetProperty("state", out var evStateElem) && evStateElem.ValueKind == JsonValueKind.String)
+                    {
+                        var evState = evStateElem.GetString();
+                        if (!string.IsNullOrWhiteSpace(evState))
+                        {
+                            SetSwitchState(metrics, attributes, "device_switch1", evState);
+                        }
+                    }
+                }
             }
 
             return new NormalizedTelemetryEvent
@@ -166,8 +201,51 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                   state == "1" ||
                   state.Equals("true", StringComparison.OrdinalIgnoreCase);
 
+        double val = on ? 1.0 : 0.0;
         attributes[$"{switchName}_state"] = on ? "on" : "off";
-        metrics[$"{switchName}_state_binary"] = on ? 1.0 : 0.0;
+        metrics[$"{switchName}_state_binary"] = val;
+
+        int ch = ExtractChannelIndex(switchName);
+        metrics[$"switch_{ch}"] = val;
+        metrics[$"relay_state_{ch}"] = val;
+        metrics[$"relay_{ch}_state_binary"] = val;
+        if (ch == 1)
+        {
+            metrics["relay_state"] = val;
+        }
+    }
+
+    private static int ExtractChannelIndex(string switchName)
+    {
+        if (string.IsNullOrWhiteSpace(switchName))
+        {
+            return 1;
+        }
+
+        // Sufijo "<chipId>-01", "<chipId>-02", etc. (status/telemetría JSON)
+        int dashIdx = switchName.LastIndexOf('-');
+        if (dashIdx >= 0 && dashIdx < switchName.Length - 1 &&
+            int.TryParse(switchName.AsSpan(dashIdx + 1), out int dashChannel) &&
+            dashChannel is >= 1 and <= 16)
+        {
+            return dashChannel;
+        }
+
+        // Sufijo numérico directo: "device_switch1", "switch_2", "relay3"
+        int digitStart = switchName.Length;
+        while (digitStart > 0 && char.IsDigit(switchName[digitStart - 1]))
+        {
+            digitStart--;
+        }
+
+        if (digitStart < switchName.Length &&
+            int.TryParse(switchName.AsSpan(digitStart), out int trailingChannel) &&
+            trailingChannel is >= 1 and <= 16)
+        {
+            return trailingChannel;
+        }
+
+        return 1;
     }
 
     private static void ExtractPowerAndConfigFields(
@@ -254,12 +332,23 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         var metrics = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // Nombre del conmutador a partir del tópico: "device_switch1_state" → "device_switch1",
-        // "device_switch1/state" → "device_switch1". Permite varios relés por equipo.
-        string switchName = topic;
-        // "/report" es el tópico por el que el equipo REPORTA su estado; "_state" es el de
-        // bajada con el que el servidor se lo fija. Se aceptan los dos para no perder nada
-        // de los equipos aún sin re-flashear.
+        string extractedChipId = string.Empty;
+        string switchName = topic.Trim('/');
+
+        // Soportar tanto tópicos por equipo ("devices/<chipId>/device_switch1/report")
+        // como tópicos globales heredados ("device_switch1_state").
+        if (switchName.StartsWith("devices/", StringComparison.OrdinalIgnoreCase) ||
+            switchName.StartsWith("relays/", StringComparison.OrdinalIgnoreCase))
+        {
+            int firstSlash = switchName.IndexOf('/');
+            int secondSlash = firstSlash >= 0 ? switchName.IndexOf('/', firstSlash + 1) : -1;
+            if (secondSlash > firstSlash + 1)
+            {
+                extractedChipId = switchName[(firstSlash + 1)..secondSlash];
+                switchName = switchName[(secondSlash + 1)..];
+            }
+        }
+
         foreach (var suffix in new[] { "/report", "_state", "/state", "/command", "/get", "/set" })
         {
             if (switchName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
@@ -273,10 +362,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
 
         if (state.HasValue)
         {
-            attributes[$"{switchName}_state"] = state.Value ? "on" : "off";
-            metrics[$"{switchName}_state_binary"] = state.Value ? 1.0 : 0.0;
-            // Métrica canónica para que las vistas no dependan del nombre del conmutador.
-            metrics["relay_state"] = state.Value ? 1.0 : 0.0;
+            SetSwitchState(metrics, attributes, switchName, state.Value ? "on" : "off");
         }
         else
         {
@@ -287,9 +373,9 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
 
         return new NormalizedTelemetryEvent
         {
-            // Identidad vacía a propósito: el tópico es global y el payload no es JSON.
-            // La aporta la conexión autenticada (TransportDeviceIdentifier).
-            DeviceIdentifier = string.Empty,
+            // Para tópicos globales sin prefijo devices/<chipId>/, queda vacía para que la
+            // aporte la conexión autenticada (TransportDeviceIdentifier).
+            DeviceIdentifier = extractedChipId,
             RecordedAt = DateTime.UtcNow,
             ReceivedAt = DateTime.UtcNow,
             Position = null,

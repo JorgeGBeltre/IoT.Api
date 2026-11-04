@@ -14,20 +14,32 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
     private readonly IDeviceRepository _deviceRepository;
     private readonly ICustomerRepository _customerRepository;
     private readonly IStateCacheService _stateCache;
+    private readonly ITelemetryStore? _telemetryStore;
 
     public GetDevicesQueryHandler(
         IDeviceRepository deviceRepository,
         ICustomerRepository customerRepository,
-        IStateCacheService stateCache)
+        IStateCacheService stateCache,
+        ITelemetryStore? telemetryStore = null)
     {
         _deviceRepository = deviceRepository;
         _customerRepository = customerRepository;
         _stateCache = stateCache;
+        _telemetryStore = telemetryStore;
     }
 
     public async Task<Result<IReadOnlyList<DeviceDto>>> Handle(GetDevicesQuery request, CancellationToken cancellationToken)
     {
         var devices = await _deviceRepository.GetByTenantAsync(request.TenantId, request.Status, cancellationToken);
+
+        IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, double>>? metricsByDevice = null;
+        if (_telemetryStore is not null && devices.Count > 0)
+        {
+            metricsByDevice = await _telemetryStore.GetLatestMetricsByDevicesAsync(
+                request.TenantId,
+                devices.Select(x => x.Id).ToArray(),
+                cancellationToken);
+        }
 
         // Nombres de los nodos dueños (Customer) en UNA sola consulta que RESPETA los filtros
         // (RLS por subárbol + EF por tenant, SIN IgnoreQueryFilters). Los customers devueltos son
@@ -60,7 +72,9 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
                 d.Capabilities.Select(c => c.CapabilityType.ToString()).ToList(),
                 cachedPos,
                 d.CustomerId,
-                customerName));
+                customerName,
+                metricsByDevice is not null && metricsByDevice.TryGetValue(d.Id, out var devMetrics) ? devMetrics : null,
+                d.FirmwareVersion));
         }
 
         return Result<IReadOnlyList<DeviceDto>>.Success(list);

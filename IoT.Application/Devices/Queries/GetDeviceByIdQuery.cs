@@ -13,15 +13,18 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
     private readonly IDeviceRepository _deviceRepository;
     private readonly ICustomerRepository _customerRepository;
     private readonly IStateCacheService _stateCache;
+    private readonly ITelemetryStore? _telemetryStore;
 
     public GetDeviceByIdQueryHandler(
         IDeviceRepository deviceRepository,
         ICustomerRepository customerRepository,
-        IStateCacheService stateCache)
+        IStateCacheService stateCache,
+        ITelemetryStore? telemetryStore = null)
     {
         _deviceRepository = deviceRepository;
         _customerRepository = customerRepository;
         _stateCache = stateCache;
+        _telemetryStore = telemetryStore;
     }
 
     public async Task<Result<DeviceDto>> Handle(GetDeviceByIdQuery request, CancellationToken cancellationToken)
@@ -33,6 +36,15 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
         }
 
         var cachedPos = await _stateCache.GetLatestPositionAsync(d.TenantId, d.Id, cancellationToken);
+        IReadOnlyDictionary<string, double>? latestMetrics = null;
+        if (_telemetryStore is not null)
+        {
+            var byDevice = await _telemetryStore.GetLatestMetricsByDevicesAsync(d.TenantId, new[] { d.Id }, cancellationToken);
+            if (byDevice is not null && byDevice.TryGetValue(d.Id, out var foundMetrics))
+            {
+                latestMetrics = foundMetrics;
+            }
+        }
 
         // Nombre del nodo dueño (Customer). Se resuelve RESPETANDO los filtros (RLS + EF, SIN
         // IgnoreQueryFilters): como el device ya resultó visible, su Customer está en el subárbol de
@@ -60,7 +72,9 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
             d.Capabilities.Select(c => c.CapabilityType.ToString()).ToList(),
             cachedPos,
             d.CustomerId,
-            customerName);
+            customerName,
+            latestMetrics,
+            d.FirmwareVersion);
 
         return Result<DeviceDto>.Success(dto);
     }

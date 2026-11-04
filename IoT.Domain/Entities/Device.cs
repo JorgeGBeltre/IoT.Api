@@ -165,9 +165,9 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped, ICustomerScoped
         UpdatedAt = DateTime.UtcNow;
     }
 
-    public void RecordTelemetry(DateTime timestamp)
+    public void RecordTelemetry(DateTime timestamp, DateTime? receivedAtUtc = null)
     {
-        LastCommunicationAt = timestamp;
+        LastCommunicationAt = receivedAtUtc ?? timestamp;
         LastTelemetryAt = timestamp;
         OperationalStatus = DeviceOperationalStatus.Online;
         UpdatedAt = DateTime.UtcNow;

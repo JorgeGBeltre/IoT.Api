@@ -20,4 +20,6 @@ public sealed record DeviceDto(
     // (nullable en el dominio durante la transición E8.1) y el contrato del frontend
     // (customerId?/customerName? en DeviceDetailPage). Null = "Sin asignar".
     Guid? CustomerId,
-    string? CustomerName);
+    string? CustomerName,
+    IReadOnlyDictionary<string, double>? LatestMetrics = null,
+    string? FirmwareVersion = null);

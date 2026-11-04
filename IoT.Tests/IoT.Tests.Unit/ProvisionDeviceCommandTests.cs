@@ -389,7 +389,7 @@ public sealed class ProvisionDeviceCommandTests
     [InlineData("Smart Switch", "set_channel", "{\"channel\":2,\"switch\":\"off\"}", "switch2:off")]
     [InlineData("MQTT-Relay-BLE", "SET_POWER", "{\"channel\":1,\"state\":\"ON\"}", "switch1:on")]
     [InlineData("Relay-Wifi", "SET_POWER_STATE", "{\"state\":0}", "switch1:off")]
-    [InlineData("Relay-Wifi", "SET_POWER_ALL", "{\"state\":\"ON\"}", "switch1:on")]
+    [InlineData("Relay-Wifi", "SET_POWER_ALL", "{\"state\":\"ON\"}", "all:on")]
     [InlineData("Relay-Wifi", "toggle_all", null, "toggle_all")]
     [InlineData("Relay-Wifi", "reboot", null, "reset")]
     public void TopicRoutingService_RelaySwitchModels_RouteToCommandsTopicAndEncodeNativePayload(

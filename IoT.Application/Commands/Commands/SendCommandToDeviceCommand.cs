@@ -26,6 +26,7 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
     private readonly ILogger<SendCommandToDeviceCommandHandler> _logger;
     private readonly IoT.Protocols.Routing.ITopicRoutingService? _topicRoutingService;
     private readonly ITcpCommandGateway? _tcpCommandGateway;
+    private readonly IMqttClientMap? _mqttClientMap;
 
     public SendCommandToDeviceCommandHandler(
         IDeviceRepository deviceRepository,
@@ -34,7 +35,8 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
         IUnitOfWork unitOfWork,
         ILogger<SendCommandToDeviceCommandHandler> logger,
         IoT.Protocols.Routing.ITopicRoutingService? topicRoutingService = null,
-        ITcpCommandGateway? tcpCommandGateway = null)
+        ITcpCommandGateway? tcpCommandGateway = null,
+        IMqttClientMap? mqttClientMap = null)
     {
         _deviceRepository = deviceRepository;
         _commandRepository = commandRepository;
@@ -43,6 +45,7 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
         _logger = logger;
         _topicRoutingService = topicRoutingService;
         _tcpCommandGateway = tcpCommandGateway;
+        _mqttClientMap = mqttClientMap;
     }
 
     public async Task<Result<Guid>> Handle(SendCommandToDeviceCommand request, CancellationToken cancellationToken)
@@ -79,10 +82,25 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
                 $"Device '{device.Id}' is currently in Error status and cannot safely execute commands."));
         }
 
-        if (device.OperationalStatus == IoT.Domain.Enums.DeviceOperationalStatus.Offline && !request.AllowOfflineQueueing)
+        if (device.OperationalStatus == IoT.Domain.Enums.DeviceOperationalStatus.Offline)
         {
-            return Result<Guid>.Failure(new Error("Device.Offline",
-                $"Device '{device.Id}' is currently Offline. Enable AllowOfflineQueueing to queue for later delivery."));
+            if (_mqttClientMap != null)
+            {
+                var activeClientId = await _mqttClientMap.GetClientIdAsync(device.ChipId, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(activeClientId))
+                {
+                    _logger.LogInformation("Device {DeviceId} ({ChipId}) has active MQTT session {ClientId}; healing presence to Online.",
+                        device.Id, device.ChipId, activeClientId);
+                    device.RecordHeartbeat(DateTime.UtcNow);
+                    _deviceRepository.Update(device);
+                }
+            }
+
+            if (device.OperationalStatus == IoT.Domain.Enums.DeviceOperationalStatus.Offline && !request.AllowOfflineQueueing)
+            {
+                return Result<Guid>.Failure(new Error("Device.Offline",
+                    $"Device '{device.Id}' is currently Offline. Enable AllowOfflineQueueing to queue for later delivery."));
+            }
         }
 
         // 4. Create Command entity

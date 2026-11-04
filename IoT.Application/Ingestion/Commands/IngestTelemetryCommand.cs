@@ -379,8 +379,8 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
                 cancellationToken: cancellationToken);
         }
 
-        // 7. Update device last seen
-        device.RecordTelemetry(ev.RecordedAt);
+        // 7. Update device last seen (server-observed ReceivedAt prevents device TZ skew from causing false Offline)
+        device.RecordTelemetry(ev.RecordedAt, isStaleHistorical ? null : ev.ReceivedAt);
         _deviceRepository.Update(device);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 

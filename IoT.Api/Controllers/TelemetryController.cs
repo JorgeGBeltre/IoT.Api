@@ -33,7 +33,7 @@ public sealed class TelemetryController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         var fromUtc = from ?? DateTime.UtcNow.AddDays(-1);
-        var toUtc = to ?? DateTime.UtcNow;
+        var toUtc = to ?? DateTime.UtcNow.AddMinutes(5);
 
         var query = new GetDevicePositionHistoryQuery(_tenantContext.TenantId, deviceId, fromUtc, toUtc, limit, source);
         var result = await _mediator.Send(query, cancellationToken);
@@ -64,7 +64,7 @@ public sealed class TelemetryController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         var fromUtc = from ?? DateTime.UtcNow.AddDays(-1);
-        var toUtc = to ?? DateTime.UtcNow;
+        var toUtc = to ?? DateTime.UtcNow.AddMinutes(5);
 
         var query = new GetDeviceTelemetryHistoryQuery(_tenantContext.TenantId, deviceId, fromUtc, toUtc, limit, source);
         var result = await _mediator.Send(query, cancellationToken);

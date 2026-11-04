@@ -82,4 +82,18 @@ public class DeviceTests
         device.LastTelemetryAt.Should().Be(now);
         device.LastCommunicationAt.Should().Be(now);
     }
+
+    [Fact]
+    public void RecordTelemetry_WithReceivedAtUtc_ShouldUseServerTimestampForPresence()
+    {
+        var device = Device.Create(Guid.NewGuid(), "CHIP02", "MAC02", "Device2", "Relay-Wifi", "Generic").Value;
+        var skewedRecordedAt = DateTime.UtcNow.AddHours(-4);
+        var serverReceivedAt = DateTime.UtcNow;
+
+        device.RecordTelemetry(skewedRecordedAt, serverReceivedAt);
+
+        device.OperationalStatus.Should().Be(DeviceOperationalStatus.Online);
+        device.LastTelemetryAt.Should().Be(skewedRecordedAt);
+        device.LastCommunicationAt.Should().Be(serverReceivedAt);
+    }
 }

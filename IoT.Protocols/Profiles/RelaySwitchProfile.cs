@@ -102,13 +102,14 @@ public sealed class RelaySwitchProfile : IDeviceProfile
 
         if (string.Equals(cmd, "SET_POWER_ALL", StringComparison.OrdinalIgnoreCase))
         {
-            return state is null or "toggle" ? "toggle_all" : $"switch1:{state}";
+            return state is null or "toggle" ? "toggle_all" : $"all:{state}";
         }
 
         if (string.Equals(cmd, "set_switch", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(cmd, "set_channel", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(cmd, "SET_POWER", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(cmd, "SET_POWER_STATE", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(cmd, "SET_RELAY_STATE", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(cmd, "switch", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(cmd, "power", StringComparison.OrdinalIgnoreCase))
         {
@@ -153,7 +154,8 @@ public sealed class RelaySwitchProfile : IDeviceProfile
 
             int? channel = null;
             if (TryGetPropertyCaseInsensitive(root, "channel", out var chEl) ||
-                TryGetPropertyCaseInsensitive(root, "outlet", out chEl))
+                TryGetPropertyCaseInsensitive(root, "outlet", out chEl) ||
+                TryGetPropertyCaseInsensitive(root, "relay", out chEl))
             {
                 if (chEl.ValueKind == JsonValueKind.Number && chEl.TryGetInt32(out int chNum))
                 {

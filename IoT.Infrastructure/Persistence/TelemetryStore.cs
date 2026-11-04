@@ -137,9 +137,11 @@ public sealed class TelemetryStore : ITelemetryStore
         }
 
         var entities = await query
-            .OrderBy(t => t.RecordedAt)
+            .OrderByDescending(t => t.RecordedAt)
             .Take(limit)
             .ToListAsync(cancellationToken);
+
+        entities.Reverse();
 
         var list = new List<HistoricalTelemetryDto>(entities.Count);
         foreach (var e in entities)
@@ -160,6 +162,64 @@ public sealed class TelemetryStore : ITelemetryStore
         }
 
         return list;
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, double>>> GetLatestMetricsByDevicesAsync(
+        Guid tenantId,
+        IReadOnlyCollection<Guid> deviceIds,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<Guid, IReadOnlyDictionary<string, double>>();
+        if (deviceIds is null || deviceIds.Count == 0)
+        {
+            return result;
+        }
+
+        var query = _context.TelemetryRecords
+            .AsNoTracking()
+            .Where(t => t.TenantId == tenantId && deviceIds.Contains(t.DeviceId));
+
+        if (deviceIds.Count > 1)
+        {
+            var recentCutoff = DateTime.UtcNow.AddDays(-7);
+            query = query.Where(t => t.ReceivedAt >= recentCutoff);
+        }
+
+        int maxRows = Math.Clamp(deviceIds.Count * 10, 10, 1000);
+        var rows = await query
+            .OrderByDescending(t => t.ReceivedAt)
+            .Take(maxRows)
+            .Select(t => new { t.DeviceId, t.ReceivedAt, t.MetricsJson })
+            .ToListAsync(cancellationToken);
+
+        foreach (var group in rows.GroupBy(r => r.DeviceId))
+        {
+            var merged = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in group.Take(10).OrderBy(r => r.ReceivedAt))
+            {
+                if (string.IsNullOrWhiteSpace(row.MetricsJson)) continue;
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<Dictionary<string, double>>(row.MetricsJson);
+                    if (parsed is null) continue;
+                    foreach (var kv in parsed)
+                    {
+                        merged[kv.Key] = kv.Value;
+                    }
+                }
+                catch
+                {
+                    // Ignore malformed individual JSON
+                }
+            }
+
+            if (merged.Count > 0)
+            {
+                result[group.Key] = merged;
+            }
+        }
+
+        return result;
     }
 
     public Task<int> PurgePositionsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)

@@ -437,4 +437,60 @@ public class FirmwarePayloadFidelityTests
 
         ev.DeviceIdentifier.Should().BeEmpty();
     }
+
+    [Fact]
+    public void RelaySwitchAdapter_DecodesPerDeviceReportTopic_AndEmitsCanonicalSwitchMetrics()
+    {
+        var adapter = new RelaySwitchAdapter();
+        adapter.CanHandle("devices/B81B05BBBC2C/device_switch1/report", "on").Should().BeTrue();
+
+        var ev = adapter.Decode("devices/B81B05BBBC2C/device_switch1/report", "on").Value;
+
+        ev.DeviceIdentifier.Should().Be("B81B05BBBC2C");
+        ev.NumericMetrics["switch_1"].Should().Be(1.0);
+        ev.NumericMetrics["relay_state"].Should().Be(1.0);
+        ev.NumericMetrics["relay_1_state_binary"].Should().Be(1.0);
+        ev.NumericMetrics["device_switch1_state_binary"].Should().Be(1.0);
+        ev.Attributes["device_switch1_state"].Should().Be("on");
+    }
+
+    [Fact]
+    public void RelaySwitchAdapter_DecodesSwitchEventFrame_AndUpdatesRelayMetrics()
+    {
+        const string eventPayload = """
+        {
+          "Device": { "ChipId": "B81B05BBBC2C" },
+          "Timestamp": "2026-11-04T03:15:00.000Z",
+          "Details": {
+            "info": {
+              "event": "DEVICE_COMMAND",
+              "description": "Comando switch1: on",
+              "state": "on"
+            }
+          }
+        }
+        """;
+
+        var adapter = new RelaySwitchAdapter();
+        adapter.CanHandle("events/B81B05BBBC2C", eventPayload).Should().BeTrue();
+
+        var ev = adapter.Decode("events/B81B05BBBC2C", eventPayload).Value;
+
+        ev.DeviceIdentifier.Should().Be("B81B05BBBC2C");
+        ev.NumericMetrics["switch_1"].Should().Be(1.0);
+        ev.NumericMetrics["relay_state"].Should().Be(1.0);
+        ev.Attributes["last_event"].Should().Be("DEVICE_COMMAND");
+    }
+
+    [Fact]
+    public void RelaySwitchProfile_EncodesFrontendPowerAndRelayCommands()
+    {
+        var profile = new global::IoT.Protocols.Profiles.RelaySwitchProfile();
+
+        profile.EncodeCommandPayload("SET_POWER", """{"channel":1,"state":"ON"}""").Should().Be("switch1:on");
+        profile.EncodeCommandPayload("SET_POWER", """{"channel":1,"state":"OFF"}""").Should().Be("switch1:off");
+        profile.EncodeCommandPayload("SET_RELAY_STATE", """{"relay":1,"state":"on"}""").Should().Be("switch1:on");
+        profile.EncodeCommandPayload("SET_POWER_ALL", """{"state":"ON"}""").Should().Be("all:on");
+        profile.EncodeCommandPayload("SET_POWER_ALL", """{"state":"OFF"}""").Should().Be("all:off");
+    }
 }

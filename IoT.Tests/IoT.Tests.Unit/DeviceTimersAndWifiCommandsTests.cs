@@ -329,4 +329,55 @@ public sealed class DeviceTimersAndWifiCommandsTests
         result.IsFailure.Should().BeTrue();
         result.Error.Code.Should().Be("Device.NotFound");
     }
+
+    [Fact]
+    public void CompositeProtocolAdapter_OnRelayStatusTopicWithFreeHeap_RoutesToRelaySwitchAdapterAndExtractsWifiAttributes()
+    {
+        const string liveStatusPayload = """
+        {
+          "Device": {
+            "ChipId": "B81B05BBBC2C",
+            "MacAddress": "2C:BC:BB:05:1B:B8",
+            "FirmwareVersion": "v0.0.8"
+          },
+          "Timestamp": "2026-11-04T20:04:22Z",
+          "Details": {
+            "rssi": -49,
+            "free_heap": 182400,
+            "uptime": 420,
+            "wifi_ssid": "WCD - IN",
+            "wifi_bssid": "E0:D3:62:81:E9:31",
+            "local_ip": "192.168.2.115",
+            "startup": "on",
+            "pulse": "off",
+            "pulseWidth": 500,
+            "sledOnline": "on",
+            "devices_count": 1,
+            "channel_count": 1,
+            "switches": [
+              { "outlet": 0, "switch": "off" }
+            ]
+          }
+        }
+        """;
+
+        var composite = global::IoT.Protocols.CompositeProtocolAdapter.CreateDefault();
+        var decodeResult = composite.Decode("status/B81B05BBBC2C", liveStatusPayload);
+
+        decodeResult.IsSuccess.Should().BeTrue();
+        var ev = decodeResult.Value;
+        ev.DeviceIdentifier.Should().Be("B81B05BBBC2C");
+        ev.Attributes.Should().ContainKey("wifi_ssid").WhoseValue.Should().Be("WCD - IN");
+        ev.Attributes.Should().ContainKey("wifi_bssid").WhoseValue.Should().Be("E0:D3:62:81:E9:31");
+        ev.Attributes.Should().ContainKey("local_ip").WhoseValue.Should().Be("192.168.2.115");
+        ev.Attributes.Should().ContainKey("startup").WhoseValue.Should().Be("on");
+        ev.Attributes.Should().ContainKey("pulse").WhoseValue.Should().Be("off");
+        ev.Attributes.Should().ContainKey("sledOnline").WhoseValue.Should().Be("on");
+        ev.Attributes.Should().ContainKey("firmware_version").WhoseValue.Should().Be("v0.0.8");
+
+        var clientAttrs = global::IoT.Application.Ingestion.DeviceClientAttributeMapping.Extract(ev);
+        clientAttrs.Should().ContainKey("wifi_ssid").WhoseValue.Should().Be("WCD - IN");
+        clientAttrs.Should().ContainKey("local_ip").WhoseValue.Should().Be("192.168.2.115");
+        clientAttrs.Should().ContainKey("startup").WhoseValue.Should().Be("on");
+    }
 }

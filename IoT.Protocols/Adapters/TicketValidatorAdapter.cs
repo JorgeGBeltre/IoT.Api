@@ -64,6 +64,11 @@ public sealed class TicketValidatorAdapter : IDeviceProtocolAdapter
             TopicPatternMatcher.MatchesMqttTopic("events/+", topic) ||
             TopicPatternMatcher.MatchesMqttTopic("status/+", topic))
         {
+            if (RelaySwitchAdapter.HasRelayPayloadMarkers(payload))
+            {
+                return false;
+            }
+
             return payload.Contains("GroupName", StringComparison.OrdinalIgnoreCase) ||
                    payload.Contains("TransportCode", StringComparison.OrdinalIgnoreCase) ||
                    payload.Contains("CodeTicket", StringComparison.OrdinalIgnoreCase) ||

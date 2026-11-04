@@ -28,23 +28,27 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         // La telemetría periódica llega al tópico GLOBAL "telemetry" (sin chipId ni nada
         // que delate al relé en el nombre), así que hay que reconocerla por el payload:
         // su marca es el objeto "relays".
-        return payload.Contains("devices_count", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("channel_count", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("\"switches\"", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("desired_state", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("device_switch", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("\"relays\"", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("LAN_ZEROCONF_SWITCH", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("DEVICE_COMMAND", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("DEVICE_SET_COMMAND", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("BUTTON_PRESS", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("RELAY_TOGGLE_ALL", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("TIMER_TRIGGER", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("TIMERS_UPDATED", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("WIFI_UPDATED", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("WIFI_UPDATE_FAILED", StringComparison.OrdinalIgnoreCase) ||
-               payload.Contains("PULSE_AUTO_OFF", StringComparison.OrdinalIgnoreCase);
+        return HasRelayPayloadMarkers(payload);
     }
+
+    internal static bool HasRelayPayloadMarkers(string payload) =>
+        payload.Contains("devices_count", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("channel_count", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("\"switches\"", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("desired_state", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("device_switch", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("\"relays\"", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("LAN_ZEROCONF_SWITCH", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("DEVICE_COMMAND", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("DEVICE_SET_COMMAND", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("BUTTON_PRESS", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("RELAY_TOGGLE_ALL", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("TIMER_TRIGGER", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("TIMERS_UPDATED", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("WIFI_UPDATED", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("WIFI_UPDATE_FAILED", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("PULSE_AUTO_OFF", StringComparison.OrdinalIgnoreCase) ||
+        payload.Contains("sledOnline", StringComparison.OrdinalIgnoreCase);
 
     public Result<NormalizedTelemetryEvent> Decode(string topic, string payload)
     {
@@ -77,6 +81,14 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
             var metrics = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
             var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             int detectedChannelCount = 0;
+
+            if (root.TryGetProperty("Device", out var devMetaElem) &&
+                devMetaElem.TryGetProperty("FirmwareVersion", out var fwElem) &&
+                fwElem.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(fwElem.GetString()))
+            {
+                attributes["firmware_version"] = fwElem.GetString()!;
+            }
 
             ExtractPowerAndConfigFields(root, metrics, attributes);
             detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(root));

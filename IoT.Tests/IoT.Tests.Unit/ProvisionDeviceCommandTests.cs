@@ -350,4 +350,76 @@ public sealed class ProvisionDeviceCommandTests
         var res = svc.ValidateLanTargetHost(host, port);
         res.IsSuccess.Should().Be(expectedAllowed);
     }
+
+    [Fact]
+    public async Task Handle_ReProvisioningMisclassifiedRelay_UpdatesModelNameAndReplacesStaleGpsCapabilityWithSwitch()
+    {
+        var m = NewMocks();
+        var existing = Device.Create(T1, Chip, "2C:BC:BB:05:1B:B8", "sala1", "Telemetry / GPS Module", "Custom IoT").Value;
+        existing.AssignToCustomer(Guid.NewGuid());
+        existing.AssignCapability(CapabilityType.Gps);
+        existing.SetMqttApiKey("OLD-HASH", "OLDFP", "antes");
+
+        m.Devices.Setup(r => r.GetByChipIdAsync(T1, Chip, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+        m.ApiKeys.Setup(s => s.Generate()).Returns(("iotk_RELAY", "NEW-HASH", "NEWFP"));
+
+        var handler = BuildHandler(m);
+        var result = await handler.Handle(
+            new ProvisionDeviceCommand(
+                T1,
+                Chip,
+                MacAddress: "2C:BC:BB:05:1B:B8",
+                Name: "Sala Interruptor",
+                Model: "Relay-Wifi",
+                Manufacturer: "VESIS",
+                Capabilities: null,
+                IssuedBy: "operador@t1"),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        existing.Name.Should().Be("Sala Interruptor");
+        existing.Model.Should().Be("Relay-Wifi");
+        existing.Manufacturer.Should().Be("VESIS");
+        existing.HasCapability(CapabilityType.Switch).Should().BeTrue();
+        existing.HasCapability(CapabilityType.Gps).Should().BeFalse("un relé re-aprovisionado debe limpiar la capacidad GPS errónea");
+    }
+
+    [Theory]
+    [InlineData("Relay-Wifi", "set_switch", "{\"switch\":\"on\",\"state\":true}", "switch1:on")]
+    [InlineData("Smart Switch", "set_channel", "{\"channel\":2,\"switch\":\"off\"}", "switch2:off")]
+    [InlineData("MQTT-Relay-BLE", "SET_POWER", "{\"channel\":1,\"state\":\"ON\"}", "switch1:on")]
+    [InlineData("Relay-Wifi", "SET_POWER_STATE", "{\"state\":0}", "switch1:off")]
+    [InlineData("Relay-Wifi", "SET_POWER_ALL", "{\"state\":\"ON\"}", "switch1:on")]
+    [InlineData("Relay-Wifi", "toggle_all", null, "toggle_all")]
+    [InlineData("Relay-Wifi", "reboot", null, "reset")]
+    public void TopicRoutingService_RelaySwitchModels_RouteToCommandsTopicAndEncodeNativePayload(
+        string model,
+        string commandName,
+        string? payloadJson,
+        string expectedPayload)
+    {
+        var routing = new global::IoT.Protocols.Routing.TopicRoutingService(
+            global::IoT.Protocols.Profiles.ProtocolRegistry.CreateDefault());
+
+        routing.BuildCommandTopic(model, "B81B05BBBC2C").Should().Be("commands/B81B05BBBC2C");
+        routing.BuildCommandPayload(model, commandName, payloadJson).Should().Be(expectedPayload);
+    }
+
+    [Theory]
+    [InlineData("localhost", "192.168.100.7", "192.168.100.7")]
+    [InlineData("127.0.0.1", "192.168.100.7", "192.168.100.7")]
+    [InlineData("192.168.2.178", "192.168.100.149", "192.168.100.149")]
+    [InlineData("192.168.2.178", "192.168.2.200", "192.168.2.178")]
+    [InlineData("broker.example.com", "192.168.100.7", "broker.example.com")]
+    [InlineData("localhost", "bad/host:inject", "localhost")]
+    public void MqttConnectionInfoProvider_ResolveEffectiveHost_HandlesLanSubnetAndPreservesPublicDomains(
+        string configured,
+        string? requestHost,
+        string expected)
+    {
+        global::IoT.Infrastructure.Mqtt.MqttConnectionInfoProvider
+            .ResolveEffectiveHost(configured, requestHost)
+            .Should()
+            .Be(expected);
+    }
 }

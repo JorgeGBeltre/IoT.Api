@@ -34,7 +34,9 @@ builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddDeviceFacingGateways();
 
 // 2. Tenant Context & Real-time Notifications
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
+builder.Services.AddSingleton<IMqttConnectionInfoProvider, HttpRequestAwareMqttConnectionInfoProvider>();
 builder.Services.AddSingleton<IFleetNotificationService, SignalRFleetNotificationService>();
 
 // Health Checks (Observability)

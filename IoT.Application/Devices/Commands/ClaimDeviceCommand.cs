@@ -186,7 +186,15 @@ public sealed class ClaimDeviceCommandHandler
         }
 
         device.AssignToCustomer(customerId.Value);
-        device.AssignCapability(CapabilityType.Switch);
+        var inferredCaps = ProvisionDeviceCommandHandler.InferCapabilitiesFromMetadata(request.Model ?? device.Model, chipId);
+        if (inferredCaps.Count > 0)
+        {
+            ProvisionDeviceCommandHandler.ApplyCapabilities(device, inferredCaps, request.Model ?? device.Model, chipId);
+        }
+        else
+        {
+            device.AssignCapability(CapabilityType.Switch);
+        }
 
         var (newPlainKey, mintErr) = MintApiKey(device, request.IssuedBy);
         if (mintErr is not null)

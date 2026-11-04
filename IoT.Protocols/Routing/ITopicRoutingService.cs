@@ -28,15 +28,7 @@ public sealed class TopicRoutingService : ITopicRoutingService
 
     public string BuildCommandTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null)
     {
-        IDeviceProfile? profile = null;
-
-        if (!string.IsNullOrWhiteSpace(profileIdOrModel))
-        {
-            profile = _registry.GetProfile(profileIdOrModel) ??
-                      _registry.GetAllProfiles().FirstOrDefault(p =>
-                          string.Equals(p.Model, profileIdOrModel, StringComparison.OrdinalIgnoreCase) ||
-                          string.Equals(p.ProfileId, profileIdOrModel, StringComparison.OrdinalIgnoreCase));
-        }
+        IDeviceProfile? profile = ResolveProfile(profileIdOrModel);
 
         string pattern = profile?.CommandTopicPattern ?? "devices/{deviceId}/commands";
 
@@ -50,31 +42,65 @@ public sealed class TopicRoutingService : ITopicRoutingService
         if (string.IsNullOrWhiteSpace(profileIdOrModel) || string.IsNullOrWhiteSpace(commandName))
             return null;
 
-        var profile = _registry.GetProfile(profileIdOrModel) ??
-                      _registry.GetAllProfiles().FirstOrDefault(p =>
-                          string.Equals(p.Model, profileIdOrModel, StringComparison.OrdinalIgnoreCase) ||
-                          string.Equals(p.ProfileId, profileIdOrModel, StringComparison.OrdinalIgnoreCase));
+        var profile = ResolveProfile(profileIdOrModel);
 
         return profile?.EncodeCommandPayload(commandName, payloadJson);
     }
 
     public string BuildAttributeTopic(string? profileIdOrModel, string chipId, Guid? tenantId = null)
     {
-        IDeviceProfile? profile = null;
-
-        if (!string.IsNullOrWhiteSpace(profileIdOrModel))
-        {
-            profile = _registry.GetProfile(profileIdOrModel) ??
-                      _registry.GetAllProfiles().FirstOrDefault(p =>
-                          string.Equals(p.Model, profileIdOrModel, StringComparison.OrdinalIgnoreCase) ||
-                          string.Equals(p.ProfileId, profileIdOrModel, StringComparison.OrdinalIgnoreCase));
-        }
+        IDeviceProfile? profile = ResolveProfile(profileIdOrModel);
 
         string pattern = profile?.AttributeTopicPattern ?? "devices/{deviceId}/attributes";
 
         return pattern
             .Replace("{deviceId}", chipId, StringComparison.OrdinalIgnoreCase)
             .Replace("{tenantId}", tenantId?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private IDeviceProfile? ResolveProfile(string? profileIdOrModel)
+    {
+        if (string.IsNullOrWhiteSpace(profileIdOrModel))
+        {
+            return null;
+        }
+
+        string trimmed = profileIdOrModel.Trim();
+        var exact = _registry.GetProfile(trimmed) ??
+                    _registry.GetAllProfiles().FirstOrDefault(p =>
+                        string.Equals(p.Model, trimmed, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(p.ProfileId, trimmed, StringComparison.OrdinalIgnoreCase));
+
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        string lower = trimmed.ToLowerInvariant();
+        if (lower.Contains("relay", StringComparison.Ordinal) ||
+            lower.Contains("switch", StringComparison.Ordinal) ||
+            lower.Contains("interruptor", StringComparison.Ordinal) ||
+            lower.Contains("psc-", StringComparison.Ordinal) ||
+            lower.Contains("vesis", StringComparison.Ordinal) ||
+            lower.Contains("minir", StringComparison.Ordinal))
+        {
+            return _registry.GetProfile("relay-switch");
+        }
+
+        if (lower.Contains("validator", StringComparison.Ordinal) ||
+            lower.Contains("fligo", StringComparison.Ordinal) ||
+            lower.Contains("toour", StringComparison.Ordinal))
+        {
+            return _registry.GetProfile("ticket-validator");
+        }
+
+        if (lower.Contains("glp", StringComparison.Ordinal) ||
+            lower.Contains("pressure", StringComparison.Ordinal))
+        {
+            return _registry.GetProfile("glp-pressure-sensor");
+        }
+
+        return null;
     }
 
     public IReadOnlyList<string> GetAllTelemetrySubscriptionPatterns()

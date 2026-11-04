@@ -91,7 +91,18 @@ public sealed class ProvisionDeviceCommandHandler
         var existing = await _deviceRepository.GetByChipIdAsync(request.TenantId, chipId, cancellationToken);
         if (existing is not null)
         {
-            AssignCapabilities(existing, request.Capabilities);
+            if (!string.IsNullOrWhiteSpace(request.Name))
+            {
+                var renameRes = existing.Rename(request.Name);
+                if (renameRes.IsFailure)
+                {
+                    return Result<DeviceProvisioningResultDto>.Failure(renameRes.Error);
+                }
+            }
+
+            existing.UpdateHardwareInfo(request.Model, request.Manufacturer);
+            ApplyCapabilities(existing, request.Capabilities, request.Model ?? existing.Model, chipId);
+
             if (!string.IsNullOrWhiteSpace(request.FirmwareVersion))
             {
                 existing.UpdateFirmwareVersion(request.FirmwareVersion);
@@ -180,7 +191,7 @@ public sealed class ProvisionDeviceCommandHandler
         }
         device.AssignToCustomer(customerId.Value);
 
-        AssignCapabilities(device, request.Capabilities);
+        ApplyCapabilities(device, request.Capabilities, request.Model ?? device.Model, chipId);
 
         var (plainKey, error) = MintApiKey(device, request.IssuedBy);
         if (error is not null)
@@ -318,17 +329,104 @@ public sealed class ProvisionDeviceCommandHandler
         return $"bt_{Guid.NewGuid():N}"[..19];
     }
 
-    private static void AssignCapabilities(Device device, IReadOnlyList<CapabilityType>? capabilities)
+    internal static void ApplyCapabilities(
+        Device device,
+        IReadOnlyList<CapabilityType>? capabilities,
+        string? model,
+        string? chipId = null)
     {
-        if (capabilities is null)
+        IReadOnlyList<CapabilityType> resolved = capabilities is { Count: > 0 }
+            ? capabilities
+            : InferCapabilitiesFromMetadata(model, chipId);
+
+        if (resolved.Count == 0)
         {
             return;
         }
 
-        foreach (var capability in capabilities)
+        foreach (var capability in resolved)
         {
             device.AssignCapability(capability);
         }
+
+        // Si se re-aprovisiona un interruptor previamente clasificado por error como GPS (o viceversa),
+        // se limpia la capacidad contradictoria que no forma parte del conjunto resuelto.
+        if (resolved.Contains(CapabilityType.Switch) &&
+            !resolved.Contains(CapabilityType.Gps) &&
+            device.HasCapability(CapabilityType.Gps))
+        {
+            device.RemoveCapability(CapabilityType.Gps);
+        }
+        else if (resolved.Contains(CapabilityType.Gps) &&
+                 !resolved.Contains(CapabilityType.Switch) &&
+                 device.HasCapability(CapabilityType.Switch))
+        {
+            device.RemoveCapability(CapabilityType.Switch);
+        }
+    }
+
+    internal static IReadOnlyList<CapabilityType> InferCapabilitiesFromMetadata(string? model, string? chipId = null)
+    {
+        string m = (model ?? string.Empty).Trim().ToLowerInvariant();
+        string c = (chipId ?? string.Empty).Trim().ToUpperInvariant();
+
+        if (m.Contains("gps-relay", StringComparison.Ordinal) ||
+            (m.Contains("gps", StringComparison.Ordinal) && m.Contains("relay", StringComparison.Ordinal)))
+        {
+            return [CapabilityType.Gps, CapabilityType.Switch];
+        }
+
+        if (m.Contains("relay", StringComparison.Ordinal) ||
+            m.Contains("switch", StringComparison.Ordinal) ||
+            m.Contains("interruptor", StringComparison.Ordinal) ||
+            m.Contains("psc-", StringComparison.Ordinal) ||
+            m.Contains("vesis", StringComparison.Ordinal) ||
+            m.Contains("plug", StringComparison.Ordinal) ||
+            m.Contains("minir", StringComparison.Ordinal) ||
+            c.StartsWith("RELAY-", StringComparison.Ordinal) ||
+            c.StartsWith("SWITCH-", StringComparison.Ordinal) ||
+            c.StartsWith("VESIS-", StringComparison.Ordinal))
+        {
+            return [CapabilityType.Switch];
+        }
+
+        if (m.Contains("glp", StringComparison.Ordinal) ||
+            m.Contains("pressure", StringComparison.Ordinal) ||
+            m.Contains("level", StringComparison.Ordinal) ||
+            m.Contains("tank", StringComparison.Ordinal) ||
+            c.StartsWith("GLP-", StringComparison.Ordinal))
+        {
+            return [CapabilityType.LevelTelemetry, CapabilityType.Pressure];
+        }
+
+        if (m.Contains("validator", StringComparison.Ordinal) ||
+            m.Contains("fligo", StringComparison.Ordinal) ||
+            m.Contains("toour", StringComparison.Ordinal) ||
+            m.Contains("ticket", StringComparison.Ordinal) ||
+            m.Contains("nfc", StringComparison.Ordinal) ||
+            c.StartsWith("FLIGO-", StringComparison.Ordinal) ||
+            c.StartsWith("TOOUR-", StringComparison.Ordinal))
+        {
+            return [CapabilityType.NfcTicket, CapabilityType.QrReader];
+        }
+
+        if (m.Contains("gps", StringComparison.Ordinal) ||
+            m.Contains("gv50", StringComparison.Ordinal) ||
+            m.Contains("tracker", StringComparison.Ordinal) ||
+            m.Contains("rastreador", StringComparison.Ordinal) ||
+            m.Contains("teltonika", StringComparison.Ordinal) ||
+            m.Contains("gt06", StringComparison.Ordinal) ||
+            m.Contains("coban", StringComparison.Ordinal) ||
+            m.Contains("mictrack", StringComparison.Ordinal) ||
+            m.Contains("queclink", StringComparison.Ordinal) ||
+            m.Contains("istartek", StringComparison.Ordinal) ||
+            m.Contains("jointech", StringComparison.Ordinal) ||
+            c.StartsWith("GPS-", StringComparison.Ordinal))
+        {
+            return [CapabilityType.Gps];
+        }
+
+        return Array.Empty<CapabilityType>();
     }
 
     /// <summary>

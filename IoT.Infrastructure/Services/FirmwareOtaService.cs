@@ -57,6 +57,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
     /// construían el servicio; si falta, no se comprueba presencia (comportamiento anterior).
     /// </summary>
     private readonly IMqttClientMap? _clientMap;
+    private readonly IDeviceAttributeRepository? _attributeRepository;
     private readonly ILogger<FirmwareOtaService> _logger;
 
     /// <summary>Ventana de rescate: una campaña sin avanzar más de esto se considera muerta.</summary>
@@ -84,7 +85,8 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         OtaTransmissionThrottle? throttle = null,
         Microsoft.Extensions.Hosting.IHostApplicationLifetime? appLifetime = null,
         OtaCampaignRegistry? campaignRegistry = null,
-        IMqttClientMap? clientMap = null)
+        IMqttClientMap? clientMap = null,
+        IDeviceAttributeRepository? attributeRepository = null)
     {
         _firmwareRepository = firmwareRepository;
         _deviceRepository = deviceRepository;
@@ -99,6 +101,7 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
         _appLifetime = appLifetime;
         _campaignRegistry = campaignRegistry;
         _clientMap = clientMap;
+        _attributeRepository = attributeRepository;
     }
 
     public async Task<Result<FirmwareVersionRecordDto>> UploadFirmwareAsync(
@@ -732,6 +735,303 @@ public sealed class FirmwareOtaService : IFirmwareOtaService
             OtaUpdatedAt: device.OtaUpdatedAt);
 
         return Result<DeviceOtaStatusDto>.Success(dto);
+    }
+
+    public async Task<Result<DeviceFirmwareAvailabilityDto>> GetAvailableDeviceFirmwareAsync(
+        Guid tenantId,
+        Guid deviceId,
+        bool hasUpdatePolicy = true,
+        string channel = "stable",
+        CancellationToken cancellationToken = default)
+    {
+        var device = await _deviceRepository.GetByIdAsync(deviceId, cancellationToken);
+        if (device is null || device.TenantId != tenantId)
+        {
+            return Result<DeviceFirmwareAvailabilityDto>.Failure(
+                new Error("Device.NotFound", "Dispositivo no encontrado."));
+        }
+
+        string normalizedChannel = string.IsNullOrWhiteSpace(channel)
+            ? "stable"
+            : channel.Trim().ToLowerInvariant();
+
+        string? installedVersion = device.FirmwareVersion;
+        string? hardwareVersion = null;
+
+        if (_attributeRepository is not null)
+        {
+            var clientAttrs = await _attributeRepository.GetByDeviceAndScopeAsync(
+                device.Id, Domain.Enums.AttributeScope.Client, cancellationToken);
+
+            foreach (var attr in clientAttrs)
+            {
+                if (string.IsNullOrWhiteSpace(installedVersion) &&
+                    (string.Equals(attr.Key, "firmware_version", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(attr.Key, "fwVersion", StringComparison.OrdinalIgnoreCase)))
+                {
+                    installedVersion = attr.Value;
+                }
+                else if (string.IsNullOrWhiteSpace(hardwareVersion) &&
+                         (string.Equals(attr.Key, "hardware_version", StringComparison.OrdinalIgnoreCase) ||
+                          string.Equals(attr.Key, "chip_type", StringComparison.OrdinalIgnoreCase)))
+                {
+                    hardwareVersion = attr.Value;
+                }
+            }
+        }
+
+        // Política de actualización y estado administrativo del dispositivo
+        if (!hasUpdatePolicy || device.AdminStatus != Domain.Enums.DeviceAdminStatus.Active)
+        {
+            return Result<DeviceFirmwareAvailabilityDto>.Success(
+                new DeviceFirmwareAvailabilityDto(
+                    DeviceId: device.Id,
+                    UpdateAvailable: false,
+                    CurrentVersion: installedVersion,
+                    AvailableVersion: null,
+                    ReleaseNotes: null,
+                    Channel: normalizedChannel,
+                    PublishedAt: null));
+        }
+
+        var records = await _firmwareRepository.GetRecordsAsync(tenantId, null, 0, 200, cancellationToken);
+        FirmwareVersionRecord? bestCandidate = null;
+
+        foreach (var record in records)
+        {
+            if (!record.IsActive)
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(record.Sha256) || record.Sha256.Length != 64)
+            {
+                continue;
+            }
+
+            if (!IsModelAndHardwareCompatible(device.Model, hardwareVersion, record.TargetModel))
+            {
+                continue;
+            }
+
+            string recordChannel = ResolveFirmwareChannel(record.FirmwareVersion);
+            if (!string.Equals(recordChannel, normalizedChannel, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!FirmwareStorage.TryResolveWithinTenant(tenantId, record.Src, out string fullPath) ||
+                !File.Exists(fullPath))
+            {
+                continue;
+            }
+
+            if (!IsStrictlyNewerVersion(record.FirmwareVersion, installedVersion))
+            {
+                continue;
+            }
+
+            if (bestCandidate is null ||
+                CompareSemanticVersions(record.FirmwareVersion, bestCandidate.FirmwareVersion) > 0)
+            {
+                bestCandidate = record;
+            }
+        }
+
+        if (bestCandidate is null)
+        {
+            return Result<DeviceFirmwareAvailabilityDto>.Success(
+                new DeviceFirmwareAvailabilityDto(
+                    DeviceId: device.Id,
+                    UpdateAvailable: false,
+                    CurrentVersion: installedVersion,
+                    AvailableVersion: null,
+                    ReleaseNotes: null,
+                    Channel: normalizedChannel,
+                    PublishedAt: null));
+        }
+
+        string releaseNotes = string.IsNullOrWhiteSpace(bestCandidate.FeatureDescription)
+            ? "Mejoras y correcciones disponibles."
+            : bestCandidate.FeatureDescription.Trim();
+
+        return Result<DeviceFirmwareAvailabilityDto>.Success(
+            new DeviceFirmwareAvailabilityDto(
+                DeviceId: device.Id,
+                UpdateAvailable: true,
+                CurrentVersion: installedVersion,
+                AvailableVersion: bestCandidate.FirmwareVersion,
+                ReleaseNotes: releaseNotes,
+                Channel: normalizedChannel,
+                PublishedAt: bestCandidate.CreatedAt));
+    }
+
+    public async Task<Result> ApplyAvailableDeviceFirmwareAsync(
+        Guid tenantId,
+        Guid deviceId,
+        string channel = "stable",
+        string? actor = null,
+        CancellationToken cancellationToken = default)
+    {
+        var availability = await GetAvailableDeviceFirmwareAsync(
+            tenantId,
+            deviceId,
+            hasUpdatePolicy: true,
+            channel: channel,
+            cancellationToken: cancellationToken);
+
+        if (availability.IsFailure)
+        {
+            return Result.Failure(availability.Error);
+        }
+
+        if (!availability.Value.UpdateAvailable || string.IsNullOrWhiteSpace(availability.Value.AvailableVersion))
+        {
+            return Result.Failure(new Error(
+                "Firmware.NoUpdateAvailable",
+                "No existe una actualización compatible disponible para este dispositivo."));
+        }
+
+        return await StartDeviceOtaAsync(
+            tenantId,
+            deviceId,
+            availability.Value.AvailableVersion!,
+            actor,
+            cancellationToken);
+    }
+
+    internal static bool IsModelAndHardwareCompatible(string? deviceModel, string? deviceHardware, string? targetModelSpec)
+    {
+        if (string.IsNullOrWhiteSpace(deviceModel) || string.IsNullOrWhiteSpace(targetModelSpec))
+        {
+            return false;
+        }
+
+        string targetModel = targetModelSpec.Trim();
+        string? requiredHardware = null;
+
+        int sep = targetModel.IndexOfAny(new[] { '@', '+' });
+        if (sep > 0 && sep + 1 < targetModel.Length)
+        {
+            requiredHardware = targetModel[(sep + 1)..].Trim();
+            targetModel = targetModel[..sep].Trim();
+        }
+
+        if (!string.Equals(NormalizeModelToken(deviceModel), NormalizeModelToken(targetModel), StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(requiredHardware))
+        {
+            if (string.IsNullOrWhiteSpace(deviceHardware))
+            {
+                return false;
+            }
+
+            if (!deviceHardware.Trim().Contains(requiredHardware, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(NormalizeModelToken(deviceHardware), NormalizeModelToken(requiredHardware), StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string NormalizeModelToken(string value) =>
+        value.Trim().Replace("_", "-", StringComparison.Ordinal).Replace(" ", "-", StringComparison.Ordinal);
+
+    internal static string ResolveFirmwareChannel(string version)
+    {
+        string v = (version ?? string.Empty).Trim().ToLowerInvariant();
+        if (v.Contains("-alpha", StringComparison.Ordinal) ||
+            v.Contains("-beta", StringComparison.Ordinal) ||
+            v.Contains("-rc", StringComparison.Ordinal) ||
+            v.Contains("-dev", StringComparison.Ordinal))
+        {
+            return "beta";
+        }
+        return "stable";
+    }
+
+    internal static bool IsStrictlyNewerVersion(string candidateVersion, string? installedVersion)
+    {
+        if (!TryParseSemVer(candidateVersion, out _))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(installedVersion))
+        {
+            return true;
+        }
+
+        if (!TryParseSemVer(installedVersion, out _))
+        {
+            return false;
+        }
+
+        return CompareSemanticVersions(candidateVersion, installedVersion) > 0;
+    }
+
+    internal static int CompareSemanticVersions(string a, string b)
+    {
+        bool okA = TryParseSemVer(a, out var va);
+        bool okB = TryParseSemVer(b, out var vb);
+        if (!okA && !okB) return 0;
+        if (!okA) return -1;
+        if (!okB) return 1;
+
+        int cmp = va.Major.CompareTo(vb.Major);
+        if (cmp != 0) return cmp;
+        cmp = va.Minor.CompareTo(vb.Minor);
+        if (cmp != 0) return cmp;
+        cmp = va.Patch.CompareTo(vb.Patch);
+        if (cmp != 0) return cmp;
+
+        if (string.IsNullOrEmpty(va.PreRelease) && !string.IsNullOrEmpty(vb.PreRelease)) return 1;
+        if (!string.IsNullOrEmpty(va.PreRelease) && string.IsNullOrEmpty(vb.PreRelease)) return -1;
+        return string.Compare(va.PreRelease, vb.PreRelease, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryParseSemVer(string? raw, out (int Major, int Minor, int Patch, string PreRelease) parsed)
+    {
+        parsed = default;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        string s = raw.Trim().TrimStart('v', 'V');
+        string pre = string.Empty;
+        int dash = s.IndexOf('-');
+        if (dash >= 0)
+        {
+            pre = s[(dash + 1)..];
+            s = s[..dash];
+        }
+
+        var parts = s.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || parts.Length > 4)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[0], out int major) || major < 0 ||
+            !int.TryParse(parts[1], out int minor) || minor < 0)
+        {
+            return false;
+        }
+
+        int patch = 0;
+        if (parts.Length >= 3 && (!int.TryParse(parts[2], out patch) || patch < 0))
+        {
+            return false;
+        }
+
+        parsed = (major, minor, patch, pre);
+        return true;
     }
 
     public async Task HandleDeviceOtaReportAsync(

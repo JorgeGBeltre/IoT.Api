@@ -73,6 +73,20 @@ public interface IFirmwareOtaService
         Guid deviceId,
         CancellationToken cancellationToken = default);
 
+    Task<Result<DeviceFirmwareAvailabilityDto>> GetAvailableDeviceFirmwareAsync(
+        Guid tenantId,
+        Guid deviceId,
+        bool hasUpdatePolicy = true,
+        string channel = "stable",
+        CancellationToken cancellationToken = default);
+
+    Task<Result> ApplyAvailableDeviceFirmwareAsync(
+        Guid tenantId,
+        Guid deviceId,
+        string channel = "stable",
+        string? actor = null,
+        CancellationToken cancellationToken = default);
+
     Task HandleDeviceOtaReportAsync(
         string chipId,
         string otaAction,

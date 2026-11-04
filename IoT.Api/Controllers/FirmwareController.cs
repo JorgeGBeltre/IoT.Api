@@ -17,15 +17,18 @@ public sealed class FirmwareController : ControllerBase
     private readonly IFirmwareOtaService _firmwareOtaService;
     private readonly ITenantContext _tenantContext;
     private readonly ILogger<FirmwareController> _logger;
+    private readonly IAuthorizationService? _authorizationService;
 
     public FirmwareController(
         IFirmwareOtaService firmwareOtaService,
         ITenantContext tenantContext,
-        ILogger<FirmwareController> logger)
+        ILogger<FirmwareController> logger,
+        IAuthorizationService? authorizationService = null)
     {
         _firmwareOtaService = firmwareOtaService;
         _tenantContext = tenantContext;
         _logger = logger;
+        _authorizationService = authorizationService;
     }
 
     /// <summary>
@@ -274,6 +277,65 @@ public sealed class FirmwareController : ControllerBase
             return BadRequest(new { error = result.Error.Message });
 
         return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// Determina si existe una actualización de firmware compatible y autorizada para el dispositivo,
+    /// devolviendo únicamente datos comprensibles para el usuario final (sin URLs ni hashes técnicos).
+    /// </summary>
+    [HttpGet("devices/{deviceId:guid}/available")]
+    [ProducesResponseType(typeof(DeviceFirmwareAvailabilityDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetAvailableDeviceFirmware(
+        Guid deviceId,
+        [FromQuery] string channel = "stable",
+        CancellationToken cancellationToken = default)
+    {
+        bool hasManagePolicy = true;
+        if (_authorizationService is not null)
+        {
+            var authResult = await _authorizationService.AuthorizeAsync(
+                User, null, AuthorizationPolicies.FirmwareManage);
+            hasManagePolicy = authResult.Succeeded;
+        }
+
+        var result = await _firmwareOtaService.GetAvailableDeviceFirmwareAsync(
+            _tenantContext.TenantId,
+            deviceId,
+            hasUpdatePolicy: hasManagePolicy,
+            channel: channel,
+            cancellationToken: cancellationToken);
+
+        if (result.IsFailure)
+            return NotFound(new { error = result.Error.Message });
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// Inicia internamente la actualización OTA compatible determinada por el servidor,
+    /// conservando intacta la verificación criptográfica SHA-256 sin exponer parámetros técnicos al cliente.
+    /// </summary>
+    [Authorize(Policy = AuthorizationPolicies.FirmwareManage)]
+    [HttpPost("devices/{deviceId:guid}/apply-available")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> ApplyAvailableDeviceFirmware(
+        Guid deviceId,
+        [FromQuery] string channel = "stable",
+        CancellationToken cancellationToken = default)
+    {
+        var result = await _firmwareOtaService.ApplyAvailableDeviceFirmwareAsync(
+            _tenantContext.TenantId,
+            deviceId,
+            channel: channel,
+            actor: User.Identity?.Name,
+            cancellationToken: cancellationToken);
+
+        if (result.IsFailure)
+            return BadRequest(new { error = result.Error.Message });
+
+        return Ok(new { message = "Actualización de software iniciada." });
     }
 }
 

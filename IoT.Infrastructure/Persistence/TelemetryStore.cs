@@ -195,6 +195,7 @@ public sealed class TelemetryStore : ITelemetryStore
         foreach (var group in rows.GroupBy(r => r.DeviceId))
         {
             var merged = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+            double maxStateVersion = 0;
             foreach (var row in group.Take(10).OrderBy(r => r.ReceivedAt))
             {
                 if (string.IsNullOrWhiteSpace(row.MetricsJson)) continue;
@@ -202,8 +203,25 @@ public sealed class TelemetryStore : ITelemetryStore
                 {
                     var parsed = JsonSerializer.Deserialize<Dictionary<string, double>>(row.MetricsJson);
                     if (parsed is null) continue;
+
+                    double rowStateVersion = parsed.TryGetValue("state_version", out var sv) ? sv : 0;
+                    bool isStaleRow = rowStateVersion > 0 && maxStateVersion > 0 && rowStateVersion < maxStateVersion;
+                    if (rowStateVersion > maxStateVersion)
+                    {
+                        maxStateVersion = rowStateVersion;
+                    }
+
                     foreach (var kv in parsed)
                     {
+                        if (isStaleRow &&
+                            (kv.Key.StartsWith("switch_", StringComparison.OrdinalIgnoreCase) ||
+                             kv.Key.StartsWith("relay", StringComparison.OrdinalIgnoreCase) ||
+                             kv.Key.StartsWith("device_switch", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(kv.Key, "state_version", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            continue;
+                        }
+
                         if ((string.Equals(kv.Key, "channel_count", StringComparison.OrdinalIgnoreCase) ||
                              string.Equals(kv.Key, "devices_count", StringComparison.OrdinalIgnoreCase)) &&
                             merged.TryGetValue(kv.Key, out double prevCount))

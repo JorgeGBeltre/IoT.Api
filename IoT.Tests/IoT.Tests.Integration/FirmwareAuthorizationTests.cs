@@ -199,7 +199,7 @@ public class FirmwareAuthorizationTests
     {
         // Consultar el inventario de versiones o el estado de una campaña no es destructivo:
         // restringirlo también dejaría al operador sin ver qué está pasando.
-        foreach (var name in new[] { "GetFirmwareVersionRecords", "GetDeviceOtaStatus" })
+        foreach (var name in new[] { "GetFirmwareVersionRecords", "GetDeviceOtaStatus", "GetAvailableDeviceFirmware" })
         {
             var method = typeof(FirmwareController).GetMethod(name);
             method.Should().NotBeNull("se esperaba encontrar el endpoint de lectura " + name);

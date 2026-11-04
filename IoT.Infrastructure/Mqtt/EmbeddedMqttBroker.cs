@@ -285,6 +285,7 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
         _server.ClientDisconnectedAsync += OnClientDisconnected;
 
         await _server.StartAsync();
+        await ScrubRetainedCommandTopicsAsync();
 
         if (_allowAnonymous)
         {
@@ -838,6 +839,15 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 e.ProcessPublish = false;
                 return Task.CompletedTask;
             }
+
+            // Ningún comando puntual o ACK puede quedar retenido en el broker (evita re-ejecución al reconectar).
+            if (e.ApplicationMessage.Retain && IsNonRetainableCommandTopic(topic))
+            {
+                _logger.LogWarning(
+                    "Flag RETAIN bloqueado en tópico de comando '{Topic}' (emisor {ClientId}).",
+                    topic, e.ClientId);
+                e.ApplicationMessage.Retain = false;
+            }
             // Cota de tamaño ANTES de materializar el payload en string: sin ella un equipo
             // podía mandar megabytes por trama, que se convertían a string, se guardaban en la
             // columna jsonb RawPayload y multiplicaban la memoria del canal de ingesta.
@@ -1075,11 +1085,17 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
             _ => MqttQualityOfServiceLevel.AtLeastOnce
         };
 
+        bool effectiveRetain = options.Retain && !IsNonRetainableCommandTopic(topic);
+        if (options.Retain && !effectiveRetain)
+        {
+            _logger.LogWarning("PublishAsync ignoró Retain=true en tópico de comando '{Topic}'.", topic);
+        }
+
         var builder = new MqttApplicationMessageBuilder()
             .WithTopic(topic)
             .WithPayload(Encoding.UTF8.GetBytes(payload))
             .WithQualityOfServiceLevel(qos)
-            .WithRetainFlag(options.Retain);
+            .WithRetainFlag(effectiveRetain);
 
         if (options.MessageExpiryInterval.HasValue)
             builder.WithMessageExpiryInterval(options.MessageExpiryInterval.Value);
@@ -1093,5 +1109,60 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
 
         await _server.InjectApplicationMessage(
             new InjectedMqttApplicationMessage(builder.Build()) { SenderClientId = MqttTopicAcl.ServerClientId });
+    }
+
+    public static bool IsNonRetainableCommandTopic(string? topic)
+    {
+        if (string.IsNullOrWhiteSpace(topic))
+        {
+            return false;
+        }
+
+        string t = topic.Trim('/');
+        return t.StartsWith("commands/", StringComparison.OrdinalIgnoreCase) ||
+               t.StartsWith("command/", StringComparison.OrdinalIgnoreCase) ||
+               t.StartsWith("event/", StringComparison.OrdinalIgnoreCase) ||
+               t.EndsWith("/command", StringComparison.OrdinalIgnoreCase) ||
+               t.EndsWith("/commands", StringComparison.OrdinalIgnoreCase) ||
+               t.EndsWith("/commands/ack", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task ScrubRetainedCommandTopicsAsync()
+    {
+        if (_server is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var retained = await _server.GetRetainedMessagesAsync();
+            if (retained is null || retained.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var msg in retained)
+            {
+                if (IsNonRetainableCommandTopic(msg.Topic))
+                {
+                    var clearMsg = new MqttApplicationMessageBuilder()
+                        .WithTopic(msg.Topic)
+                        .WithPayload(Array.Empty<byte>())
+                        .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtMostOnce)
+                        .WithRetainFlag(true)
+                        .Build();
+
+                    await _server.InjectApplicationMessage(
+                        new InjectedMqttApplicationMessage(clearMsg) { SenderClientId = MqttTopicAcl.ServerClientId });
+
+                    _logger.LogWarning("Mensaje RETAIN obsoleto limpiado de forma controlada en tópico de comando '{Topic}'.", msg.Topic);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "No se pudieron inspeccionar/limpiar mensajes retained al iniciar el broker.");
+        }
     }
 }

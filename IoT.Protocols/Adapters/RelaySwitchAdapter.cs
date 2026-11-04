@@ -16,6 +16,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         // Sólo se reconocía la forma con barra, así que el estado real del actuador
         // (texto plano "on"/"off") lo acababa resolviendo el adaptador genérico.
         if (topic.StartsWith("relays/", StringComparison.OrdinalIgnoreCase) ||
+            topic.EndsWith("/commands/ack", StringComparison.OrdinalIgnoreCase) ||
             topic.EndsWith("/state", StringComparison.OrdinalIgnoreCase) ||
             topic.EndsWith("_state", StringComparison.OrdinalIgnoreCase) ||
             topic.EndsWith("/report", StringComparison.OrdinalIgnoreCase) ||
@@ -69,6 +70,11 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
             string chipId = string.Empty;
             if (root.TryGetProperty("Device", out var devElem) && devElem.TryGetProperty("ChipId", out var chipElem))
                 chipId = chipElem.GetString() ?? string.Empty;
+            else if (root.TryGetProperty("deviceId", out var rootDevIdElem) && rootDevIdElem.ValueKind == JsonValueKind.String)
+                chipId = rootDevIdElem.GetString() ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(chipId) && TopicPatternMatcher.TryExtractParameters("devices/{deviceId}/commands/ack", topic, out var ackTopicParams))
+                chipId = ackTopicParams["deviceId"];
 
             // Sin identidad NO se inventa un marcador ("Relay-Switch" creaba un dispositivo
             // fantasma): los tópicos de este firmware son globales y no llevan ChipId, así
@@ -77,10 +83,53 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
             DateTime recordedAt = DateTime.UtcNow;
             if (root.TryGetProperty("Timestamp", out var tsElem) && tsElem.TryGetDateTime(out var parsedTs))
                 recordedAt = parsedTs.ToUniversalTime();
+            else if (root.TryGetProperty("timestamp", out var tsLowerElem) && tsLowerElem.TryGetDateTime(out var parsedLowerTs))
+                recordedAt = parsedLowerTs.ToUniversalTime();
 
             var metrics = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
             var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             int detectedChannelCount = 0;
+
+            bool isAckMessage = topic.EndsWith("/commands/ack", StringComparison.OrdinalIgnoreCase);
+            string ackStatus = string.Empty;
+            if ((root.TryGetProperty("commandId", out var cmdIdElem) || root.TryGetProperty("command_id", out cmdIdElem)) &&
+                cmdIdElem.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(cmdIdElem.GetString()))
+            {
+                attributes["ack_command_id"] = cmdIdElem.GetString()!;
+                isAckMessage = true;
+            }
+
+            if (isAckMessage)
+            {
+                if (root.TryGetProperty("status", out var stElem) && stElem.ValueKind == JsonValueKind.String)
+                {
+                    ackStatus = stElem.GetString() ?? string.Empty;
+                    attributes["ack_status"] = ackStatus;
+                }
+                if (root.TryGetProperty("error", out var errElem) && errElem.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(errElem.GetString()))
+                {
+                    attributes["ack_error"] = errElem.GetString()!;
+                }
+                if (root.TryGetProperty("sequence", out var seqElem) && seqElem.TryGetDouble(out var seqVal))
+                {
+                    metrics["command_sequence"] = seqVal;
+                }
+                if (root.TryGetProperty("execUs", out var execElem) && execElem.TryGetDouble(out var execUs))
+                {
+                    metrics["cmd_exec_us"] = execUs;
+                }
+                if (root.TryGetProperty("duplicate", out var dupElem) && (dupElem.ValueKind is JsonValueKind.True or JsonValueKind.False))
+                {
+                    attributes["ack_duplicate"] = dupElem.GetBoolean() ? "true" : "false";
+                }
+            }
+
+            bool isRejectedAck = isAckMessage &&
+                (ackStatus.Equals("STALE_REJECTED", StringComparison.OrdinalIgnoreCase) ||
+                 ackStatus.Equals("FAILED", StringComparison.OrdinalIgnoreCase) ||
+                 ackStatus.Equals("REJECTED", StringComparison.OrdinalIgnoreCase) ||
+                 ackStatus.Equals("ERROR", StringComparison.OrdinalIgnoreCase));
 
             if (root.TryGetProperty("Device", out var devMetaElem) &&
                 devMetaElem.TryGetProperty("FirmwareVersion", out var fwElem) &&
@@ -90,22 +139,60 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                 attributes["firmware_version"] = fwElem.GetString()!;
             }
 
+            ExtractStateVersionAndSource(root, metrics, attributes);
             ExtractPowerAndConfigFields(root, metrics, attributes);
-            detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(root));
-            detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(root, metrics, attributes));
+            if (!isRejectedAck)
+            {
+                detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(root));
+                detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(root, metrics, attributes));
+
+                if (detectedChannelCount == 0 &&
+                    (root.TryGetProperty("reportedState", out var repElem) || root.TryGetProperty("state", out repElem)))
+                {
+                    int ch = 1;
+                    if (root.TryGetProperty("channel", out var chRootElem) && chRootElem.TryGetInt32(out int parsedCh) && parsedCh is >= 1 and <= 16)
+                        ch = parsedCh;
+
+                    string? repStr = repElem.ValueKind switch
+                    {
+                        JsonValueKind.True => "on",
+                        JsonValueKind.False => "off",
+                        JsonValueKind.String => repElem.GetString(),
+                        _ => null
+                    };
+                    if (!string.IsNullOrWhiteSpace(repStr))
+                    {
+                        SetSwitchState(metrics, attributes, $"device_switch{ch}", repStr!, ch);
+                        detectedChannelCount = Math.Max(detectedChannelCount, ch);
+                    }
+                }
+            }
 
             if (root.TryGetProperty("params", out var paramsElem) && paramsElem.ValueKind == JsonValueKind.Object)
             {
+                ExtractStateVersionAndSource(paramsElem, metrics, attributes);
                 ExtractPowerAndConfigFields(paramsElem, metrics, attributes);
-                detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(paramsElem));
-                detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(paramsElem, metrics, attributes));
+                if (!isRejectedAck)
+                {
+                    detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(paramsElem));
+                    detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(paramsElem, metrics, attributes));
+                }
             }
 
             if (root.TryGetProperty("Details", out var detailsElem))
             {
+                ExtractStateVersionAndSource(detailsElem, metrics, attributes);
                 ExtractPowerAndConfigFields(detailsElem, metrics, attributes);
-                detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(detailsElem));
-                detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(detailsElem, metrics, attributes));
+                if (!isRejectedAck)
+                {
+                    detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(detailsElem));
+                    detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(detailsElem, metrics, attributes));
+                }
+
+                if (detailsElem.TryGetProperty("timers", out var timersElem) && timersElem.ValueKind == JsonValueKind.Array)
+                {
+                    attributes["timers_sync_json"] = timersElem.GetRawText();
+                }
 
                 if (detailsElem.TryGetProperty("rssi", out var rssiElem) && rssiElem.TryGetDouble(out var rssi))
                 {
@@ -186,6 +273,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                 // Eventos de conmutación del relé (events/<chipId>): Details.info = { event, description, state }
                 if (detailsElem.TryGetProperty("info", out var infoElem) && infoElem.ValueKind == JsonValueKind.Object)
                 {
+                    ExtractStateVersionAndSource(infoElem, metrics, attributes);
                     string evName = string.Empty;
                     string evDesc = string.Empty;
                     if (infoElem.TryGetProperty("event", out var evNameElem) && evNameElem.ValueKind == JsonValueKind.String)
@@ -417,6 +505,29 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         }
 
         return safeFallback;
+    }
+
+    private static void ExtractStateVersionAndSource(
+        JsonElement elem,
+        Dictionary<string, double> metrics,
+        Dictionary<string, string> attributes)
+    {
+        if (elem.ValueKind != JsonValueKind.Object)
+            return;
+
+        if ((elem.TryGetProperty("state_version", out var svElem) || elem.TryGetProperty("stateVersion", out svElem)) &&
+            svElem.TryGetDouble(out double sv) && sv > 0)
+        {
+            metrics["state_version"] = sv;
+            attributes["state_version"] = ((long)sv).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (elem.TryGetProperty("source", out var srcElem) &&
+            srcElem.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(srcElem.GetString()))
+        {
+            attributes["last_source"] = srcElem.GetString()!;
+        }
     }
 
     private static void ExtractPowerAndConfigFields(

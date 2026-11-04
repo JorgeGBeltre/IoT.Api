@@ -103,10 +103,43 @@ public sealed class RedisStateService : IRedisStateService
         return list;
     }
 
+    private const string MonotonicStateVersionLua = """
+        local cur = tonumber(redis.call('GET', KEYS[1]))
+        local incoming = tonumber(ARGV[1])
+        if cur ~= nil and incoming < cur then
+            return 1
+        end
+        redis.call('SET', KEYS[1], tostring(incoming), 'EX', 2592000)
+        return 0
+        """;
+
     public async Task<bool> IsDuplicateMessageAsync(string deviceIdentifier, DateTime recordedAt, string payloadHash, TimeSpan ttl, CancellationToken cancellationToken = default)
     {
         string key = $"idempotency:{deviceIdentifier}:{recordedAt.Ticks}:{payloadHash}";
         bool wasSet = await _db.StringSetAsync(key, "1", ttl, When.NotExists);
         return !wasSet;
+    }
+
+    public async Task<bool> IsStaleDeviceStateVersionAsync(Guid tenantId, Guid deviceId, long stateVersion, CancellationToken cancellationToken = default)
+    {
+        if (stateVersion <= 0)
+        {
+            return false;
+        }
+
+        string key = $"statever:tenant:{tenantId}:unit:{deviceId}";
+        try
+        {
+            var res = await _db.ScriptEvaluateAsync(
+                MonotonicStateVersionLua,
+                new RedisKey[] { key },
+                new RedisValue[] { stateVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+
+            return !res.IsNull && (int)res == 1;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

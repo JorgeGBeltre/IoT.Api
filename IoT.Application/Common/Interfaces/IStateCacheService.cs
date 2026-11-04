@@ -21,4 +21,5 @@ public interface IStateCacheService
     Task<LivePositionSnapshot?> GetLatestPositionAsync(Guid tenantId, Guid deviceId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<LivePositionSnapshot>> GetFleetSnapshotAsync(Guid tenantId, CancellationToken cancellationToken = default);
     Task<bool> IsDuplicateMessageAsync(string deviceIdentifier, DateTime recordedAt, string payloadHash, TimeSpan ttl, CancellationToken cancellationToken = default);
+    Task<bool> IsStaleDeviceStateVersionAsync(Guid tenantId, Guid deviceId, long stateVersion, CancellationToken cancellationToken = default);
 }

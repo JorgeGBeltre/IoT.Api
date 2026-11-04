@@ -132,6 +132,12 @@ public sealed class TopicRoutingService : ITopicRoutingService
 
     public TimeSpan GetDefaultCommandExpiry(string? profileIdOrModel = null)
     {
+        var profile = ResolveProfile(profileIdOrModel);
+        if (profile is not null && string.Equals(profile.ProfileId, "relay-switch", StringComparison.OrdinalIgnoreCase))
+        {
+            return TimeSpan.FromSeconds(15);
+        }
+
         // 5-minute standard command TTL for MQTT v5 Message Expiry Interval
         return TimeSpan.FromMinutes(5);
     }

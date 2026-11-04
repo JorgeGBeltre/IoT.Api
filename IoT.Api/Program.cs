@@ -37,7 +37,8 @@ builder.Services.AddDeviceFacingGateways();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, TenantContext>();
 builder.Services.AddSingleton<IMqttConnectionInfoProvider, HttpRequestAwareMqttConnectionInfoProvider>();
-builder.Services.AddSingleton<IFleetNotificationService, SignalRFleetNotificationService>();
+builder.Services.AddSingleton<SignalRFleetNotificationService>();
+builder.Services.AddSingleton<IFleetNotificationService>(sp => sp.GetRequiredService<SignalRFleetNotificationService>());
 
 // Health Checks (Observability)
 builder.Services.AddHealthChecks()
@@ -68,6 +69,7 @@ if (!string.IsNullOrWhiteSpace(redisSignalRConn))
     {
         redisOptions.Configuration.ChannelPrefix = StackExchange.Redis.RedisChannel.Literal("IoT.SignalR");
     });
+    builder.Services.AddHostedService<RedisFleetNotificationSubscriberService>();
 }
 
 // 4b. ForwardedHeaders: la app corre detrás de un reverse proxy (nginx) que termina TLS.

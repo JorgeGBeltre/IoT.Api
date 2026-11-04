@@ -94,6 +94,7 @@ public static class DependencyInjection
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnStr));
         services.AddSingleton<IRedisStateService, RedisStateService>();
         services.AddSingleton<IStateCacheService>(sp => sp.GetRequiredService<IRedisStateService>());
+        services.AddSingleton<ICommandSequenceGenerator, RedisCommandSequenceGenerator>();
 
         // Telemetry Queue & Sequential Partitioning (ADR-016: Sequential by Originator)
         string queueEngine = configuration["TelemetryQueue:Engine"] ?? "RedisStreams";

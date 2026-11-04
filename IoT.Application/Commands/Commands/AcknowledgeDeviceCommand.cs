@@ -74,6 +74,8 @@ public sealed class AcknowledgeDeviceCommandHandler : IRequestHandler<Acknowledg
             case "confirmed":
             case "completed":
             case "executed":
+            case "applied":
+            case "duplicate":
             case "success":
             case "ok":
                 command.Confirm(request.ResultPayload);
@@ -83,7 +85,11 @@ public sealed class AcknowledgeDeviceCommandHandler : IRequestHandler<Acknowledg
             case "failed":
             case "error":
             case "rejected":
-                command.Fail(request.ErrorMessage ?? "Command reported failure from device execution.");
+            case "stale_rejected":
+                command.Fail(request.ErrorMessage ??
+                    (normalizedStatus == "stale_rejected"
+                        ? "Stale command sequence rejected by device."
+                        : "Command reported failure from device execution."));
                 _logger.LogWarning("Command {CommandId} transitioned to Failed: {Error}", command.Id, command.ErrorMessage);
                 break;
 

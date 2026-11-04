@@ -29,6 +29,19 @@ public sealed record DeviceOtaStatusDto(
     string? OtaErrorMessage,
     DateTime? OtaUpdatedAt);
 
+/// <summary>
+/// Contrato sanitizado para interfaz de usuario final: expone únicamente disponibilidad,
+/// versión nueva compatible y notas de versión, sin exponer jamás URLs internas ni hashes SHA-256.
+/// </summary>
+public sealed record DeviceFirmwareAvailabilityDto(
+    Guid DeviceId,
+    bool UpdateAvailable,
+    string? CurrentVersion,
+    string? AvailableVersion,
+    string? ReleaseNotes,
+    string Channel,
+    DateTime? PublishedAt);
+
 public sealed class StartDeviceOtaRequest
 {
     public string FirmwareVersion { get; set; } = string.Empty;

@@ -16,12 +16,15 @@ namespace IoT.Infrastructure.TelemetryQueue;
 public sealed class RedisTelemetryStreamService : ITelemetryQueuePublisher, ITelemetryQueueConsumer
 {
     private const string DefaultConsumerGroup = "iot-telemetry-processors";
+    private const string WakeChannelName = "iot:telemetry:wake";
     private readonly IConnectionMultiplexer _redis;
     private readonly ILogger<RedisTelemetryStreamService> _logger;
     private readonly int _partitionCount;
     private readonly int _maxStreamLength;
     private readonly string _consumerGroup;
     private readonly string _consumerName;
+    private readonly SemaphoreSlim[] _partitionSignals;
+    private int _wakeSubscribed;
 
     public int PartitionCount => _partitionCount;
 
@@ -39,6 +42,55 @@ public sealed class RedisTelemetryStreamService : ITelemetryQueuePublisher, ITel
         _maxStreamLength = Math.Max(100, maxStreamLength);
         _consumerGroup = consumerGroup ?? DefaultConsumerGroup;
         _consumerName = consumerName ?? $"worker-{Environment.MachineName}-{Guid.NewGuid():N}";
+        _partitionSignals = new SemaphoreSlim[_partitionCount];
+        for (int i = 0; i < _partitionCount; i++)
+        {
+            _partitionSignals[i] = new SemaphoreSlim(0, 1);
+        }
+    }
+
+    private void SignalPartition(int partition)
+    {
+        if ((uint)partition >= (uint)_partitionSignals.Length)
+        {
+            return;
+        }
+
+        var sem = _partitionSignals[partition];
+        if (sem.CurrentCount == 0)
+        {
+            try { sem.Release(); } catch (SemaphoreFullException) { }
+        }
+    }
+
+    private async Task EnsureWakeSubscriptionAsync()
+    {
+        if (Interlocked.CompareExchange(ref _wakeSubscribed, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var subscriber = _redis.GetSubscriber();
+            if (subscriber is null)
+            {
+                return;
+            }
+
+            await subscriber.SubscribeAsync(RedisChannel.Literal(WakeChannelName), (_, value) =>
+            {
+                if (value.HasValue && int.TryParse(value.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int p))
+                {
+                    SignalPartition(p);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref _wakeSubscribed, 0);
+            _logger.LogDebug(ex, "Could not subscribe to Redis telemetry wake channel; using fallback 50ms poll.");
+        }
     }
 
     private static string GetStreamKey(int partition) => $"iot:telemetry:stream:{partition}";
@@ -70,6 +122,23 @@ public sealed class RedisTelemetryStreamService : ITelemetryQueuePublisher, ITel
 
             await db.StreamAddAsync(streamKey, entries, maxLength: _maxStreamLength, useApproximateMaxLength: true);
 
+            SignalPartition(partition);
+            try
+            {
+                var subscriber = _redis.GetSubscriber();
+                if (subscriber is not null)
+                {
+                    await subscriber.PublishAsync(
+                        RedisChannel.Literal(WakeChannelName),
+                        partition.ToString(CultureInfo.InvariantCulture),
+                        CommandFlags.FireAndForget);
+                }
+            }
+            catch
+            {
+                // Best-effort wake signal; partition consumer has 50ms fallback timeout.
+            }
+
             IoTMetrics.TelemetryQueueEnqueuedCounter.Add(1,
                 new KeyValuePair<string, object?>("partition", partition),
                 new KeyValuePair<string, object?>("engine", "redis"));
@@ -100,6 +169,7 @@ public sealed class RedisTelemetryStreamService : ITelemetryQueuePublisher, ITel
         var db = _redis.GetDatabase();
 
         await EnsureConsumerGroupCreatedAsync(db, streamKey);
+        await EnsureWakeSubscriptionAsync();
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -127,7 +197,14 @@ public sealed class RedisTelemetryStreamService : ITelemetryQueuePublisher, ITel
 
             if (entries is null || entries.Length == 0)
             {
-                try { await Task.Delay(50, cancellationToken); } catch (OperationCanceledException) { break; }
+                try
+                {
+                    await _partitionSignals[partition].WaitAsync(TimeSpan.FromMilliseconds(50), cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
                 continue;
             }
 

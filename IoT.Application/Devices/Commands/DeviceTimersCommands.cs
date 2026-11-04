@@ -119,6 +119,7 @@ public sealed class UpsertDeviceTimersCommandHandler : IRequestHandler<UpsertDev
     private readonly IMqttPublisher? _mqttPublisher;
     private readonly IMqttClientMap? _mqttClientMap;
     private readonly IAuditLogRepository? _auditLogRepository;
+    private readonly IFleetNotificationService? _notificationService;
 
     public UpsertDeviceTimersCommandHandler(
         IDeviceRepository deviceRepository,
@@ -126,7 +127,8 @@ public sealed class UpsertDeviceTimersCommandHandler : IRequestHandler<UpsertDev
         IUnitOfWork unitOfWork,
         IMqttPublisher? mqttPublisher = null,
         IMqttClientMap? mqttClientMap = null,
-        IAuditLogRepository? auditLogRepository = null)
+        IAuditLogRepository? auditLogRepository = null,
+        IFleetNotificationService? notificationService = null)
     {
         _deviceRepository = deviceRepository;
         _attributeRepository = attributeRepository;
@@ -134,6 +136,7 @@ public sealed class UpsertDeviceTimersCommandHandler : IRequestHandler<UpsertDev
         _mqttPublisher = mqttPublisher;
         _mqttClientMap = mqttClientMap;
         _auditLogRepository = auditLogRepository;
+        _notificationService = notificationService;
     }
 
     public async Task<Result<DeviceTimersResultDto>> Handle(UpsertDeviceTimersCommand request, CancellationToken cancellationToken)
@@ -233,6 +236,25 @@ public sealed class UpsertDeviceTimersCommandHandler : IRequestHandler<UpsertDev
                     cancellationToken);
 
                 deliveredViaMqtt = true;
+            }
+        }
+
+        if (_notificationService is not null)
+        {
+            try
+            {
+                await _notificationService.NotifyDeviceAlertAsync(
+                    device.TenantId,
+                    device.Id,
+                    device.ChipId,
+                    "TIMERS_UPDATED",
+                    serializedTimers,
+                    DateTime.UtcNow,
+                    cancellationToken);
+            }
+            catch
+            {
+                // Best-effort realtime notification; persistence and MQTT sync already completed.
             }
         }
 

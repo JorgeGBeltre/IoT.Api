@@ -27,6 +27,7 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
     private readonly IoT.Protocols.Routing.ITopicRoutingService? _topicRoutingService;
     private readonly ITcpCommandGateway? _tcpCommandGateway;
     private readonly IMqttClientMap? _mqttClientMap;
+    private readonly ICommandSequenceGenerator? _sequenceGenerator;
 
     public SendCommandToDeviceCommandHandler(
         IDeviceRepository deviceRepository,
@@ -36,7 +37,8 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
         ILogger<SendCommandToDeviceCommandHandler> logger,
         IoT.Protocols.Routing.ITopicRoutingService? topicRoutingService = null,
         ITcpCommandGateway? tcpCommandGateway = null,
-        IMqttClientMap? mqttClientMap = null)
+        IMqttClientMap? mqttClientMap = null,
+        ICommandSequenceGenerator? sequenceGenerator = null)
     {
         _deviceRepository = deviceRepository;
         _commandRepository = commandRepository;
@@ -46,6 +48,7 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
         _topicRoutingService = topicRoutingService;
         _tcpCommandGateway = tcpCommandGateway;
         _mqttClientMap = mqttClientMap;
+        _sequenceGenerator = sequenceGenerator;
     }
 
     public async Task<Result<Guid>> Handle(SendCommandToDeviceCommand request, CancellationToken cancellationToken)
@@ -143,16 +146,25 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
             }
         }
 
-        // 6. Prepare MQTT command envelope with correlation and response topic
+        // 6. Prepare MQTT command envelope with monotonic sequence, correlation, and response topic
+        long sequence = _sequenceGenerator is not null
+            ? await _sequenceGenerator.NextSequenceAsync(device.Id, cancellationToken)
+            : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         string responseTopic = $"devices/{device.ChipId}/commands/ack";
+        DateTime sentAtUtc = DateTime.UtcNow;
         var envelope = new
         {
+            commandId = command.Id,
             command_id = command.Id,
             client_request_id = request.ClientRequestId,
+            deviceId = device.ChipId,
             command = request.CommandName,
             payload = request.PayloadJson,
+            sequence,
             response_topic = responseTopic,
-            sent_at = DateTime.UtcNow
+            timestamp = sentAtUtc.ToString("O"),
+            sent_at = sentAtUtc
         };
 
         // E3-02: Central topic routing factory
@@ -163,11 +175,34 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
 
         // El envelope genérico vale para los dispositivos de la plataforma, pero algunos firmwares
         // (p.ej. Toour/Fligo) sólo entienden su propio formato {"EventType":...}; su CommandParser
-        // descarta cualquier otra cosa. Si el perfil del dispositivo define una codificación propia
-        // se usa esa; si no, el envelope genérico.
-        string serializedEnvelope =
-            _topicRoutingService?.BuildCommandPayload(device.Model, request.CommandName, request.PayloadJson)
-            ?? JsonSerializer.Serialize(envelope);
+        // descarta cualquier otra cosa. Para relés/switches (commands/{chipId}), envolvemos el token
+        // canónico ("switch1:off", "all:on", etc.) en un sobre JSON estructurado con commandId,
+        // desiredState y sequence monótona para garantizar idempotencia y rechazo de comandos viejos.
+        string? profilePayload = _topicRoutingService?.BuildCommandPayload(device.Model, request.CommandName, request.PayloadJson);
+        string serializedEnvelope;
+        if (profilePayload is null)
+        {
+            serializedEnvelope = JsonSerializer.Serialize(envelope);
+        }
+        else if (profilePayload.TrimStart().StartsWith('{'))
+        {
+            serializedEnvelope = profilePayload;
+        }
+        else if (topic.StartsWith("commands/", StringComparison.OrdinalIgnoreCase))
+        {
+            serializedEnvelope = BuildStructuredSwitchEnvelope(
+                command.Id,
+                device.ChipId,
+                request.CommandName,
+                profilePayload,
+                sequence,
+                responseTopic,
+                sentAtUtc);
+        }
+        else
+        {
+            serializedEnvelope = profilePayload;
+        }
 
         try
         {
@@ -182,6 +217,7 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
                 UserProperties = new Dictionary<string, string>
                 {
                     ["command_id"] = command.Id.ToString(),
+                    ["sequence"] = sequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     ["tenant_id"] = request.TenantId.ToString(),
                     ["client_request_id"] = request.ClientRequestId ?? string.Empty
                 }
@@ -193,8 +229,8 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
                 new KeyValuePair<string, object?>("transport", "mqtt"),
                 new KeyValuePair<string, object?>("command", request.CommandName));
 
-            _logger.LogInformation("Dispatched command {CommandName} ({CommandId}) to MQTT topic {Topic} (expiry: {Expiry}s)",
-                request.CommandName, command.Id, topic, expirySeconds);
+            _logger.LogInformation("Dispatched command {CommandName} ({CommandId}, seq={Sequence}) to MQTT topic {Topic} (expiry: {Expiry}s)",
+                request.CommandName, command.Id, sequence, topic, expirySeconds);
         }
         catch (Exception ex)
         {
@@ -204,5 +240,61 @@ public sealed class SendCommandToDeviceCommandHandler : IRequestHandler<SendComm
 
         await _unitOfWork.SaveChangesAsync(cancellationToken);
         return Result<Guid>.Success(command.Id);
+    }
+
+    private static string BuildStructuredSwitchEnvelope(
+        Guid commandId,
+        string chipId,
+        string commandName,
+        string canonicalCommand,
+        long sequence,
+        string responseTopic,
+        DateTime sentAtUtc)
+    {
+        int channel = 1;
+        bool? desiredState = null;
+        string action = commandName;
+
+        if (canonicalCommand.StartsWith("switch", StringComparison.OrdinalIgnoreCase))
+        {
+            int colon = canonicalCommand.IndexOf(':');
+            if (colon > 6 && int.TryParse(canonicalCommand.AsSpan(6, colon - 6), out int parsedCh) && parsedCh is >= 1 and <= 16)
+            {
+                channel = parsedCh;
+            }
+            if (colon >= 0 && colon + 1 < canonicalCommand.Length)
+            {
+                string statePart = canonicalCommand[(colon + 1)..];
+                if (statePart == "on") desiredState = true;
+                else if (statePart == "off") desiredState = false;
+            }
+            action = "SET_POWER";
+        }
+        else if (canonicalCommand.StartsWith("all:", StringComparison.OrdinalIgnoreCase))
+        {
+            channel = 0;
+            desiredState = canonicalCommand.EndsWith(":on", StringComparison.OrdinalIgnoreCase);
+            action = "SET_POWER_ALL";
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["commandId"] = commandId.ToString(),
+            ["command_id"] = commandId.ToString(),
+            ["deviceId"] = chipId,
+            ["action"] = action,
+            ["channel"] = channel,
+            ["command"] = canonicalCommand,
+            ["sequence"] = sequence,
+            ["response_topic"] = responseTopic,
+            ["timestamp"] = sentAtUtc.ToString("O")
+        };
+
+        if (desiredState.HasValue)
+        {
+            payload["desiredState"] = desiredState.Value;
+        }
+
+        return JsonSerializer.Serialize(payload);
     }
 }

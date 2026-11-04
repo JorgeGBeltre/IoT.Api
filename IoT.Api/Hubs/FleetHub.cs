@@ -1,3 +1,4 @@
+using IoT.Application.Common.Interfaces;
 using IoT.Domain.Repositories;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
@@ -11,11 +12,16 @@ public sealed class FleetHub : Hub
 
     private readonly IDeviceRepository _deviceRepository;
     private readonly ILogger<FleetHub> _logger;
+    private readonly ITenantContext? _tenantContext;
 
-    public FleetHub(IDeviceRepository deviceRepository, ILogger<FleetHub> logger)
+    public FleetHub(
+        IDeviceRepository deviceRepository,
+        ILogger<FleetHub> logger,
+        ITenantContext? tenantContext = null)
     {
         _deviceRepository = deviceRepository;
         _logger = logger;
+        _tenantContext = tenantContext;
     }
 
     public async Task JoinTenantFleet(string tenantId)
@@ -55,6 +61,12 @@ public sealed class FleetHub : Hub
         if (userTenantId is null)
         {
             throw new HubException("Se requiere un tenant válido para suscribirse a dispositivos.");
+        }
+
+        if (_tenantContext is not null)
+        {
+            _tenantContext.TenantId = userTenantId.Value;
+            _tenantContext.IsSystemOperation = false;
         }
 
         // B-01: antes bastaba con tener CUALQUIER tenant para unirse a device_{id} y recibir

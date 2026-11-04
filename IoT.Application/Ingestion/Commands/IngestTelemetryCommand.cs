@@ -364,6 +364,38 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
                 cancellationToken: cancellationToken);
         }
 
+        // 5b. Monotonic state_version guard: never allow an out-of-order stale report to overwrite a newer verified physical state
+        if (!isStaleHistorical &&
+            ev.NumericMetrics.TryGetValue("state_version", out double incomingStateVer) &&
+            incomingStateVer > 0)
+        {
+            bool staleState = await _stateCache.IsStaleDeviceStateVersionAsync(
+                device.TenantId,
+                device.Id,
+                (long)incomingStateVer,
+                cancellationToken);
+
+            if (staleState)
+            {
+                _logger.LogWarning(
+                    "Discarding stale switch state metrics for device {ChipId} on topic '{Topic}' (state_version={StateVer} < latest).",
+                    device.ChipId, request.Topic, (long)incomingStateVer);
+
+                var staleKeys = ev.NumericMetrics.Keys
+                    .Where(k =>
+                        k.StartsWith("switch_", StringComparison.OrdinalIgnoreCase) ||
+                        k.StartsWith("relay", StringComparison.OrdinalIgnoreCase) ||
+                        k.StartsWith("device_switch", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(k, "state_version", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var k in staleKeys)
+                {
+                    ev.NumericMetrics.Remove(k);
+                }
+            }
+        }
+
         // 6. Store numeric metrics in JSONB historical table with MessageId
         if (ev.NumericMetrics.Count > 0)
         {
@@ -429,6 +461,52 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
                 // que el fallo de 7b NO contamine escrituras posteriores.
                 _attributeRepository.DiscardPendingChanges();
                 _logger.LogWarning(ex, "No se pudieron actualizar los atributos CLIENT de {ChipId}", device.ChipId);
+            }
+
+            // 7c. Sincronización de temporizadores reportada por el dispositivo (p.ej. al completarse un timer 'once' o deshabilitarse uno vencido offline)
+            if (ev.Attributes.TryGetValue("timers_sync_json", out var syncedTimersJson) &&
+                !string.IsNullOrWhiteSpace(syncedTimersJson))
+            {
+                try
+                {
+                    var parsedTimers = System.Text.Json.JsonSerializer.Deserialize<List<Devices.Commands.DeviceTimerItemDto>>(
+                        syncedTimersJson,
+                        Devices.Commands.DeviceTimersJsonSettings.SerializerOptions);
+
+                    if (parsedTimers is not null && parsedTimers.Count <= Devices.Commands.DeviceTimersJsonSettings.MaxTimersPerDevice)
+                    {
+                        string canonicalTimers = System.Text.Json.JsonSerializer.Serialize(
+                            parsedTimers,
+                            Devices.Commands.DeviceTimersJsonSettings.SerializerOptions);
+
+                        await _attributeRepository.UpsertAsync(
+                            device.TenantId,
+                            device.Id,
+                            AttributeScope.Shared,
+                            Devices.Commands.DeviceTimersJsonSettings.SharedAttributeKey,
+                            canonicalTimers,
+                            cancellationToken);
+
+                        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                        if (_notificationService is not null)
+                        {
+                            await _notificationService.NotifyDeviceAlertAsync(
+                                device.TenantId,
+                                device.Id,
+                                device.ChipId,
+                                "TIMERS_UPDATED",
+                                canonicalTimers,
+                                DateTime.UtcNow,
+                                cancellationToken);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _attributeRepository.DiscardPendingChanges();
+                    _logger.LogWarning(ex, "No se pudo sincronizar timers_json reportado por {ChipId}", device.ChipId);
+                }
             }
         }
 
@@ -583,8 +661,73 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
             }
         }
 
-        // 10. Correlación de respuesta a comandos de terminal (GT06/Mictrack 0x15 o similar)
+        // 10. Correlación determinística de ACK de comandos MQTT (devices/{chipId}/commands/ack) y respuestas de terminal TCP
         if (_commandRepository != null &&
+            ev.Attributes.TryGetValue("ack_command_id", out var ackCommandIdRaw) &&
+            !string.IsNullOrWhiteSpace(ackCommandIdRaw))
+        {
+            try
+            {
+                DeviceCommand? ackCmd = null;
+                if (Guid.TryParse(ackCommandIdRaw, out var parsedAckGuid) && parsedAckGuid != Guid.Empty)
+                {
+                    ackCmd = await _commandRepository.GetByIdAsync(parsedAckGuid, cancellationToken);
+                }
+
+                if (ackCmd is null)
+                {
+                    ackCmd = await _commandRepository.GetByClientRequestIdAsync(device.TenantId, ackCommandIdRaw, cancellationToken);
+                }
+
+                if (ackCmd is not null && ackCmd.TenantId == device.TenantId && ackCmd.DeviceId == device.Id)
+                {
+                    string ackStatus = (ev.Attributes.TryGetValue("ack_status", out var s) ? s : "APPLIED").Trim().ToLowerInvariant();
+                    bool isDupAck = ev.Attributes.TryGetValue("ack_duplicate", out var d) && d.Equals("true", StringComparison.OrdinalIgnoreCase);
+
+                    if (ackStatus is "stale_rejected" or "failed" or "rejected" or "error")
+                    {
+                        string errMsg = ev.Attributes.TryGetValue("ack_error", out var err) && !string.IsNullOrWhiteSpace(err)
+                            ? err
+                            : (ackStatus == "stale_rejected"
+                                ? "Stale command sequence rejected by device."
+                                : "Command execution failed on device.");
+
+                        ackCmd.Fail(errMsg);
+                    }
+                    else if (ackStatus is "delivered" or "accepted" or "received")
+                    {
+                        ackCmd.MarkAsDelivered(ev.RawPayload);
+                    }
+                    else if (!(isDupAck && ackCmd.Status == CommandStatus.Confirmed))
+                    {
+                        ackCmd.Confirm(ev.RawPayload);
+                    }
+
+                    _commandRepository.Update(ackCmd);
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+                    if (_notificationService != null)
+                    {
+                        await _notificationService.NotifyCommandStatusUpdatedAsync(
+                            device.TenantId,
+                            device.Id,
+                            ackCmd.Id,
+                            ackCmd.Status.ToString(),
+                            ackCmd.ResultJson ?? ackCmd.ErrorMessage,
+                            DateTime.UtcNow,
+                            cancellationToken);
+                    }
+
+                    _logger.LogInformation("Comando {CommandId} de {ChipId} correlacionado vía MQTT ACK ({Status}).",
+                        ackCmd.Id, device.ChipId, ackCmd.Status);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error correlacionando ACK MQTT de comando {AckId} para {ChipId}", ackCommandIdRaw, device.ChipId);
+            }
+        }
+        else if (_commandRepository != null &&
             ev.Attributes.TryGetValue("command_response", out var cmdResponse) &&
             !string.IsNullOrWhiteSpace(cmdResponse))
         {

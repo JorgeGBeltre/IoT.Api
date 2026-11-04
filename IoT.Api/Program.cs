@@ -45,7 +45,12 @@ builder.Services.AddHealthChecks()
     .AddCheck<IoT.Api.Health.RedisHealthCheck>("redis");
 
 // 3. Controllers & JSON Options
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.Converters.Add(new IoT.Application.Common.Serialization.TolerantCapabilityListJsonConverter());
+        options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+    });
 builder.Services.AddEndpointsApiExplorer();
 
 // 4. SignalR — detailed errors sólo en desarrollo (no filtrar excepciones al cliente en prod)

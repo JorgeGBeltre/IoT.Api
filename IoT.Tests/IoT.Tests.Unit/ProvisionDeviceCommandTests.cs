@@ -475,4 +475,28 @@ public sealed class ProvisionDeviceCommandTests
         attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), It.IsAny<AttributeScope>(), "wifiPassword", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), It.IsAny<AttributeScope>(), "apn_pass", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    [Fact]
+    public void TolerantCapabilityListJsonConverter_DeserializesStringEnums_Integers_AndFrontendAliases()
+    {
+        var opts = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        };
+        opts.Converters.Add(new global::IoT.Application.Common.Serialization.TolerantCapabilityListJsonConverter());
+        opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+
+        var fromMobileStrings = System.Text.Json.JsonSerializer.Deserialize<IReadOnlyList<CapabilityType>?>(
+            "[\"Switch\"]",
+            opts);
+        fromMobileStrings.Should().Equal(CapabilityType.Switch);
+
+        var fromWebMixed = System.Text.Json.JsonSerializer.Deserialize<IReadOnlyList<CapabilityType>?>(
+            "[1, \"SmartSwitch\", \"GlpSensor\", \"Accelerometer\"]",
+            opts);
+        fromWebMixed.Should().Equal(
+            CapabilityType.Gps,
+            CapabilityType.Switch,
+            CapabilityType.LevelTelemetry);
+    }
 }

@@ -1,6 +1,10 @@
 using FluentAssertions;
+using IoT.Application.Devices.Dtos;
+using IoT.Domain.Entities;
+using IoT.Domain.Enums;
 using IoT.Protocols;
 using IoT.Protocols.Adapters;
+using IoT.Protocols.Profiles;
 using Xunit;
 
 namespace IoT.Tests.Unit;
@@ -147,5 +151,93 @@ public class ProtocolAdapterTests
         ev.NumericMetrics["rssi_dbm"].Should().Be(-58.0);
         ev.NumericMetrics["relay_1_state_binary"].Should().Be(1.0);
         ev.Attributes["relay_1_state"].Should().Be("on");
+    }
+
+    [Fact]
+    public void RelaySwitchAdapter_ShouldAutoDetectMultipleActuators_AcrossStatusTelemetrySwitchesAndEvents()
+    {
+        var adapter = new RelaySwitchAdapter();
+
+        // 1. Multi-actuator status payload (3 relays: ON, OFF, ON)
+        string statusPayload = """
+        {
+          "Device": { "status": "connected", "ChipId": "B81B05BBBC2C" },
+          "Details": {
+            "devices_count": 3,
+            "devices": {
+              "B81B05BBBC2C-01": { "state": "on", "desired_state": "on", "pin": 4 },
+              "B81B05BBBC2C-02": { "state": "off", "desired_state": "off", "pin": 16 },
+              "B81B05BBBC2C-03": { "state": "on", "desired_state": "on", "pin": 17 }
+            }
+          }
+        }
+        """;
+
+        var statusRes = adapter.Decode("status/B81B05BBBC2C", statusPayload);
+        statusRes.IsSuccess.Should().BeTrue();
+        statusRes.Value.NumericMetrics["channel_count"].Should().Be(3.0);
+        statusRes.Value.NumericMetrics["devices_count"].Should().Be(3.0);
+        statusRes.Value.NumericMetrics["switch_1"].Should().Be(1.0);
+        statusRes.Value.NumericMetrics["switch_2"].Should().Be(0.0);
+        statusRes.Value.NumericMetrics["switch_3"].Should().Be(1.0);
+        statusRes.Value.Attributes["channel_count"].Should().Be("3");
+
+        // 2. Multi-outlet "switches" array payload (2 relays)
+        string switchesArrayPayload = """
+        {
+          "Device": { "ChipId": "B81B05BBBC2C" },
+          "switches": [
+            { "outlet": 0, "switch": "off" },
+            { "outlet": 1, "switch": "on" }
+          ]
+        }
+        """;
+
+        var arrRes = adapter.Decode("telemetry/B81B05BBBC2C", switchesArrayPayload);
+        arrRes.IsSuccess.Should().BeTrue();
+        arrRes.Value.NumericMetrics["channel_count"].Should().Be(2.0);
+        arrRes.Value.NumericMetrics["switch_1"].Should().Be(0.0);
+        arrRes.Value.NumericMetrics["switch_2"].Should().Be(1.0);
+
+        // 3. Channel-2 event should update switch_2 without overwriting switch_1
+        string ch2EventPayload = """
+        {
+          "Device": { "ChipId": "B81B05BBBC2C" },
+          "Details": {
+            "info": {
+              "event": "DEVICE_COMMAND",
+              "description": "Comando switch2: on",
+              "state": "on"
+            }
+          }
+        }
+        """;
+
+        var evRes = adapter.Decode("events/B81B05BBBC2C", ch2EventPayload);
+        evRes.IsSuccess.Should().BeTrue();
+        evRes.Value.NumericMetrics["switch_2"].Should().Be(1.0);
+        evRes.Value.NumericMetrics.Should().NotContainKey("switch_1");
+
+        // 4. Plain-text per-channel report on devices/<id>/device_switch2/report
+        var reportRes = adapter.Decode("devices/B81B05BBBC2C/device_switch2/report", "off");
+        reportRes.IsSuccess.Should().BeTrue();
+        reportRes.Value.DeviceIdentifier.Should().Be("B81B05BBBC2C");
+        reportRes.Value.NumericMetrics["switch_2"].Should().Be(0.0);
+    }
+
+    [Fact]
+    public void RelaySwitchProfile_And_ChannelCountResolver_ShouldSupportMultiActuatorDevices()
+    {
+        var profile = new RelaySwitchProfile();
+        profile.EncodeCommandPayload("SET_POWER", """{"channel":2,"state":"ON"}""").Should().Be("switch2:on");
+        profile.EncodeCommandPayload("set_channel", """{"channel":4,"switch":"off"}""").Should().Be("switch4:off");
+        profile.EncodeCommandPayload("SET_POWER_ALL", """{"state":"OFF"}""").Should().Be("all:off");
+        profile.EncodeCommandPayload("SET_POWER_ALL", """{"state":"ON"}""").Should().Be("all:on");
+
+        var dev = Device.Create(Guid.NewGuid(), "B81B05BBBC2C", "2C:BC:BB:05:1B:B8", "Interruptor Sala", "Relay-Wifi-3CH", "VESIS").Value;
+        dev.AssignCapability(CapabilityType.Switch);
+
+        SwitchChannelCountResolver.Resolve(dev, null).Should().Be(3);
+        SwitchChannelCountResolver.Resolve(dev, new Dictionary<string, double> { ["channel_count"] = 4 }).Should().Be(4);
     }
 }

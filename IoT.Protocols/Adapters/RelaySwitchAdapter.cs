@@ -29,6 +29,8 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         // que delate al relé en el nombre), así que hay que reconocerla por el payload:
         // su marca es el objeto "relays".
         return payload.Contains("devices_count", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("channel_count", StringComparison.OrdinalIgnoreCase) ||
+               payload.Contains("\"switches\"", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("desired_state", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("device_switch", StringComparison.OrdinalIgnoreCase) ||
                payload.Contains("\"relays\"", StringComparison.OrdinalIgnoreCase) ||
@@ -71,12 +73,24 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
 
             var metrics = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
             var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            int detectedChannelCount = 0;
 
             ExtractPowerAndConfigFields(root, metrics, attributes);
+            detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(root));
+            detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(root, metrics, attributes));
+
+            if (root.TryGetProperty("params", out var paramsElem) && paramsElem.ValueKind == JsonValueKind.Object)
+            {
+                ExtractPowerAndConfigFields(paramsElem, metrics, attributes);
+                detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(paramsElem));
+                detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(paramsElem, metrics, attributes));
+            }
 
             if (root.TryGetProperty("Details", out var detailsElem))
             {
                 ExtractPowerAndConfigFields(detailsElem, metrics, attributes);
+                detectedChannelCount = Math.Max(detectedChannelCount, ExtractExplicitChannelCount(detailsElem));
+                detectedChannelCount = Math.Max(detectedChannelCount, ExtractSwitchesArray(detailsElem, metrics, attributes));
 
                 if (detailsElem.TryGetProperty("rssi", out var rssiElem) && rssiElem.TryGetDouble(out var rssi))
                 {
@@ -99,9 +113,6 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                     attributes["sync_completed"] = syncElem.GetBoolean().ToString();
                 }
 
-                if (detailsElem.TryGetProperty("devices_count", out var countElem) && countElem.TryGetDouble(out var count))
-                    metrics["devices_count"] = count;
-
                 if (detailsElem.TryGetProperty("wifi_status", out var wifiElem) && wifiElem.ValueKind == JsonValueKind.String)
                     attributes["wifi_status"] = wifiElem.GetString()!;
 
@@ -109,14 +120,17 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                 // (Relay_Wifi_Esp32/.../ArduinoJsonPayloadSerializer.cpp:33-39).
                 if (detailsElem.TryGetProperty("devices", out var switchesElem) && switchesElem.ValueKind == JsonValueKind.Object)
                 {
+                    int ordinal = 0;
                     foreach (var prop in switchesElem.EnumerateObject())
                     {
                         var switchData = prop.Value;
                         if (switchData.ValueKind != JsonValueKind.Object) continue;
+                        ordinal++;
 
                         if (switchData.TryGetProperty("state", out var stateElem))
                         {
-                            SetSwitchState(metrics, attributes, prop.Name, stateElem.GetString() ?? "off");
+                            int ch = SetSwitchState(metrics, attributes, prop.Name, stateElem.GetString() ?? "off", ordinal);
+                            detectedChannelCount = Math.Max(detectedChannelCount, ch);
                         }
 
                         if (switchData.TryGetProperty("desired_state", out var desElem))
@@ -125,6 +139,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                         if (switchData.TryGetProperty("pin", out var pinElem) && pinElem.TryGetDouble(out var pin))
                             metrics[$"{prop.Name}_gpio_pin"] = pin;
                     }
+                    detectedChannelCount = Math.Max(detectedChannelCount, ordinal);
                 }
 
                 // Forma del mensaje de TELEMETRÍA periódica: Details.relays = { "<id>": "on" }
@@ -134,29 +149,42 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                 // equipo, partiendo sus series históricas en dos.
                 if (detailsElem.TryGetProperty("relays", out var relaysElem) && relaysElem.ValueKind == JsonValueKind.Object)
                 {
+                    int ordinal = 0;
                     foreach (var prop in relaysElem.EnumerateObject())
                     {
                         if (prop.Value.ValueKind == JsonValueKind.String)
                         {
-                            SetSwitchState(metrics, attributes, prop.Name, prop.Value.GetString() ?? "off");
+                            ordinal++;
+                            int ch = SetSwitchState(metrics, attributes, prop.Name, prop.Value.GetString() ?? "off", ordinal);
+                            detectedChannelCount = Math.Max(detectedChannelCount, ch);
                         }
                         else if (prop.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
                         {
-                            SetSwitchState(metrics, attributes, prop.Name, prop.Value.GetBoolean() ? "on" : "off");
+                            ordinal++;
+                            int ch = SetSwitchState(metrics, attributes, prop.Name, prop.Value.GetBoolean() ? "on" : "off", ordinal);
+                            detectedChannelCount = Math.Max(detectedChannelCount, ch);
                         }
                     }
+                    detectedChannelCount = Math.Max(detectedChannelCount, ordinal);
                 }
 
                 // Eventos de conmutación del relé (events/<chipId>): Details.info = { event, description, state }
                 if (detailsElem.TryGetProperty("info", out var infoElem) && infoElem.ValueKind == JsonValueKind.Object)
                 {
+                    string evName = string.Empty;
+                    string evDesc = string.Empty;
                     if (infoElem.TryGetProperty("event", out var evNameElem) && evNameElem.ValueKind == JsonValueKind.String)
                     {
-                        var evName = evNameElem.GetString();
+                        evName = evNameElem.GetString() ?? string.Empty;
                         if (!string.IsNullOrWhiteSpace(evName))
                         {
                             attributes["last_event"] = evName;
                         }
+                    }
+
+                    if (infoElem.TryGetProperty("description", out var evDescElem) && evDescElem.ValueKind == JsonValueKind.String)
+                    {
+                        evDesc = evDescElem.GetString() ?? string.Empty;
                     }
 
                     if (infoElem.TryGetProperty("state", out var evStateElem) && evStateElem.ValueKind == JsonValueKind.String)
@@ -164,10 +192,30 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
                         var evState = evStateElem.GetString();
                         if (!string.IsNullOrWhiteSpace(evState))
                         {
-                            SetSwitchState(metrics, attributes, "device_switch1", evState);
+                            bool isBulkAllEvent =
+                                string.Equals(evName, "RELAY_TOGGLE_ALL", StringComparison.OrdinalIgnoreCase) ||
+                                evDesc.Contains("all:on", StringComparison.OrdinalIgnoreCase) ||
+                                evDesc.Contains("all:off", StringComparison.OrdinalIgnoreCase);
+
+                            if (isBulkAllEvent)
+                            {
+                                attributes["last_bulk_state"] = evState.ToLowerInvariant();
+                            }
+                            else
+                            {
+                                int eventChannel = ExtractEventChannelIndex(infoElem, evDesc);
+                                SetSwitchState(metrics, attributes, $"device_switch{eventChannel}", evState, eventChannel);
+                            }
                         }
                     }
                 }
+            }
+
+            if (detectedChannelCount >= 1)
+            {
+                metrics["channel_count"] = detectedChannelCount;
+                metrics["devices_count"] = detectedChannelCount;
+                attributes["channel_count"] = detectedChannelCount.ToString();
             }
 
             return new NormalizedTelemetryEvent
@@ -191,11 +239,12 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
     /// Publica el estado de un relé con los MISMOS nombres por los dos caminos (status y
     /// telemetría periódica), para que las series históricas del equipo no se partan.
     /// </summary>
-    private static void SetSwitchState(
+    private static int SetSwitchState(
         Dictionary<string, double> metrics,
         Dictionary<string, string> attributes,
         string switchName,
-        string state)
+        string state,
+        int fallbackOrdinal = 1)
     {
         bool on = state.Equals("on", StringComparison.OrdinalIgnoreCase) ||
                   state == "1" ||
@@ -205,7 +254,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         attributes[$"{switchName}_state"] = on ? "on" : "off";
         metrics[$"{switchName}_state_binary"] = val;
 
-        int ch = ExtractChannelIndex(switchName);
+        int ch = ExtractChannelIndex(switchName, fallbackOrdinal);
         metrics[$"switch_{ch}"] = val;
         metrics[$"relay_state_{ch}"] = val;
         metrics[$"relay_{ch}_state_binary"] = val;
@@ -213,13 +262,120 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
         {
             metrics["relay_state"] = val;
         }
+        return ch;
     }
 
-    private static int ExtractChannelIndex(string switchName)
+    private static int ExtractExplicitChannelCount(JsonElement elem)
     {
+        if (elem.ValueKind != JsonValueKind.Object)
+            return 0;
+
+        foreach (string key in new[] { "channel_count", "devices_count", "channels" })
+        {
+            if (elem.TryGetProperty(key, out var valElem))
+            {
+                if (valElem.ValueKind == JsonValueKind.Number && valElem.TryGetInt32(out int n) && n is >= 1 and <= 16)
+                    return n;
+                if (valElem.ValueKind == JsonValueKind.String && int.TryParse(valElem.GetString(), out int s) && s is >= 1 and <= 16)
+                    return s;
+            }
+        }
+        return 0;
+    }
+
+    private static int ExtractSwitchesArray(
+        JsonElement elem,
+        Dictionary<string, double> metrics,
+        Dictionary<string, string> attributes)
+    {
+        if (elem.ValueKind != JsonValueKind.Object ||
+            !elem.TryGetProperty("switches", out var arrElem) ||
+            arrElem.ValueKind != JsonValueKind.Array)
+        {
+            return 0;
+        }
+
+        int maxCh = 0;
+        int idx = 0;
+        foreach (var item in arrElem.EnumerateArray())
+        {
+            idx++;
+            if (item.ValueKind != JsonValueKind.Object) continue;
+
+            int ch = idx;
+            if (item.TryGetProperty("outlet", out var outElem) && outElem.ValueKind == JsonValueKind.Number && outElem.TryGetInt32(out int outlet))
+            {
+                ch = Math.Clamp(outlet + 1, 1, 16);
+            }
+            else if (item.TryGetProperty("channel", out var chElem) && chElem.ValueKind == JsonValueKind.Number && chElem.TryGetInt32(out int channelNum))
+            {
+                ch = Math.Clamp(channelNum <= 0 ? channelNum + 1 : channelNum, 1, 16);
+            }
+
+            string swVal = "off";
+            if (item.TryGetProperty("switch", out var swProp))
+            {
+                swVal = swProp.ValueKind switch
+                {
+                    JsonValueKind.String => swProp.GetString() ?? "off",
+                    JsonValueKind.True => "on",
+                    JsonValueKind.False => "off",
+                    JsonValueKind.Number when swProp.TryGetInt32(out int v) => v != 0 ? "on" : "off",
+                    _ => "off"
+                };
+            }
+            else if (item.TryGetProperty("state", out var stProp) && stProp.ValueKind == JsonValueKind.String)
+            {
+                swVal = stProp.GetString() ?? "off";
+            }
+
+            SetSwitchState(metrics, attributes, $"device_switch{ch}", swVal, ch);
+            maxCh = Math.Max(maxCh, ch);
+        }
+
+        return Math.Max(maxCh, idx);
+    }
+
+    private static int ExtractEventChannelIndex(JsonElement infoElem, string description)
+    {
+        if (infoElem.TryGetProperty("channel", out var chElem) && chElem.ValueKind == JsonValueKind.Number && chElem.TryGetInt32(out int ch) && ch is >= 1 and <= 16)
+            return ch;
+        if (infoElem.TryGetProperty("outlet", out var outElem) && outElem.ValueKind == JsonValueKind.Number && outElem.TryGetInt32(out int outlet) && outlet is >= 0 and < 16)
+            return outlet + 1;
+        if (infoElem.TryGetProperty("device_id", out var devIdElem) && devIdElem.ValueKind == JsonValueKind.String)
+            return ExtractChannelIndex(devIdElem.GetString() ?? string.Empty, 1);
+
+        if (!string.IsNullOrWhiteSpace(description))
+        {
+            int swIdx = description.IndexOf("switch", StringComparison.OrdinalIgnoreCase);
+            if (swIdx >= 0)
+            {
+                int start = swIdx + 6;
+                int end = start;
+                while (end < description.Length && char.IsDigit(description[end])) end++;
+                if (end > start && int.TryParse(description.AsSpan(start, end - start), out int parsedSw) && parsedSw is >= 1 and <= 16)
+                    return parsedSw;
+            }
+
+            int dashIdx = description.IndexOf("-0", StringComparison.Ordinal);
+            if (dashIdx >= 0 && dashIdx + 2 < description.Length && char.IsDigit(description[dashIdx + 2]))
+            {
+                int end = dashIdx + 2;
+                while (end < description.Length && char.IsDigit(description[end])) end++;
+                if (int.TryParse(description.AsSpan(dashIdx + 1, end - (dashIdx + 1)), out int parsedDash) && parsedDash is >= 1 and <= 16)
+                    return parsedDash;
+            }
+        }
+
+        return 1;
+    }
+
+    private static int ExtractChannelIndex(string switchName, int fallbackOrdinal = 1)
+    {
+        int safeFallback = fallbackOrdinal is >= 1 and <= 16 ? fallbackOrdinal : 1;
         if (string.IsNullOrWhiteSpace(switchName))
         {
-            return 1;
+            return safeFallback;
         }
 
         // Sufijo "<chipId>-01", "<chipId>-02", etc. (status/telemetría JSON)
@@ -245,7 +401,7 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
             return trailingChannel;
         }
 
-        return 1;
+        return safeFallback;
     }
 
     private static void ExtractPowerAndConfigFields(

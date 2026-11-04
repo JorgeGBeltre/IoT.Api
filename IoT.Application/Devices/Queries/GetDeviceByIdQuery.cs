@@ -57,6 +57,8 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
             customerName = owner?.Name;
         }
 
+        int? channelCount = SwitchChannelCountResolver.Resolve(d, latestMetrics);
+
         var dto = new DeviceDto(
             d.Id,
             d.TenantId,
@@ -74,7 +76,8 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
             d.CustomerId,
             customerName,
             latestMetrics,
-            d.FirmwareVersion);
+            d.FirmwareVersion,
+            channelCount);
 
         return Result<DeviceDto>.Success(dto);
     }

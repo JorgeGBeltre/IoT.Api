@@ -204,7 +204,16 @@ public sealed class TelemetryStore : ITelemetryStore
                     if (parsed is null) continue;
                     foreach (var kv in parsed)
                     {
-                        merged[kv.Key] = kv.Value;
+                        if ((string.Equals(kv.Key, "channel_count", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(kv.Key, "devices_count", StringComparison.OrdinalIgnoreCase)) &&
+                            merged.TryGetValue(kv.Key, out double prevCount))
+                        {
+                            merged[kv.Key] = Math.Max(prevCount, kv.Value);
+                        }
+                        else
+                        {
+                            merged[kv.Key] = kv.Value;
+                        }
                     }
                 }
                 catch
@@ -213,13 +222,78 @@ public sealed class TelemetryStore : ITelemetryStore
                 }
             }
 
+            PromoteDetectedSwitchChannelCount(merged);
+
             if (merged.Count > 0)
             {
                 result[group.Key] = merged;
             }
         }
 
+        // Enriquecer con atributos persistidos (p.ej. channel_count informado en BLE/SoftAP/LAN
+        // antes de la primera trama MQTT), respetando filtros globales por tenant y subárbol.
+        var channelAttrs = await _context.DeviceAttributes
+            .AsNoTracking()
+            .Where(a => a.TenantId == tenantId &&
+                        deviceIds.Contains(a.DeviceId) &&
+                        (a.Key == "channel_count" || a.Key == "devices_count"))
+            .Select(a => new { a.DeviceId, a.Value })
+            .ToListAsync(cancellationToken);
+
+        foreach (var attrGroup in channelAttrs.GroupBy(a => a.DeviceId))
+        {
+            int maxAttrChannels = 0;
+            foreach (var item in attrGroup)
+            {
+                if (int.TryParse(item.Value, out int parsed) && parsed is >= 1 and <= 16)
+                {
+                    maxAttrChannels = Math.Max(maxAttrChannels, parsed);
+                }
+            }
+            if (maxAttrChannels <= 0) continue;
+
+            if (result.TryGetValue(attrGroup.Key, out var existingDict))
+            {
+                var copy = new Dictionary<string, double>(existingDict, StringComparer.OrdinalIgnoreCase);
+                double current = copy.TryGetValue("channel_count", out var c) ? c : 0;
+                copy["channel_count"] = Math.Max(current, maxAttrChannels);
+                result[attrGroup.Key] = copy;
+            }
+            else
+            {
+                result[attrGroup.Key] = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["channel_count"] = maxAttrChannels
+                };
+            }
+        }
+
         return result;
+    }
+
+    private static void PromoteDetectedSwitchChannelCount(Dictionary<string, double> metrics)
+    {
+        int maxCh = 0;
+        if (metrics.TryGetValue("channel_count", out double cc) && cc >= 1)
+            maxCh = Math.Max(maxCh, (int)Math.Round(cc));
+        if (metrics.TryGetValue("devices_count", out double dc) && dc >= 1)
+            maxCh = Math.Max(maxCh, (int)Math.Round(dc));
+
+        for (int i = 1; i <= 16; i++)
+        {
+            if (metrics.ContainsKey($"switch_{i}") ||
+                metrics.ContainsKey($"relay_state_{i}") ||
+                metrics.ContainsKey($"relay_{i}_state_binary") ||
+                metrics.ContainsKey($"device_switch{i}_state_binary"))
+            {
+                maxCh = Math.Max(maxCh, i);
+            }
+        }
+
+        if (maxCh >= 1)
+        {
+            metrics["channel_count"] = Math.Clamp(maxCh, 1, 16);
+        }
     }
 
     public Task<int> PurgePositionsOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)

@@ -57,6 +57,9 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
                 ? name
                 : null;
 
+            var resolvedMetrics = metricsByDevice is not null && metricsByDevice.TryGetValue(d.Id, out var devMetrics) ? devMetrics : null;
+            int? channelCount = SwitchChannelCountResolver.Resolve(d, resolvedMetrics);
+
             list.Add(new DeviceDto(
                 d.Id,
                 d.TenantId,
@@ -73,8 +76,9 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
                 cachedPos,
                 d.CustomerId,
                 customerName,
-                metricsByDevice is not null && metricsByDevice.TryGetValue(d.Id, out var devMetrics) ? devMetrics : null,
-                d.FirmwareVersion));
+                resolvedMetrics,
+                d.FirmwareVersion,
+                channelCount));
         }
 
         return Result<IReadOnlyList<DeviceDto>>.Success(list);

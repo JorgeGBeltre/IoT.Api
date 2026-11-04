@@ -72,7 +72,7 @@ public sealed class ProvisionDeviceCommandHandler
 
     public async Task<Result<DeviceProvisioningResultDto>> Handle(ProvisionDeviceCommand request, CancellationToken cancellationToken)
     {
-        var chipId = request.ChipId?.Trim() ?? string.Empty;
+        var chipId = NormalizeChipIdentifier(request.ChipId);
         if (string.IsNullOrWhiteSpace(chipId))
         {
             return Result<DeviceProvisioningResultDto>.Failure(
@@ -263,9 +263,7 @@ public sealed class ProvisionDeviceCommandHandler
                 continue;
             }
 
-            if (string.Equals(trimmedKey, "password", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(trimmedKey, "pass", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(trimmedKey, "wifi_password", StringComparison.OrdinalIgnoreCase))
+            if (IsSensitiveParameterKey(trimmedKey))
             {
                 continue;
             }
@@ -289,8 +287,7 @@ public sealed class ProvisionDeviceCommandHandler
             if (string.IsNullOrWhiteSpace(k) || string.IsNullOrWhiteSpace(v))
                 continue;
             if (string.Equals(k, "ota_hmac_key", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(k, "password", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(k, "pass", StringComparison.OrdinalIgnoreCase))
+                IsSensitiveParameterKey(k.Trim()))
             {
                 continue;
             }
@@ -309,6 +306,36 @@ public sealed class ProvisionDeviceCommandHandler
             // Despacho best-effort: el equipo puede estar aún en proceso de reinicio tras el emparejamiento.
         }
     }
+
+    private static string NormalizeChipIdentifier(string? rawChipId)
+    {
+        if (string.IsNullOrWhiteSpace(rawChipId))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = rawChipId.Trim();
+        // Si llega con separadores de MAC (p.ej. 2C:BC:BB:05:1B:B8), canonizar a HEX limpio.
+        if (trimmed.Length == 17 && (trimmed.Contains(':') || trimmed.Contains('-')))
+        {
+            var compact = trimmed.Replace(":", string.Empty).Replace("-", string.Empty);
+            if (compact.Length == 12 && compact.All(Uri.IsHexDigit))
+            {
+                return compact.ToUpperInvariant();
+            }
+        }
+
+        return trimmed;
+    }
+
+    private static bool IsSensitiveParameterKey(string key) =>
+        string.Equals(key, "password", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "pass", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "wifi_pass", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "wifi_password", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "wifipassword", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "apn_pass", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "apn_password", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeDeviceKey(string? rawDeviceKey)
     {

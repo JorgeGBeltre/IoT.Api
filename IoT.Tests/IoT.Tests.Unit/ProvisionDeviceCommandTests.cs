@@ -422,4 +422,57 @@ public sealed class ProvisionDeviceCommandTests
             .Should()
             .Be(expected);
     }
+
+    [Fact]
+    public async Task Handle_NormalizesMacFormattedChipId_AndNeverPersistsSensitiveWifiParameters()
+    {
+        var m = NewMocks();
+        var attrs = new Mock<IDeviceAttributeRepository>();
+        m.Customers.Setup(c => c.GetRootCustomerIdAsync(T1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Guid.NewGuid());
+        m.Devices.Setup(r => r.GetByChipIdAsync(T1, "2CBCBB051BB8", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Device?)null);
+        m.Devices.Setup(r => r.ExistsByChipIdGlobalAsync("2CBCBB051BB8", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var handler = new ProvisionDeviceCommandHandler(
+            m.Devices.Object,
+            m.Customers.Object,
+            m.ApiKeys.Object,
+            m.Conn.Object,
+            m.Tenant.Object,
+            m.Uow.Object,
+            m.Revoker.Object,
+            attrs.Object);
+
+        var parameters = new Dictionary<string, string?>
+        {
+            ["room"] = "Sala",
+            ["wifi_pass"] = "TopSecret123",
+            ["wifiPassword"] = "TopSecret123",
+            ["apn_pass"] = "CarrierSecret"
+        };
+
+        var result = await handler.Handle(
+            new ProvisionDeviceCommand(
+                T1,
+                "2c:bc:bb:05:1b:b8",
+                MacAddress: "2c:bc:bb:05:1b:b8",
+                Name: "Interruptor Sala",
+                Model: "Relay-Wifi",
+                Manufacturer: "VESIS",
+                Capabilities: new[] { CapabilityType.Switch },
+                IssuedBy: "operador@t1",
+                WifiSsid: null,
+                WifiPassword: null,
+                DeviceParameters: parameters),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Credentials.ChipId.Should().Be("2CBCBB051BB8");
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), AttributeScope.Shared, "room", "Sala", It.IsAny<CancellationToken>()), Times.Once);
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), It.IsAny<AttributeScope>(), "wifi_pass", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), It.IsAny<AttributeScope>(), "wifiPassword", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), It.IsAny<AttributeScope>(), "apn_pass", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

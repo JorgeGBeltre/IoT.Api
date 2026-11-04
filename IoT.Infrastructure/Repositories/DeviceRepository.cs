@@ -24,22 +24,38 @@ public sealed class DeviceRepository : IDeviceRepository
 
     public async Task<Device?> GetByChipIdAsync(Guid tenantId, string chipId, CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(chipId))
+        {
+            return null;
+        }
+
+        var normalized = chipId.Trim();
+        var normalizedLower = normalized.ToLower();
         return await _context.Devices
             .Include(d => d.Capabilities)
-            .FirstOrDefaultAsync(d => d.TenantId == tenantId && d.ChipId == chipId, cancellationToken);
+            .FirstOrDefaultAsync(
+                d => d.TenantId == tenantId && (d.ChipId == normalized || d.ChipId.ToLower() == normalizedLower),
+                cancellationToken);
     }
 
     public async Task<Device?> GetByChipIdGlobalAsync(string chipId, CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(chipId))
+        {
+            return null;
+        }
+
         // ChipId NO es único a nivel global (sólo (TenantId, ChipId) lo es). Para
         // dispositivos sin JWT (TCP/HTTP) la identidad es sólo el ChipId/IMEI; si dos
         // tenants comparten IMEI, resolver "el primero" atribuiría la telemetría a un
         // tenant arbitrario (fuga cross-tenant). Por eso, ante COLISIÓN devolvemos null
         // (ambiguo => no adoptable) en vez de elegir al azar.
+        var normalized = chipId.Trim();
+        var normalizedLower = normalized.ToLower();
         var matches = await _context.Devices
             .IgnoreQueryFilters()
             .Include(d => d.Capabilities)
-            .Where(d => d.ChipId == chipId)
+            .Where(d => d.ChipId == normalized || d.ChipId.ToLower() == normalizedLower)
             .Take(2)
             .ToListAsync(cancellationToken);
 
@@ -48,9 +64,16 @@ public sealed class DeviceRepository : IDeviceRepository
 
     public async Task<bool> ExistsByChipIdGlobalAsync(string chipId, CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(chipId))
+        {
+            return false;
+        }
+
+        var normalized = chipId.Trim();
+        var normalizedLower = normalized.ToLower();
         return await _context.Devices
             .IgnoreQueryFilters()
-            .AnyAsync(d => d.ChipId == chipId, cancellationToken);
+            .AnyAsync(d => d.ChipId == normalized || d.ChipId.ToLower() == normalizedLower, cancellationToken);
     }
 
     public async Task<bool> BelongsToTenantAsync(Guid deviceId, Guid tenantId, CancellationToken cancellationToken = default)

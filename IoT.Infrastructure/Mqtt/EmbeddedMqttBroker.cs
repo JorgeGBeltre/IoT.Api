@@ -887,7 +887,53 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     private async Task OnClientConnected(ClientConnectedEventArgs e)
     {
         _logger.LogInformation("Cliente MQTT conectado: {ClientId}", e.ClientId);
-        await Task.CompletedTask;
+
+        if (!_authenticatedChipIds.TryGetValue(e.ClientId, out var chipId) ||
+            string.IsNullOrWhiteSpace(chipId))
+        {
+            return;
+        }
+
+        try
+        {
+            using var scope = _scopeFactory.CreateSystemScope();
+            var deviceRepo = scope.ServiceProvider.GetService<IDeviceRepository>();
+            if (deviceRepo is null)
+            {
+                return;
+            }
+
+            var device = await deviceRepo.GetByChipIdGlobalAsync(chipId);
+            if (device is null)
+            {
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            device.RecordHeartbeat(now);
+            deviceRepo.Update(device);
+
+            var unitOfWork = scope.ServiceProvider.GetService<IUnitOfWork>();
+            if (unitOfWork is not null)
+            {
+                await unitOfWork.SaveChangesAsync();
+            }
+
+            var notifications = scope.ServiceProvider.GetService<IFleetNotificationService>();
+            if (notifications is not null)
+            {
+                await notifications.NotifyDeviceStatusChangedAsync(
+                    device.TenantId,
+                    device.Id,
+                    device.ChipId,
+                    "Online",
+                    now);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "No se pudo actualizar presencia Online al conectar {ClientId} ({ChipId}).", e.ClientId, chipId);
+        }
     }
 
     private async Task OnClientDisconnected(ClientDisconnectedEventArgs e)
@@ -909,19 +955,61 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
 
         // Se libera la identidad autenticada de ESTA conexión. En el takeover de arriba no
         // se toca, porque la entrada ya pertenece a la conexión nueva (mismo ClientId).
-        _authenticatedChipIds.TryRemove(e.ClientId, out _);
+        _authenticatedChipIds.TryRemove(e.ClientId, out var disconnectedChipId);
         _bootstrapClientIds.TryRemove(e.ClientId, out _);
         _connectedClientIds.TryRemove(e.ClientId, out _);
         _sessionKeyFingerprints.TryRemove(e.ClientId, out _);
         _bootstrapTenantIds.TryRemove(e.ClientId, out _);
 
-        var chipId = await _clientMap.GetChipIdByClientIdAsync(e.ClientId);
+        var chipId = await _clientMap.GetChipIdByClientIdAsync(e.ClientId) ?? disconnectedChipId;
         if (!string.IsNullOrEmpty(chipId))
         {
             // Baja CONDICIONAL: sólo si el mapeo sigue apuntando a ESTA conexión. Protege
             // contra desconexiones que llegan tarde, después de que el dispositivo ya se
             // registró de nuevo (con el mismo ClientId o con otro).
-            await _clientMap.RemoveAsync(chipId, e.ClientId);
+            bool removedFromMap = await _clientMap.RemoveAsync(chipId, e.ClientId);
+            bool stillConnectedUnderAnotherClient = _authenticatedChipIds.Values
+                .Any(active => string.Equals(active, chipId, StringComparison.OrdinalIgnoreCase));
+
+            if ((removedFromMap || !string.IsNullOrEmpty(disconnectedChipId)) && !stillConnectedUnderAnotherClient)
+            {
+                try
+                {
+                    using var scope = _scopeFactory.CreateSystemScope();
+                    var deviceRepo = scope.ServiceProvider.GetService<IDeviceRepository>();
+                    if (deviceRepo is not null)
+                    {
+                        var device = await deviceRepo.GetByChipIdGlobalAsync(chipId);
+                        if (device is not null && device.OperationalStatus != DeviceOperationalStatus.Offline)
+                        {
+                            var now = DateTime.UtcNow;
+                            device.SetOperationalStatus(DeviceOperationalStatus.Offline);
+                            deviceRepo.Update(device);
+
+                            var unitOfWork = scope.ServiceProvider.GetService<IUnitOfWork>();
+                            if (unitOfWork is not null)
+                            {
+                                await unitOfWork.SaveChangesAsync();
+                            }
+
+                            var notifications = scope.ServiceProvider.GetService<IFleetNotificationService>();
+                            if (notifications is not null)
+                            {
+                                await notifications.NotifyDeviceStatusChangedAsync(
+                                    device.TenantId,
+                                    device.Id,
+                                    device.ChipId,
+                                    "Offline",
+                                    now);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "No se pudo actualizar presencia Offline al desconectar {ClientId} ({ChipId}).", e.ClientId, chipId);
+                }
+            }
         }
     }
 

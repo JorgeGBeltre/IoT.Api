@@ -649,6 +649,42 @@ public sealed class DevicesController : ControllerBase
         return Ok(result.Value);
     }
 
+    /// <summary>
+    /// Desvincula un dispositivo de la cuenta del usuario, enviando la orden autenticada de
+    /// borrado de credenciales y retorno a modo emparejamiento de fábrica (Quick Pairing) por
+    /// MQTT 5.0 si el equipo está en línea, y registrando un tombstone criptográfico para que
+    /// los equipos sin Wi-Fi reciban la orden apenas reconecten.
+    /// </summary>
+    [HttpPost("{id:guid}/unlink")]
+    [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UnlinkDevice(Guid id, CancellationToken cancellationToken)
+    {
+        Guid? userId = Guid.TryParse(
+            User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value,
+            out var uid)
+            ? uid
+            : null;
+
+        var result = await _mediator.Send(
+            new UnlinkDeviceCommand(
+                _tenantContext.TenantId,
+                id,
+                userId,
+                User.Identity?.Name,
+                HttpContext.Connection.RemoteIpAddress?.ToString(),
+                Request.Headers.UserAgent.ToString()),
+            cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return NotFound(new { error = result.Error.Message, code = result.Error.Code });
+        }
+
+        return Ok(result.Value);
+    }
+
     [HttpDelete("{id:guid}")]
     [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -664,7 +700,9 @@ public sealed class DevicesController : ControllerBase
                 _tenantContext.TenantId,
                 id,
                 userId,
-                User.Identity?.Name),
+                User.Identity?.Name,
+                HttpContext.Connection.RemoteIpAddress?.ToString(),
+                Request.Headers.UserAgent.ToString()),
             cancellationToken);
 
         if (result.IsFailure)

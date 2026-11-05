@@ -182,19 +182,22 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     private readonly string? _tlsCertPassword;
     private readonly bool _disablePlaintext;
     private readonly ITelemetryQueuePublisher? _telemetryQueuePublisher;
+    private readonly IUnlinkedDeviceRegistry? _unlinkedDeviceRegistry;
 
     public EmbeddedMqttBroker(
         IConfiguration configuration,
         IServiceScopeFactory scopeFactory,
         IMqttClientMap clientMap,
         ILogger<EmbeddedMqttBroker> logger,
-        ITelemetryQueuePublisher? telemetryQueuePublisher = null)
+        ITelemetryQueuePublisher? telemetryQueuePublisher = null,
+        IUnlinkedDeviceRegistry? unlinkedDeviceRegistry = null)
     {
         _configuration = configuration;
         _scopeFactory = scopeFactory;
         _clientMap = clientMap;
         _logger = logger;
         _telemetryQueuePublisher = telemetryQueuePublisher;
+        _unlinkedDeviceRegistry = unlinkedDeviceRegistry;
 
         _port = int.TryParse(configuration["MqttBroker:Port"], out var p) ? p : 1883;
         _allowAnonymous = bool.TryParse(configuration["MqttBroker:AllowAnonymous"], out var anon) && anon;
@@ -628,6 +631,21 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 if (!string.IsNullOrWhiteSpace(lookupChip))
                 {
                     var device = await deviceRepo.GetByChipIdGlobalAsync(lookupChip);
+                    if (device is null && _unlinkedDeviceRegistry is not null)
+                    {
+                        var tombstone = await _unlinkedDeviceRegistry.GetAsync(lookupChip);
+                        if (tombstone is not null &&
+                            !string.IsNullOrEmpty(tombstone.MqttApiKeyHash) &&
+                            apiKeyCandidates.Any(k => apiKeySvc.Verify(k!, tombstone.MqttApiKeyHash)))
+                        {
+                            _logger.LogInformation(
+                                "Dispositivo previamente desvinculado reconectó ({ChipId}); respondiendo CONNACK 0x87 con prueba ACCOUNT_UNLINKED para reseteo a Quick Pairing.",
+                                lookupChip);
+                            e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
+                            e.ReasonString = $"ACCOUNT_UNLINKED:{tombstone.UnlinkProof}";
+                            return;
+                        }
+                    }
                     if (device is not null && device.HasMqttApiKey &&
                         apiKeyCandidates.Any(k => apiKeySvc.Verify(k!, device.MqttApiKeyHash!)))
                     {

@@ -47,6 +47,7 @@ public sealed class ProvisionDeviceCommandHandler
     private readonly IMqttSessionRevoker? _sessionRevoker;
     private readonly IDeviceAttributeRepository? _attributeRepository;
     private readonly ISharedAttributePushDispatcher? _pushDispatcher;
+    private readonly IUnlinkedDeviceRegistry? _unlinkedDeviceRegistry;
 
     public ProvisionDeviceCommandHandler(
         IDeviceRepository deviceRepository,
@@ -57,7 +58,8 @@ public sealed class ProvisionDeviceCommandHandler
         IUnitOfWork unitOfWork,
         IMqttSessionRevoker? sessionRevoker = null,
         IDeviceAttributeRepository? attributeRepository = null,
-        ISharedAttributePushDispatcher? pushDispatcher = null)
+        ISharedAttributePushDispatcher? pushDispatcher = null,
+        IUnlinkedDeviceRegistry? unlinkedDeviceRegistry = null)
     {
         _deviceRepository = deviceRepository;
         _customerRepository = customerRepository;
@@ -68,6 +70,7 @@ public sealed class ProvisionDeviceCommandHandler
         _sessionRevoker = sessionRevoker;
         _attributeRepository = attributeRepository;
         _pushDispatcher = pushDispatcher;
+        _unlinkedDeviceRegistry = unlinkedDeviceRegistry;
     }
 
     public async Task<Result<DeviceProvisioningResultDto>> Handle(ProvisionDeviceCommand request, CancellationToken cancellationToken)
@@ -123,6 +126,10 @@ public sealed class ProvisionDeviceCommandHandler
                 request.DeviceParameters,
                 cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
+            if (_unlinkedDeviceRegistry is not null)
+            {
+                await _unlinkedDeviceRegistry.ClearAsync(existing.ChipId, cancellationToken);
+            }
 
             // Rotar la clave debe cerrar la sesión viva: si no, la credencial anterior seguiría
             // válida mientras el equipo no reconectara. Igual que RotateDeviceApiKeyCommand.
@@ -208,6 +215,10 @@ public sealed class ProvisionDeviceCommandHandler
             request.DeviceParameters,
             cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+        if (_unlinkedDeviceRegistry is not null)
+        {
+            await _unlinkedDeviceRegistry.ClearAsync(device.ChipId, cancellationToken);
+        }
 
         await PushSharedAttributesBestEffortAsync(device, request.DeviceParameters, cancellationToken);
 

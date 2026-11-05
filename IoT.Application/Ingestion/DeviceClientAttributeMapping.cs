@@ -44,6 +44,7 @@ public static class DeviceClientAttributeMapping
         "pulse",
         "pulseWidth",
         "sledOnline",
+        "account_bound",
         "channel_count"
     };
 

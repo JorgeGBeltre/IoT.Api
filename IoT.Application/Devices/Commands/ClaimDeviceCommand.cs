@@ -44,6 +44,7 @@ public sealed class ClaimDeviceCommandHandler
     private readonly ITenantContext _tenantContext;
     private readonly IUnitOfWork _unitOfWork;
     private readonly IMqttSessionRevoker? _sessionRevoker;
+    private readonly IUnlinkedDeviceRegistry? _unlinkedDeviceRegistry;
 
     public ClaimDeviceCommandHandler(
         IDeviceRepository deviceRepository,
@@ -53,7 +54,8 @@ public sealed class ClaimDeviceCommandHandler
         IMqttConnectionInfoProvider connectionInfo,
         ITenantContext tenantContext,
         IUnitOfWork unitOfWork,
-        IMqttSessionRevoker? sessionRevoker = null)
+        IMqttSessionRevoker? sessionRevoker = null,
+        IUnlinkedDeviceRegistry? unlinkedDeviceRegistry = null)
     {
         _deviceRepository = deviceRepository;
         _customerRepository = customerRepository;
@@ -63,6 +65,7 @@ public sealed class ClaimDeviceCommandHandler
         _tenantContext = tenantContext;
         _unitOfWork = unitOfWork;
         _sessionRevoker = sessionRevoker;
+        _unlinkedDeviceRegistry = unlinkedDeviceRegistry;
     }
 
     public async Task<Result<DeviceProvisioningResultDto>> Handle(
@@ -212,6 +215,10 @@ public sealed class ClaimDeviceCommandHandler
         await _attributeRepository.UpsertAsync(
             device.TenantId, device.Id, AttributeScope.Server, "pairing_mode", "claim", cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+        if (_unlinkedDeviceRegistry is not null)
+        {
+            await _unlinkedDeviceRegistry.ClearAsync(device.ChipId, cancellationToken);
+        }
 
         var newCreds = DeviceCredentialsMapper.ToDto(device, _connectionInfo, newPlainKey);
         var newBundles = DeviceProvisioningBundleBuilder.Build(newCreds, newDeviceKey, claimSecret);

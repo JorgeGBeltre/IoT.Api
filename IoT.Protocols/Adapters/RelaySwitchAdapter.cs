@@ -586,6 +586,18 @@ public sealed class RelaySwitchAdapter : IDeviceProtocolAdapter
             metrics["pulse_width_ms"] = pwVal;
             attributes["pulseWidth"] = ((int)pwVal).ToString();
         }
+
+        if (elem.TryGetProperty("account_bound", out var abElem))
+        {
+            if (abElem.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                attributes["account_bound"] = abElem.GetBoolean() ? "true" : "false";
+            }
+            else if (abElem.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(abElem.GetString()))
+            {
+                attributes["account_bound"] = abElem.GetString()!;
+            }
+        }
     }
 
     private static bool LooksLikeJson(string payload)

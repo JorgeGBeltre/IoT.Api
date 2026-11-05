@@ -22,17 +22,20 @@ public sealed class CreateDeviceCommandHandler : IRequestHandler<CreateDeviceCom
     private readonly ICustomerRepository _customerRepository;
     private readonly ITenantContext _tenantContext;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IUnlinkedDeviceRegistry? _unlinkedDeviceRegistry;
 
     public CreateDeviceCommandHandler(
         IDeviceRepository deviceRepository,
         ICustomerRepository customerRepository,
         ITenantContext tenantContext,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        IUnlinkedDeviceRegistry? unlinkedDeviceRegistry = null)
     {
         _deviceRepository = deviceRepository;
         _customerRepository = customerRepository;
         _tenantContext = tenantContext;
         _unitOfWork = unitOfWork;
+        _unlinkedDeviceRegistry = unlinkedDeviceRegistry;
     }
 
     public async Task<Result<Guid>> Handle(CreateDeviceCommand request, CancellationToken cancellationToken)
@@ -91,6 +94,10 @@ public sealed class CreateDeviceCommandHandler : IRequestHandler<CreateDeviceCom
 
         await _deviceRepository.AddAsync(device, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+        if (_unlinkedDeviceRegistry is not null)
+        {
+            await _unlinkedDeviceRegistry.ClearAsync(device.ChipId, cancellationToken);
+        }
 
         return Result<Guid>.Success(device.Id);
     }

@@ -50,6 +50,7 @@ public static class DeviceProvisioningBundleBuilder
     {
         string ssid = wifiSsid?.Trim() ?? string.Empty;
         string pass = wifiPassword ?? string.Empty;
+        bool hasWifi = !string.IsNullOrWhiteSpace(ssid);
         string apiKey = credentials.MqttPasswordPlaintext ?? credentials.MqttUsername ?? string.Empty;
         string chipId = credentials.ChipId;
         string host = credentials.BrokerHost;
@@ -58,9 +59,6 @@ public static class DeviceProvisioningBundleBuilder
         // 1. BLE Schema A (Service 12345678-1234-1234-1234-123456789abc, Char ...0014)
         var bleSchemaA = new Dictionary<string, object?>
         {
-            ["ssid"] = ssid,
-            ["pass"] = pass,
-            ["password"] = pass,
             ["server"] = host,
             ["port"] = port,
             ["account"] = apiKey,
@@ -70,21 +68,32 @@ public static class DeviceProvisioningBundleBuilder
             ["devicekey"] = deviceKey,
             ["bind_token"] = bindToken
         };
-        MergeParameters(bleSchemaA, deviceParameters);
+        if (hasWifi)
+        {
+            bleSchemaA["ssid"] = ssid;
+            bleSchemaA["pass"] = pass;
+            bleSchemaA["password"] = pass;
+        }
+        MergeNonSensitiveParameters(bleSchemaA, deviceParameters);
         string bleSchemaAJson = JsonSerializer.Serialize(bleSchemaA);
 
-        var kvParts = new List<string>
+        var kvParts = new List<string>();
+        if (hasWifi)
         {
-            $"ssid={SanitizeKv(ssid)}",
-            $"pass={SanitizeKv(pass)}",
-            $"server={SanitizeKv(host)}",
-            $"port={port}",
-            $"account={SanitizeKv(apiKey)}",
-            $"bind_token={SanitizeKv(bindToken)}"
-        };
+            kvParts.Add($"ssid={SanitizeKv(ssid)}");
+            kvParts.Add($"pass={SanitizeKv(pass)}");
+        }
+        kvParts.Add($"server={SanitizeKv(host)}");
+        kvParts.Add($"port={port}");
+        kvParts.Add($"account={SanitizeKv(apiKey)}");
+        kvParts.Add($"bind_token={SanitizeKv(bindToken)}");
         if (deviceParameters != null && deviceParameters.TryGetValue("apn", out var apnVal) && !string.IsNullOrWhiteSpace(apnVal))
         {
             kvParts.Add($"apn={SanitizeKv(apnVal)}");
+        }
+        if (deviceParameters != null && deviceParameters.TryGetValue("apn_user", out var apnUserVal) && !string.IsNullOrWhiteSpace(apnUserVal))
+        {
+            kvParts.Add($"apn_user={SanitizeKv(apnUserVal)}");
         }
         string bleSchemaAKv = string.Join(";", kvParts);
 
@@ -92,9 +101,6 @@ public static class DeviceProvisioningBundleBuilder
         var bleSchemaB = new Dictionary<string, object?>
         {
             ["action"] = "provision",
-            ["ssid"] = ssid,
-            ["password"] = pass,
-            ["pass"] = pass,
             ["server"] = host,
             ["port"] = port,
             ["account"] = apiKey,
@@ -102,14 +108,18 @@ public static class DeviceProvisioningBundleBuilder
             ["devicekey"] = deviceKey,
             ["bind_token"] = bindToken
         };
-        MergeParameters(bleSchemaB, deviceParameters);
+        if (hasWifi)
+        {
+            bleSchemaB["ssid"] = ssid;
+            bleSchemaB["password"] = pass;
+            bleSchemaB["pass"] = pass;
+        }
+        MergeNonSensitiveParameters(bleSchemaB, deviceParameters);
         string bleSchemaBJson = JsonSerializer.Serialize(bleSchemaB);
 
         // 3. SoftAP Compatible Payload (POST http://192.168.4.1/ap o http://10.10.7.1/ap)
         var softAp = new Dictionary<string, object?>
         {
-            ["ssid"] = ssid,
-            ["password"] = pass,
             ["server"] = host,
             ["mqtt_broker"] = host,
             ["serverName"] = host,
@@ -124,21 +134,25 @@ public static class DeviceProvisioningBundleBuilder
             ["token"] = bindToken,
             ["deviceid"] = chipId
         };
-        MergeParameters(softAp, deviceParameters);
+        if (hasWifi)
+        {
+            softAp["ssid"] = ssid;
+            softAp["password"] = pass;
+        }
+        MergeNonSensitiveParameters(softAp, deviceParameters);
         string softApJson = JsonSerializer.Serialize(softAp);
 
         // 4. LAN Zeroconf (:8081 /zeroconf/wifi y /zeroconf/config)
-        var lanWifiData = new Dictionary<string, object?>
+        var lanWifiData = new Dictionary<string, object?>();
+        if (hasWifi)
         {
-            ["ssid"] = ssid,
-            ["password"] = pass
-        };
+            lanWifiData["ssid"] = ssid;
+            lanWifiData["password"] = pass;
+        }
         string lanWifiPlainJson = LanZeroconfCrypto.BuildPlainEnvelopeJson(chipId, lanWifiData);
 
         var lanConfigData = new Dictionary<string, object?>
         {
-            ["ssid"] = ssid,
-            ["password"] = pass,
             ["server"] = host,
             ["port"] = port,
             ["account"] = apiKey,
@@ -146,7 +160,12 @@ public static class DeviceProvisioningBundleBuilder
             ["devicekey"] = deviceKey,
             ["bind_token"] = bindToken
         };
-        MergeParameters(lanConfigData, deviceParameters);
+        if (hasWifi)
+        {
+            lanConfigData["ssid"] = ssid;
+            lanConfigData["password"] = pass;
+        }
+        MergeNonSensitiveParameters(lanConfigData, deviceParameters);
         string lanConfigPlainJson = LanZeroconfCrypto.BuildPlainEnvelopeJson(chipId, lanConfigData);
         string lanConfigInnerJson = JsonSerializer.Serialize(lanConfigData);
         string lanConfigEncryptedJson = LanZeroconfCrypto.BuildEncryptedEnvelopeJson(
@@ -176,7 +195,7 @@ public static class DeviceProvisioningBundleBuilder
             SerialAtCommands: serialCommands);
     }
 
-    private static void MergeParameters(
+    private static void MergeNonSensitiveParameters(
         IDictionary<string, object?> target,
         IReadOnlyDictionary<string, string?>? parameters)
     {
@@ -188,6 +207,9 @@ public static class DeviceProvisioningBundleBuilder
                 continue;
 
             string trimmedKey = key.Trim();
+            if (Commands.ProvisionDeviceCommandHandler.IsSensitiveParameterKey(trimmedKey))
+                continue;
+
             string trimmedVal = rawValue.Trim();
 
             if (bool.TryParse(trimmedVal, out bool bVal))

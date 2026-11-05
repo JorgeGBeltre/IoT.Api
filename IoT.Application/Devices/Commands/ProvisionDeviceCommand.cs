@@ -104,7 +104,7 @@ public sealed class ProvisionDeviceCommandHandler
             }
 
             existing.UpdateHardwareInfo(request.Model, request.Manufacturer);
-            ApplyCapabilities(existing, request.Capabilities, request.Model ?? existing.Model, chipId);
+            ApplyCapabilities(existing, request.Capabilities, request.Model ?? existing.Model, chipId, ExtractDeviceFamily(request.DeviceParameters));
 
             if (!string.IsNullOrWhiteSpace(request.FirmwareVersion))
             {
@@ -198,7 +198,7 @@ public sealed class ProvisionDeviceCommandHandler
         }
         device.AssignToCustomer(customerId.Value);
 
-        ApplyCapabilities(device, request.Capabilities, request.Model ?? device.Model, chipId);
+        ApplyCapabilities(device, request.Capabilities, request.Model ?? device.Model, chipId, ExtractDeviceFamily(request.DeviceParameters));
 
         var (plainKey, error) = MintApiKey(device, request.IssuedBy);
         if (error is not null)
@@ -339,14 +339,27 @@ public sealed class ProvisionDeviceCommandHandler
         return trimmed;
     }
 
-    private static bool IsSensitiveParameterKey(string key) =>
+    internal static bool IsSensitiveParameterKey(string key) =>
         string.Equals(key, "password", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(key, "pass", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(key, "wifi_pass", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(key, "wifi_password", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "wifipass", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(key, "wifipassword", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(key, "apn_pass", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(key, "apn_password", StringComparison.OrdinalIgnoreCase);
+        string.Equals(key, "apn_password", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "apnpass", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(key, "apnpassword", StringComparison.OrdinalIgnoreCase);
+
+    private static string? ExtractDeviceFamily(IReadOnlyDictionary<string, string?>? parameters)
+    {
+        if (parameters is null) return null;
+        if (parameters.TryGetValue("device_family", out var df) && !string.IsNullOrWhiteSpace(df))
+            return df.Trim();
+        if (parameters.TryGetValue("deviceFamily", out var dfCamel) && !string.IsNullOrWhiteSpace(dfCamel))
+            return dfCamel.Trim();
+        return null;
+    }
 
     private static string NormalizeDeviceKey(string? rawDeviceKey)
     {
@@ -371,11 +384,12 @@ public sealed class ProvisionDeviceCommandHandler
         Device device,
         IReadOnlyList<CapabilityType>? capabilities,
         string? model,
-        string? chipId = null)
+        string? chipId = null,
+        string? deviceFamily = null)
     {
         IReadOnlyList<CapabilityType> resolved = capabilities is { Count: > 0 }
             ? capabilities
-            : InferCapabilitiesFromMetadata(model, chipId);
+            : InferCapabilitiesFromMetadata(model, chipId, deviceFamily);
 
         if (resolved.Count == 0)
         {
@@ -395,40 +409,45 @@ public sealed class ProvisionDeviceCommandHandler
         {
             device.RemoveCapability(CapabilityType.Gps);
         }
-        else if (resolved.Contains(CapabilityType.Gps) &&
-                 !resolved.Contains(CapabilityType.Switch) &&
+        else if (!resolved.Contains(CapabilityType.Switch) &&
                  device.HasCapability(CapabilityType.Switch))
         {
             device.RemoveCapability(CapabilityType.Switch);
         }
     }
 
-    internal static IReadOnlyList<CapabilityType> InferCapabilitiesFromMetadata(string? model, string? chipId = null)
+    public static IReadOnlyList<CapabilityType> InferCapabilitiesFromMetadata(
+        string? model,
+        string? chipId = null,
+        string? deviceFamily = null)
     {
         string m = (model ?? string.Empty).Trim().ToLowerInvariant();
         string c = (chipId ?? string.Empty).Trim().ToUpperInvariant();
+        string f = (deviceFamily ?? string.Empty).Trim().ToLowerInvariant();
 
-        if (m.Contains("gps-relay", StringComparison.Ordinal) ||
+        if (f is "gps_esp32" ||
+            m.Contains("gps_esp32", StringComparison.Ordinal) ||
+            m.Contains("gps-esp32", StringComparison.Ordinal) ||
+            m.Contains("gps-relay", StringComparison.Ordinal) ||
             (m.Contains("gps", StringComparison.Ordinal) && m.Contains("relay", StringComparison.Ordinal)))
         {
             return [CapabilityType.Gps, CapabilityType.Switch];
         }
 
-        if (m.Contains("relay", StringComparison.Ordinal) ||
-            m.Contains("switch", StringComparison.Ordinal) ||
-            m.Contains("interruptor", StringComparison.Ordinal) ||
-            m.Contains("psc-", StringComparison.Ordinal) ||
-            m.Contains("vesis", StringComparison.Ordinal) ||
-            m.Contains("plug", StringComparison.Ordinal) ||
-            m.Contains("minir", StringComparison.Ordinal) ||
-            c.StartsWith("RELAY-", StringComparison.Ordinal) ||
-            c.StartsWith("SWITCH-", StringComparison.Ordinal) ||
-            c.StartsWith("VESIS-", StringComparison.Ordinal))
+        if (f is "fligo_iot" or "toour_iot" ||
+            m.Contains("validator", StringComparison.Ordinal) ||
+            m.Contains("fligo", StringComparison.Ordinal) ||
+            m.Contains("toour", StringComparison.Ordinal) ||
+            m.Contains("ticket", StringComparison.Ordinal) ||
+            m.Contains("nfc", StringComparison.Ordinal) ||
+            c.StartsWith("FLIGO-", StringComparison.Ordinal) ||
+            c.StartsWith("TOOUR-", StringComparison.Ordinal))
         {
-            return [CapabilityType.Switch];
+            return [CapabilityType.Gps, CapabilityType.NfcTicket, CapabilityType.QrReader];
         }
 
-        if (m.Contains("glp", StringComparison.Ordinal) ||
+        if (f is "glp_pressure" ||
+            m.Contains("glp", StringComparison.Ordinal) ||
             m.Contains("pressure", StringComparison.Ordinal) ||
             m.Contains("level", StringComparison.Ordinal) ||
             m.Contains("tank", StringComparison.Ordinal) ||
@@ -437,18 +456,8 @@ public sealed class ProvisionDeviceCommandHandler
             return [CapabilityType.LevelTelemetry, CapabilityType.Pressure];
         }
 
-        if (m.Contains("validator", StringComparison.Ordinal) ||
-            m.Contains("fligo", StringComparison.Ordinal) ||
-            m.Contains("toour", StringComparison.Ordinal) ||
-            m.Contains("ticket", StringComparison.Ordinal) ||
-            m.Contains("nfc", StringComparison.Ordinal) ||
-            c.StartsWith("FLIGO-", StringComparison.Ordinal) ||
-            c.StartsWith("TOOUR-", StringComparison.Ordinal))
-        {
-            return [CapabilityType.NfcTicket, CapabilityType.QrReader];
-        }
-
-        if (m.Contains("gps", StringComparison.Ordinal) ||
+        if (f is "gps_esp8266" ||
+            m.Contains("gps", StringComparison.Ordinal) ||
             m.Contains("gv50", StringComparison.Ordinal) ||
             m.Contains("tracker", StringComparison.Ordinal) ||
             m.Contains("rastreador", StringComparison.Ordinal) ||
@@ -462,6 +471,21 @@ public sealed class ProvisionDeviceCommandHandler
             c.StartsWith("GPS-", StringComparison.Ordinal))
         {
             return [CapabilityType.Gps];
+        }
+
+        if (f is "relay_wifi" ||
+            m.Contains("relay", StringComparison.Ordinal) ||
+            m.Contains("switch", StringComparison.Ordinal) ||
+            m.Contains("interruptor", StringComparison.Ordinal) ||
+            m.Contains("psc-", StringComparison.Ordinal) ||
+            m.Contains("vesis", StringComparison.Ordinal) ||
+            m.Contains("plug", StringComparison.Ordinal) ||
+            m.Contains("minir", StringComparison.Ordinal) ||
+            c.StartsWith("RELAY-", StringComparison.Ordinal) ||
+            c.StartsWith("SWITCH-", StringComparison.Ordinal) ||
+            c.StartsWith("VESIS-", StringComparison.Ordinal))
+        {
+            return [CapabilityType.Switch];
         }
 
         return Array.Empty<CapabilityType>();

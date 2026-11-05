@@ -499,4 +499,83 @@ public sealed class ProvisionDeviceCommandTests
             CapabilityType.Switch,
             CapabilityType.LevelTelemetry);
     }
+
+    [Theory]
+    [InlineData("Relay-Wifi", "VESIS-B81B05BBBC2C", "relay_wifi", new[] { CapabilityType.Switch })]
+    [InlineData("GPS-ESP32", "A1B2C3D4E5F6", "gps_esp32", new[] { CapabilityType.Gps, CapabilityType.Switch })]
+    [InlineData("VESIS-GPS-ESP8266", "C4D8E2112233", "gps_esp8266", new[] { CapabilityType.Gps })]
+    [InlineData("VESIS-GPS-ESP8266", "C4D8E2112233", null, new[] { CapabilityType.Gps })]
+    [InlineData("GLP-Sensor", "GLP-112233445566", "glp_pressure", new[] { CapabilityType.LevelTelemetry, CapabilityType.Pressure })]
+    [InlineData("Toour-IoT", "TOOUR-998877665544", "toour_iot", new[] { CapabilityType.Gps, CapabilityType.NfcTicket, CapabilityType.QrReader })]
+    [InlineData("Fligo-IoT", "FLIGO-554433221100", "fligo_iot", new[] { CapabilityType.Gps, CapabilityType.NfcTicket, CapabilityType.QrReader })]
+    public void InferCapabilitiesFromMetadata_ClassifiesAllSixDeviceFamiliesDeterministically(
+        string model,
+        string chipId,
+        string? deviceFamily,
+        CapabilityType[] expectedCapabilities)
+    {
+        var inferred = ProvisionDeviceCommandHandler.InferCapabilitiesFromMetadata(model, chipId, deviceFamily);
+        inferred.Should().Equal(expectedCapabilities);
+    }
+
+    [Fact]
+    public async Task Handle_CellularApnAndAdoptOnlyProvisioning_OmitsEmptyWifiOverwriteAndNeverLeaksApnPassword()
+    {
+        var m = NewMocks();
+        var attrs = new Mock<IDeviceAttributeRepository>();
+        m.Customers.Setup(c => c.GetRootCustomerIdAsync(T1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Guid.NewGuid());
+        m.Devices.Setup(r => r.GetByChipIdAsync(T1, "A1B2C3D4E5F6", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Device?)null);
+        m.Devices.Setup(r => r.ExistsByChipIdGlobalAsync("A1B2C3D4E5F6", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var handler = new ProvisionDeviceCommandHandler(
+            m.Devices.Object,
+            m.Customers.Object,
+            m.ApiKeys.Object,
+            m.Conn.Object,
+            m.Tenant.Object,
+            m.Uow.Object,
+            m.Revoker.Object,
+            attrs.Object);
+
+        var parameters = new Dictionary<string, string?>
+        {
+            ["device_family"] = "gps_esp32",
+            ["credential_mode"] = "adopt_only",
+            ["apn"] = "internet.claro.com.do",
+            ["apn_user"] = "claro",
+            ["apn_pass"] = "SecretCarrierPass"
+        };
+
+        var result = await handler.Handle(
+            new ProvisionDeviceCommand(
+                T1,
+                "A1B2C3D4E5F6",
+                MacAddress: "A1:B2:C3:D4:E5:F6",
+                Name: "Camión 04",
+                Model: "GPS-ESP32",
+                Manufacturer: "VESIS",
+                Capabilities: null,
+                IssuedBy: "operador@t1",
+                WifiSsid: null,
+                WifiPassword: null,
+                DeviceParameters: parameters),
+            CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        var bundles = result.Value.Bundles!;
+        bundles.BleSchemaAJson.Should().NotContain("\"ssid\"");
+        bundles.BleSchemaAJson.Should().NotContain("\"password\"");
+        bundles.BleSchemaAJson.Should().NotContain("SecretCarrierPass");
+        bundles.BleSchemaAJson.Should().Contain("\"apn\":\"internet.claro.com.do\"");
+        bundles.BleSchemaAKeyValue.Should().StartWith("server=broker.example.com;port=8883;account=iotk_PLAINTEXT;bind_token=");
+        bundles.BleSchemaAKeyValue.Should().Contain(";apn=internet.claro.com.do;apn_user=claro");
+        bundles.BleSchemaBJson.Should().NotContain("\"ssid\"");
+        bundles.SoftApPayloadJson.Should().NotContain("\"ssid\"");
+
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), AttributeScope.Shared, "apn", "internet.claro.com.do", It.IsAny<CancellationToken>()), Times.Once);
+        attrs.Verify(a => a.UpsertAsync(T1, It.IsAny<Guid>(), It.IsAny<AttributeScope>(), "apn_pass", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

@@ -17,7 +17,11 @@ public sealed record UpdateDeviceCommand(
     string? Manufacturer = null,
     string? Room = null,
     Guid? PerformedByUserId = null,
-    string? PerformedByUsername = null) : IRequest<Result<DeviceDto>>;
+    string? PerformedByUsername = null,
+    string? DisplayAs = null,
+    bool? LanControlEnabled = null,
+    bool? PushNoticeEnabled = null,
+    bool? OfflineAlertEnabled = null) : IRequest<Result<DeviceDto>>;
 
 public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCommand, Result<DeviceDto>>
 {
@@ -26,6 +30,8 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
     private readonly IDeviceAttributeRepository? _attributeRepository;
     private readonly IStateCacheService? _stateCache;
     private readonly IAuditLogRepository? _auditLogRepository;
+    private readonly ITelemetryStore? _telemetryStore;
+    private readonly IMqttPeerEndpointRegistry? _peerEndpointRegistry;
     private readonly IUnitOfWork _unitOfWork;
 
     public UpdateDeviceCommandHandler(
@@ -34,7 +40,9 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
         ICustomerRepository? customerRepository = null,
         IDeviceAttributeRepository? attributeRepository = null,
         IStateCacheService? stateCache = null,
-        IAuditLogRepository? auditLogRepository = null)
+        IAuditLogRepository? auditLogRepository = null,
+        ITelemetryStore? telemetryStore = null,
+        IMqttPeerEndpointRegistry? peerEndpointRegistry = null)
     {
         _deviceRepository = deviceRepository;
         _unitOfWork = unitOfWork;
@@ -42,6 +50,8 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
         _attributeRepository = attributeRepository;
         _stateCache = stateCache;
         _auditLogRepository = auditLogRepository;
+        _telemetryStore = telemetryStore;
+        _peerEndpointRegistry = peerEndpointRegistry;
     }
 
     public async Task<Result<DeviceDto>> Handle(UpdateDeviceCommand request, CancellationToken cancellationToken)
@@ -62,26 +72,92 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
             }
         }
 
+        if (request.DisplayAs is not null)
+        {
+            var trimmedDisplayAs = request.DisplayAs.Trim();
+            if (!string.IsNullOrEmpty(trimmedDisplayAs) &&
+                !DeviceDisplayAsCatalog.TryNormalize(trimmedDisplayAs, out _))
+            {
+                return Result<DeviceDto>.Failure(
+                    new Error("Device.InvalidDisplayAs", "El tipo de visualización seleccionado no es válido."));
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(request.Model) || !string.IsNullOrWhiteSpace(request.Manufacturer))
         {
             device.UpdateHardwareInfo(request.Model, request.Manufacturer);
         }
 
-        if (request.Room is not null && _attributeRepository is not null)
+        if (_attributeRepository is not null)
         {
-            var normalizedRoom = request.Room.Trim();
-            if (string.IsNullOrEmpty(normalizedRoom))
+            if (request.Room is not null)
             {
-                await _attributeRepository.DeleteAsync(device.Id, AttributeScope.Shared, "room", cancellationToken);
+                var normalizedRoom = request.Room.Trim();
+                if (string.IsNullOrEmpty(normalizedRoom))
+                {
+                    await _attributeRepository.DeleteAsync(device.Id, AttributeScope.Shared, "room", cancellationToken);
+                }
+                else
+                {
+                    await _attributeRepository.UpsertAsync(
+                        device.TenantId,
+                        device.Id,
+                        AttributeScope.Shared,
+                        "room",
+                        JsonSerializer.Serialize(normalizedRoom),
+                        cancellationToken);
+                }
             }
-            else
+
+            if (request.DisplayAs is not null)
+            {
+                var trimmedDisplayAs = request.DisplayAs.Trim();
+                if (string.IsNullOrEmpty(trimmedDisplayAs))
+                {
+                    await _attributeRepository.DeleteAsync(device.Id, AttributeScope.Shared, "display_as", cancellationToken);
+                }
+                else if (DeviceDisplayAsCatalog.TryNormalize(trimmedDisplayAs, out string normDisplay))
+                {
+                    await _attributeRepository.UpsertAsync(
+                        device.TenantId,
+                        device.Id,
+                        AttributeScope.Shared,
+                        "display_as",
+                        normDisplay,
+                        cancellationToken);
+                }
+            }
+
+            if (request.LanControlEnabled is bool lanControl)
             {
                 await _attributeRepository.UpsertAsync(
                     device.TenantId,
                     device.Id,
                     AttributeScope.Shared,
-                    "room",
-                    JsonSerializer.Serialize(normalizedRoom),
+                    "lan_control_enabled",
+                    lanControl ? "true" : "false",
+                    cancellationToken);
+            }
+
+            if (request.PushNoticeEnabled is bool pushNotice)
+            {
+                await _attributeRepository.UpsertAsync(
+                    device.TenantId,
+                    device.Id,
+                    AttributeScope.Shared,
+                    "push_notice_enabled",
+                    pushNotice ? "true" : "false",
+                    cancellationToken);
+            }
+
+            if (request.OfflineAlertEnabled is bool offlineAlert)
+            {
+                await _attributeRepository.UpsertAsync(
+                    device.TenantId,
+                    device.Id,
+                    AttributeScope.Shared,
+                    "offline_alert_enabled",
+                    offlineAlert ? "true" : "false",
                     cancellationToken);
             }
         }
@@ -107,12 +183,32 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
             ? await _stateCache.GetLatestPositionAsync(device.TenantId, device.Id, cancellationToken)
             : null;
 
+        IReadOnlyDictionary<string, double>? latestMetrics = null;
+        if (_telemetryStore is not null)
+        {
+            var byDevice = await _telemetryStore.GetLatestMetricsByDevicesAsync(device.TenantId, new[] { device.Id }, cancellationToken);
+            if (byDevice is not null && byDevice.TryGetValue(device.Id, out var foundMetrics))
+            {
+                latestMetrics = foundMetrics;
+            }
+        }
+
         string? customerName = null;
         if (_customerRepository is not null && device.CustomerId is Guid ownerCustomerId)
         {
             var owner = await _customerRepository.GetByIdScopedAsync(ownerCustomerId, cancellationToken);
             customerName = owner?.Name;
         }
+
+        int? baseChannelCount = SwitchChannelCountResolver.Resolve(device, latestMetrics);
+        var attrs = _attributeRepository is not null
+            ? await _attributeRepository.ListByDeviceAsync(device.Id, cancellationToken)
+            : null;
+        var projected = DeviceAttributeProjection.Resolve(
+            device,
+            attrs,
+            baseChannelCount,
+            _peerEndpointRegistry?.GetPeerIpByChipId(device.ChipId));
 
         var dto = new DeviceDto(
             device.Id,
@@ -129,7 +225,18 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
             device.Capabilities.Select(c => c.CapabilityType.ToString()).ToList(),
             cachedPos,
             device.CustomerId,
-            customerName);
+            customerName,
+            latestMetrics,
+            projected.FirmwareVersion,
+            projected.ChannelCount,
+            projected.WifiSsid,
+            projected.LocalIp,
+            projected.Room,
+            projected.DisplayAs,
+            projected.LanControlEnabled,
+            projected.PushNoticeEnabled,
+            projected.OfflineAlertEnabled,
+            projected.DeviceSettings);
 
         return Result<DeviceDto>.Success(dto);
     }

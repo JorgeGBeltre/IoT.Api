@@ -614,7 +614,11 @@ public sealed class DevicesController : ControllerBase
         string? Name = null,
         string? Model = null,
         string? Manufacturer = null,
-        string? Room = null);
+        string? Room = null,
+        string? DisplayAs = null,
+        bool? LanControlEnabled = null,
+        bool? PushNoticeEnabled = null,
+        bool? OfflineAlertEnabled = null);
 
     [HttpPatch("{id:guid}")]
     [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
@@ -636,7 +640,11 @@ public sealed class DevicesController : ControllerBase
                 request.Manufacturer,
                 request.Room,
                 userId,
-                User.Identity?.Name),
+                User.Identity?.Name,
+                request.DisplayAs,
+                request.LanControlEnabled,
+                request.PushNoticeEnabled,
+                request.OfflineAlertEnabled),
             cancellationToken);
 
         if (result.IsFailure)

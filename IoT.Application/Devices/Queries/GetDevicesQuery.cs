@@ -64,29 +64,15 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
                 : null;
 
             var resolvedMetrics = metricsByDevice is not null && metricsByDevice.TryGetValue(d.Id, out var devMetrics) ? devMetrics : null;
-            int? channelCount = SwitchChannelCountResolver.Resolve(d, resolvedMetrics);
-            string? wifiSsid = null;
-            string? localIp = null;
-
-            if (_attributeRepository is not null)
-            {
-                var attrs = await _attributeRepository.ListByDeviceAsync(d.Id, cancellationToken);
-                foreach (var attr in attrs)
-                {
-                    if (string.Equals(attr.Key, "wifi_ssid", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(attr.Value))
-                        wifiSsid = attr.Value;
-                    else if (string.Equals(attr.Key, "local_ip", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(attr.Value))
-                        localIp = attr.Value;
-                    else if (string.Equals(attr.Key, "channel_count", StringComparison.OrdinalIgnoreCase) &&
-                             int.TryParse(attr.Value, out int attrCh) && attrCh is >= 1 and <= 16)
-                        channelCount = Math.Max(channelCount ?? 1, attrCh);
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(localIp) && _peerEndpointRegistry is not null)
-            {
-                localIp = _peerEndpointRegistry.GetPeerIpByChipId(d.ChipId);
-            }
+            int? baseChannelCount = SwitchChannelCountResolver.Resolve(d, resolvedMetrics);
+            var attrs = _attributeRepository is not null
+                ? await _attributeRepository.ListByDeviceAsync(d.Id, cancellationToken)
+                : null;
+            var projected = DeviceAttributeProjection.Resolve(
+                d,
+                attrs,
+                baseChannelCount,
+                _peerEndpointRegistry?.GetPeerIpByChipId(d.ChipId));
 
             list.Add(new DeviceDto(
                 d.Id,
@@ -105,10 +91,16 @@ public sealed class GetDevicesQueryHandler : IRequestHandler<GetDevicesQuery, Re
                 d.CustomerId,
                 customerName,
                 resolvedMetrics,
-                d.FirmwareVersion,
-                channelCount,
-                wifiSsid,
-                localIp));
+                projected.FirmwareVersion,
+                projected.ChannelCount,
+                projected.WifiSsid,
+                projected.LocalIp,
+                projected.Room,
+                projected.DisplayAs,
+                projected.LanControlEnabled,
+                projected.PushNoticeEnabled,
+                projected.OfflineAlertEnabled,
+                projected.DeviceSettings));
         }
 
         return Result<IReadOnlyList<DeviceDto>>.Success(list);

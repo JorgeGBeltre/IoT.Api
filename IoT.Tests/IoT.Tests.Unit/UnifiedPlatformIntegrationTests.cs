@@ -2,6 +2,7 @@ using FluentAssertions;
 using IoT.Application.Auth.Commands;
 using IoT.Application.Common.Interfaces;
 using IoT.Application.Devices.Commands;
+using IoT.Application.Devices.Queries;
 using IoT.Domain.Entities;
 using IoT.Domain.Enums;
 using IoT.Domain.Repositories;
@@ -204,6 +205,101 @@ public sealed class UnifiedPlatformIntegrationTests
         validDelete.IsSuccess.Should().BeTrue();
         devices.Verify(r => r.Delete(device), Times.Once);
         revoker.Verify(r => r.RevokeSessionAsync("ESP32-AA11BB", It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task UpdateDevice_And_GetDeviceById_ProjectDisplayAs_Room_AlertFlags_And_HardwareSettings()
+    {
+        var device = Device.Create(T1, "ESP32-BB22CC", "AA:BB:CC:DD:EE:02", "Clima Sala", "Relay-WiFi-1CH", "IoT Platform").Value;
+
+        var storedAttrs = new List<DeviceAttribute>
+        {
+            DeviceAttribute.Create(T1, device.Id, AttributeScope.Client, "firmware_version", "v0.0.11").Value,
+            DeviceAttribute.Create(T1, device.Id, AttributeScope.Client, "startup", "stay").Value,
+            DeviceAttribute.Create(T1, device.Id, AttributeScope.Client, "pulse", "on").Value,
+            DeviceAttribute.Create(T1, device.Id, AttributeScope.Client, "pulseWidth", "1500").Value,
+            DeviceAttribute.Create(T1, device.Id, AttributeScope.Client, "sledOnline", "off").Value,
+        };
+
+        var devices = new Mock<IDeviceRepository>();
+        devices.Setup(r => r.GetByIdAsync(device.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(device);
+
+        var customers = new Mock<ICustomerRepository>();
+        var stateCache = new Mock<IStateCacheService>();
+        var attrs = new Mock<IDeviceAttributeRepository>();
+        attrs.Setup(a => a.UpsertAsync(
+                It.IsAny<Guid>(),
+                device.Id,
+                It.IsAny<AttributeScope>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Guid tid, Guid did, AttributeScope scope, string key, string val, CancellationToken _) =>
+            {
+                storedAttrs.RemoveAll(x => x.Scope == scope && string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase));
+                var created = DeviceAttribute.Create(tid, did, scope, key, val).Value;
+                storedAttrs.Add(created);
+                return created;
+            });
+        attrs.Setup(a => a.ListByDeviceAsync(device.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => storedAttrs.ToList());
+
+        var uow = new Mock<IUnitOfWork>();
+        var updateHandler = new UpdateDeviceCommandHandler(
+            devices.Object,
+            uow.Object,
+            customerRepository: customers.Object,
+            attributeRepository: attrs.Object,
+            stateCache: stateCache.Object);
+
+        // Rechaza valores fuera del catálogo permitido de DisplayAs.
+        var invalidDisplay = await updateHandler.Handle(
+            new UpdateDeviceCommand(T1, device.Id, DisplayAs: "unsupported_appliance"),
+            CancellationToken.None);
+        invalidDisplay.IsFailure.Should().BeTrue();
+        invalidDisplay.Error.Code.Should().Be("Device.InvalidDisplayAs");
+
+        // Persiste DisplayAs, Room y banderas de control LAN / notificaciones / alerta offline.
+        var updated = await updateHandler.Handle(
+            new UpdateDeviceCommand(
+                T1,
+                device.Id,
+                Name: "Aire Principal",
+                Room: "Sala Principal",
+                DisplayAs: "air_conditioner",
+                LanControlEnabled: false,
+                PushNoticeEnabled: true,
+                OfflineAlertEnabled: false),
+            CancellationToken.None);
+
+        updated.IsSuccess.Should().BeTrue();
+        updated.Value.Name.Should().Be("Aire Principal");
+        updated.Value.Room.Should().Be("Sala Principal");
+        updated.Value.DisplayAs.Should().Be("air_conditioner");
+        updated.Value.LanControlEnabled.Should().BeFalse();
+        updated.Value.PushNoticeEnabled.Should().BeTrue();
+        updated.Value.OfflineAlertEnabled.Should().BeFalse();
+        updated.Value.FirmwareVersion.Should().Be("v0.0.11");
+        updated.Value.DeviceSettings.Should().NotBeNull();
+        updated.Value.DeviceSettings!["startup"].Should().Be("stay");
+        updated.Value.DeviceSettings!["pulse"].Should().Be("on");
+        updated.Value.DeviceSettings!["pulseWidth"].Should().Be("1500");
+        updated.Value.DeviceSettings!["sledOnline"].Should().Be("off");
+
+        // GetDeviceByIdQuery proyecta exactamente el mismo contrato hidratado.
+        var queryHandler = new GetDeviceByIdQueryHandler(
+            devices.Object,
+            customers.Object,
+            stateCache.Object,
+            attributeRepository: attrs.Object);
+        var fetched = await queryHandler.Handle(new GetDeviceByIdQuery(T1, device.Id), CancellationToken.None);
+        fetched.IsSuccess.Should().BeTrue();
+        fetched.Value.Room.Should().Be("Sala Principal");
+        fetched.Value.DisplayAs.Should().Be("air_conditioner");
+        fetched.Value.LanControlEnabled.Should().BeFalse();
+        fetched.Value.OfflineAlertEnabled.Should().BeFalse();
+        fetched.Value.FirmwareVersion.Should().Be("v0.0.11");
     }
 }
 

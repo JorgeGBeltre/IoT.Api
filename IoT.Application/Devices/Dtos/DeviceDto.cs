@@ -34,7 +34,9 @@ public sealed record DeviceDto(
     bool LanControlEnabled = true,
     bool PushNoticeEnabled = true,
     bool OfflineAlertEnabled = true,
-    IReadOnlyDictionary<string, string>? DeviceSettings = null);
+    IReadOnlyDictionary<string, string>? DeviceSettings = null,
+    string TempUnit = "C",
+    string? FwName = null);
 
 public static class DeviceDisplayAsCatalog
 {
@@ -77,7 +79,9 @@ public sealed record ResolvedDeviceAttributes(
     bool LanControlEnabled,
     bool PushNoticeEnabled,
     bool OfflineAlertEnabled,
-    IReadOnlyDictionary<string, string>? DeviceSettings);
+    IReadOnlyDictionary<string, string>? DeviceSettings,
+    string TempUnit = "C",
+    string? FwName = null);
 
 public static class DeviceAttributeProjection
 {
@@ -86,8 +90,43 @@ public static class DeviceAttributeProjection
         "startup",
         "pulse",
         "pulseWidth",
-        "sledOnline"
+        "sledOnline",
+        "fwName"
     };
+
+    public static string SanitizeManufacturer(string? rawManufacturer)
+    {
+        if (string.IsNullOrWhiteSpace(rawManufacturer))
+            return "Vesis";
+        string trimmed = rawManufacturer.Trim();
+        string lower = trimmed.ToLowerInvariant();
+        if (lower.StartsWith("son", StringComparison.Ordinal) ||
+            lower.StartsWith("ewe", StringComparison.Ordinal) ||
+            lower.StartsWith("cool", StringComparison.Ordinal) ||
+            lower.StartsWith("ite", StringComparison.Ordinal) ||
+            lower.StartsWith("ckn", StringComparison.Ordinal))
+        {
+            return "Vesis";
+        }
+        return trimmed;
+    }
+
+    public static bool TryNormalizeTempUnit(string? raw, out string normalized)
+    {
+        string clean = (raw ?? string.Empty).Trim().Replace("°", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
+        if (clean is "F" or "FAHRENHEIT")
+        {
+            normalized = "F";
+            return true;
+        }
+        if (clean is "C" or "CELSIUS")
+        {
+            normalized = "C";
+            return true;
+        }
+        normalized = "C";
+        return false;
+    }
 
     public static ResolvedDeviceAttributes Resolve(
         Device device,
@@ -104,6 +143,8 @@ public static class DeviceAttributeProjection
         bool lanControlEnabled = true;
         bool pushNoticeEnabled = true;
         bool offlineAlertEnabled = true;
+        string tempUnit = "C";
+        string? fwName = null;
         Dictionary<string, string>? settings = null;
 
         if (attributes is not null)
@@ -132,6 +173,17 @@ public static class DeviceAttributeProjection
                          string.IsNullOrWhiteSpace(firmwareVersion))
                 {
                     firmwareVersion = cleanVal;
+                }
+                else if (string.Equals(attr.Key, "fw_name", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(attr.Key, "fwName", StringComparison.OrdinalIgnoreCase))
+                {
+                    fwName = cleanVal;
+                }
+                else if (attr.Scope == AttributeScope.Shared &&
+                         string.Equals(attr.Key, "temp_unit", StringComparison.OrdinalIgnoreCase) &&
+                         TryNormalizeTempUnit(cleanVal, out string normTemp))
+                {
+                    tempUnit = normTemp;
                 }
                 else if (attr.Scope == AttributeScope.Shared &&
                          string.Equals(attr.Key, "room", StringComparison.OrdinalIgnoreCase))
@@ -179,6 +231,14 @@ public static class DeviceAttributeProjection
             localIp = fallbackPeerIp.Trim();
         }
 
+        if (string.IsNullOrWhiteSpace(fwName))
+        {
+            string modelClean = string.IsNullOrWhiteSpace(device.Model)
+                ? "IOT-ESP32"
+                : device.Model.Trim().ToUpperInvariant().Replace(' ', '-');
+            fwName = $"{modelClean}-MQTT5";
+        }
+
         return new ResolvedDeviceAttributes(
             firmwareVersion,
             channelCount,
@@ -189,7 +249,9 @@ public static class DeviceAttributeProjection
             lanControlEnabled,
             pushNoticeEnabled,
             offlineAlertEnabled,
-            settings);
+            settings,
+            tempUnit,
+            fwName);
     }
 
     public static string UnquoteIfJsonString(string? raw)

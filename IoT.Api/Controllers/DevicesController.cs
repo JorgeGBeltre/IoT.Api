@@ -618,7 +618,8 @@ public sealed class DevicesController : ControllerBase
         string? DisplayAs = null,
         bool? LanControlEnabled = null,
         bool? PushNoticeEnabled = null,
-        bool? OfflineAlertEnabled = null);
+        bool? OfflineAlertEnabled = null,
+        string? TempUnit = null);
 
     [HttpPatch("{id:guid}")]
     [Authorize(Policy = AuthorizationPolicies.DeviceManage)]
@@ -644,7 +645,8 @@ public sealed class DevicesController : ControllerBase
                 request.DisplayAs,
                 request.LanControlEnabled,
                 request.PushNoticeEnabled,
-                request.OfflineAlertEnabled),
+                request.OfflineAlertEnabled,
+                request.TempUnit),
             cancellationToken);
 
         if (result.IsFailure)

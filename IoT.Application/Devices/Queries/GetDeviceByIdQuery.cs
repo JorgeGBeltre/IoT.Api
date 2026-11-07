@@ -80,7 +80,7 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
             d.MacAddress,
             d.Name,
             d.Model,
-            d.Manufacturer,
+            DeviceAttributeProjection.SanitizeManufacturer(d.Manufacturer),
             d.AdminStatus.ToString(),
             d.OperationalStatus.ToString(),
             d.LastCommunicationAt ?? d.LastTelemetryAt,
@@ -99,7 +99,9 @@ public sealed class GetDeviceByIdQueryHandler : IRequestHandler<GetDeviceByIdQue
             projected.LanControlEnabled,
             projected.PushNoticeEnabled,
             projected.OfflineAlertEnabled,
-            projected.DeviceSettings);
+            projected.DeviceSettings,
+            projected.TempUnit,
+            projected.FwName);
 
         return Result<DeviceDto>.Success(dto);
     }

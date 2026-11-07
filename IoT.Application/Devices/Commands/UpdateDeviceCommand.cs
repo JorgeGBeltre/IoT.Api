@@ -21,7 +21,8 @@ public sealed record UpdateDeviceCommand(
     string? DisplayAs = null,
     bool? LanControlEnabled = null,
     bool? PushNoticeEnabled = null,
-    bool? OfflineAlertEnabled = null) : IRequest<Result<DeviceDto>>;
+    bool? OfflineAlertEnabled = null,
+    string? TempUnit = null) : IRequest<Result<DeviceDto>>;
 
 public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCommand, Result<DeviceDto>>
 {
@@ -160,6 +161,18 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
                     offlineAlert ? "true" : "false",
                     cancellationToken);
             }
+
+            if (!string.IsNullOrWhiteSpace(request.TempUnit) &&
+                DeviceAttributeProjection.TryNormalizeTempUnit(request.TempUnit, out string normTempUnit))
+            {
+                await _attributeRepository.UpsertAsync(
+                    device.TenantId,
+                    device.Id,
+                    AttributeScope.Shared,
+                    "temp_unit",
+                    normTempUnit,
+                    cancellationToken);
+            }
         }
 
         _deviceRepository.Update(device);
@@ -217,7 +230,7 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
             device.MacAddress,
             device.Name,
             device.Model,
-            device.Manufacturer,
+            DeviceAttributeProjection.SanitizeManufacturer(device.Manufacturer),
             device.AdminStatus.ToString(),
             device.OperationalStatus.ToString(),
             device.LastCommunicationAt ?? device.LastTelemetryAt,
@@ -236,7 +249,9 @@ public sealed class UpdateDeviceCommandHandler : IRequestHandler<UpdateDeviceCom
             projected.LanControlEnabled,
             projected.PushNoticeEnabled,
             projected.OfflineAlertEnabled,
-            projected.DeviceSettings);
+            projected.DeviceSettings,
+            projected.TempUnit,
+            projected.FwName);
 
         return Result<DeviceDto>.Success(dto);
     }

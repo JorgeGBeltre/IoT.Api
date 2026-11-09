@@ -248,7 +248,8 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
     // =========================================================================
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var optionsBuilder = new MqttServerOptionsBuilder();
+        var optionsBuilder = new MqttServerOptionsBuilder()
+            .WithKeepAlive();
 
         // Endpoint en claro (1883): se mantiene por compatibilidad, salvo MQTTS-exclusivo.
         if (_tlsEnabled && _disablePlaintext)
@@ -726,6 +727,18 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
 
         if (string.IsNullOrWhiteSpace(chipId))
             chipId = e.ClientId;
+
+        // Mitigación CVE-2020-13849 (SlowITe / agotamiento de sesiones por Keep-Alive excesivo
+        // en MQTT 3.1.1 y MQTT 5.0): se rechazan valores de Keep-Alive superiores a 600 s y el
+        // monitor WithKeepAlive() del broker cierra conexiones inactivas tras 1.5x el periodo.
+        if (e.KeepAlivePeriod > 600)
+        {
+            _logger.LogWarning(
+                "Conexión rechazada ({ClientId}): KeepAlivePeriod={KeepAlive}s excede el máximo permitido (600s).",
+                e.ClientId, e.KeepAlivePeriod);
+            e.ReasonCode = MqttConnectReasonCode.QuotaExceeded;
+            return;
+        }
 
         // Todas las escrituras de estado por sesión usan el patrón SET-O-REMOVE INCONDICIONAL
         // en las DOS ramas, porque el ClientId se reutiliza por diseño (ClientId == ChipId ==

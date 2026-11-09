@@ -82,16 +82,18 @@ public static class MqttTopicAcl
     /// </summary>
     public static string? DeviceIdOf(string topic)
     {
-        if (string.IsNullOrWhiteSpace(topic)) return null;
+        if (string.IsNullOrWhiteSpace(topic) || topic.Contains('\0') || topic.Contains("..", StringComparison.Ordinal))
+            return null;
 
         var parts = topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2) return null;
         if (!DeviceScopedPrefixes.Contains(parts[0], StringComparer.OrdinalIgnoreCase)) return null;
 
-        // glp/<sub>/<id>: el identificador va en el tercer segmento.
+        // glp/<sub>/<id>: el identificador va en el tercer segmento (el sub-canal no puede ser comodín).
         if (parts[0].Equals("glp", StringComparison.OrdinalIgnoreCase))
         {
-            return parts.Length >= 3 ? parts[2] : null;
+            if (parts.Length < 3 || parts[1] is "+" or "#") return null;
+            return parts[2];
         }
 
         return parts[1];
@@ -173,7 +175,8 @@ public static class MqttTopicAcl
     /// </param>
     public static Decision CanSubscribe(string topic, string? authenticatedChipId, bool isBootstrapCredential = false)
     {
-        if (string.IsNullOrWhiteSpace(topic)) return Decision.Deny;
+        if (string.IsNullOrWhiteSpace(topic) || topic.Contains('\0') || topic.Contains("..", StringComparison.Ordinal))
+            return Decision.Deny;
 
         // Cualquier comodín que no esté acotado BAJO el propio identificador se rechaza.
         // Un simple "#" abarca todo el broker, incluidos los canales de firmware de todos
@@ -181,6 +184,19 @@ public static class MqttTopicAcl
         // exige coincidencia exacta de cadena), así que esto no les quita nada.
         if (topic.Contains('#') || topic.Contains('+'))
         {
+            // [MQTT-4.7.1-2] y CVE-2024-31041 / CVE-2026-85724: '#' sólo es válido al final tras '/',
+            // y '+' debe ocupar un segmento completo.
+            int hashIdx = topic.IndexOf('#');
+            if (hashIdx >= 0 && (hashIdx != topic.Length - 1 || hashIdx == 0 || topic[hashIdx - 1] != '/'))
+                return Decision.Deny;
+
+            var filterParts = topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var seg in filterParts)
+            {
+                if ((seg.Contains('+') && seg != "+") || (seg.Contains('#') && seg != "#"))
+                    return Decision.Deny;
+            }
+
             string? wildcardOwner = DeviceIdOf(topic);
             bool ownedWildcard =
                 wildcardOwner is not null &&
@@ -215,7 +231,14 @@ public static class MqttTopicAcl
         string? authenticatedChipId,
         bool isBootstrapCredential = false)
     {
-        if (string.IsNullOrWhiteSpace(topic)) return Decision.Deny;
+        if (string.IsNullOrWhiteSpace(topic) ||
+            topic.Contains('\0') ||
+            topic.Contains("..", StringComparison.Ordinal) ||
+            topic.Contains('#') ||
+            topic.Contains('+'))
+        {
+            return Decision.Deny;
+        }
 
         // El servidor publica donde necesite: es quien envía firmware y comandos.
         // El privilegio NO se deduce del ClientId —lo elige quien conecta— sino de que la

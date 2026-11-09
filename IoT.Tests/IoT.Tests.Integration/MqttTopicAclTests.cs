@@ -412,4 +412,17 @@ public class MqttTopicAclTests
         // anuncian igual en el tópico.
         MqttTopicAcl.CanSubscribe("ota/a1b2c3d4e5f6", Mine).Should().Be(MqttTopicAcl.Decision.Allow);
     }
+
+    [Theory]
+    [InlineData("glp/+/A1B2C3D4E5F6")]
+    [InlineData("glp/#/A1B2C3D4E5F6")]
+    [InlineData("devices/A1B2C3D4E5F6/#extra")]
+    [InlineData("devices/A1B2C3D4E5F6/+/../FFEEDDCCBBAA")]
+    [InlineData("devices/A1B2C3D4E5F6\0/FFEEDDCCBBAA")]
+    [InlineData("devices/A1B2C3D4E5F6/telem+etry")]
+    public void RejectsMalformedWildcardsNullBytesAndTraversalTopics(string topic)
+    {
+        MqttTopicAcl.CanSubscribe(topic, Mine).Should().Be(MqttTopicAcl.Decision.Deny);
+        MqttTopicAcl.CanPublish(topic, isServerOrigin: false, Mine).Should().Be(MqttTopicAcl.Decision.Deny);
+    }
 }

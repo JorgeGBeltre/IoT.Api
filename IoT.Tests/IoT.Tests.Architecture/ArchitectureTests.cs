@@ -57,7 +57,9 @@ public class ArchitectureTests
     [Fact]
     public void Application_ShouldNotDependOnInfrastructureOrApi()
     {
-        var assembly = typeof(IoT.Domain.Common.Entity<>).Assembly; // will check application assembly once types are added
+        // Debe inspeccionar el ensamblado de APPLICATION (no el de Domain): antes
+        // apuntaba a Domain y el test pasaba de forma trivial sin validar la capa.
+        var assembly = typeof(IoT.Application.DependencyInjection).Assembly;
 
         var forbiddenLayers = new[]
         {

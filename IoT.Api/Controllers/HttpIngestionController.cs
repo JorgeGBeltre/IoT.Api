@@ -20,8 +20,9 @@ namespace IoT.Api.Controllers;
 /// plataforma sólo acepta tramas de dispositivos REGISTRADOS (por IMEI/ChipId). Un equipo
 /// no registrado es rechazado por el pipeline (Ingestion.DeviceNotProvisioned). Por eso los
 /// endpoints de dispositivo son [AllowAnonymous] (no exigen JWT), pero la identidad se valida
-/// contra el provisioning. (Spoofing por ChipId es inherente a estos trackers HTTP "tontos";
-/// si se requiere, se puede añadir después un token por dispositivo.)
+/// contra el provisioning. (Spoofing por ChipId es inherente a los trackers HTTP "tontos" sin
+/// credencial; los dispositivos que SÍ tienen ApiKey per-device deben presentarla y se verifica
+/// en todos los endpoints, incluido /ingest.)
 /// </summary>
 [AllowAnonymous]
 [EnableRateLimiting("DeviceIngest")]
@@ -75,8 +76,12 @@ public sealed class HttpIngestionController : ControllerBase
             }
         }
 
-        // Si se requiere clave o se envió una clave en cabecera, validarla si podemos identificar el dispositivo
-        if ((requireKey || !string.IsNullOrWhiteSpace(providedKey)) && _apiKeyService != null)
+        // Identidad del dispositivo: si el equipo tiene credencial per-device, la ingesta SIEMPRE
+        // debe presentarla y verificarla (consistente con poll-commands/attributes), aunque no se
+        // exija clave globalmente. Cierra el hueco de suplantación por ChipId para dispositivos que
+        // SÍ pueden autenticarse; los trackers "tontos" sin ApiKey siguen aceptándose por ChipId
+        // (modelo de adopción confirmado por el dueño) salvo que HttpIngestion:RequireDeviceKey lo exija.
+        if (_apiKeyService != null)
         {
             string? chipId = null;
             if (payload.TryGetProperty("chipId", out var c1)) chipId = c1.GetString();

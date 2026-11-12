@@ -224,6 +224,86 @@ public class HttpIngestionSecurityTests
     }
 
     [Fact]
+    public async Task IngestTelemetry_WhenDeviceHasApiKey_AndNoKeyProvided_ReturnsUnauthorized()
+    {
+        // Arrange — dispositivo con credencial per-device pero el emisor NO envía clave.
+        // Antes del endurecimiento, /ingest aceptaba la trama (suplantación por ChipId); ahora la exige.
+        var tenantId = Guid.NewGuid();
+        var device = Device.Create(tenantId, "HTTP-DEV06", "00:11:22:33:44:60", "Test Device 6", "ESP32", "Generic").Value;
+        device.SetMqttApiKey("hashed_key_xyz", "fp_123", "admin");
+
+        _deviceRepoMock.Setup(r => r.GetByChipIdGlobalAsync("HTTP-DEV06", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(device);
+
+        var controller = new HttpIngestionController(
+            _mediatorMock.Object,
+            _httpTransport,
+            _deviceRepoMock.Object,
+            _config,
+            _loggerMock.Object,
+            _apiKeyServiceMock.Object);
+
+        // Sin cabecera X-Device-Key ni Authorization
+        controller.ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() };
+
+        string json = """
+        {
+          "chipId": "HTTP-DEV06",
+          "temperature": 24.5
+        }
+        """;
+        using var doc = JsonDocument.Parse(json);
+
+        // Act
+        var result = await controller.IngestTelemetry("devices/HTTP-DEV06/telemetry", doc.RootElement, CancellationToken.None);
+
+        // Assert
+        result.Should().BeOfType<UnauthorizedObjectResult>();
+        _mediatorMock.Verify(m => m.Send(It.IsAny<IngestTelemetryCommand>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task IngestTelemetry_WhenDeviceHasNoApiKey_AndNoKeyProvided_IsAcceptedByChipId()
+    {
+        // Arrange — tracker "tonto" sin credencial: el modelo de adopción lo acepta por ChipId.
+        // Verifica que el endurecimiento NO rompe el camino de dispositivos sin ApiKey.
+        var tenantId = Guid.NewGuid();
+        var device = Device.Create(tenantId, "HTTP-DUMB01", "00:11:22:33:44:61", "Dumb Tracker", "GPS", "Generic").Value;
+        // NO SetMqttApiKey → HasMqttApiKey == false
+
+        _deviceRepoMock.Setup(r => r.GetByChipIdGlobalAsync("HTTP-DUMB01", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(device);
+
+        _mediatorMock.Setup(m => m.Send(It.IsAny<IngestTelemetryCommand>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Result.Success());
+
+        var controller = new HttpIngestionController(
+            _mediatorMock.Object,
+            _httpTransport,
+            _deviceRepoMock.Object,
+            _config,
+            _loggerMock.Object,
+            _apiKeyServiceMock.Object);
+
+        controller.ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() };
+
+        string json = """
+        {
+          "chipId": "HTTP-DUMB01",
+          "lat": 18.5
+        }
+        """;
+        using var doc = JsonDocument.Parse(json);
+
+        // Act
+        var result = await controller.IngestTelemetry("devices/HTTP-DUMB01/telemetry", doc.RootElement, CancellationToken.None);
+
+        // Assert — aceptado (no roto por el endurecimiento)
+        result.Should().BeOfType<OkObjectResult>();
+        _mediatorMock.Verify(m => m.Send(It.IsAny<IngestTelemetryCommand>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
     public async Task GetDeviceAttributes_WhenDeviceNotFound_ReturnsNotFound()
     {
         // Arrange

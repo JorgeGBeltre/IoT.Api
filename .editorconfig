@@ -1,0 +1,28 @@
+# EditorConfig para la solución IoT.Api — consistencia de formato entre editores.
+# Las reglas de estilo son guía de IDE (EnforceCodeStyleInBuild=false en Directory.Build.props),
+# no rompen la compilación.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.cs]
+indent_size = 4
+# Convenciones básicas de C#
+csharp_new_line_before_open_brace = all
+csharp_prefer_braces = true:suggestion
+dotnet_sort_system_directives_first = true
+dotnet_style_namespace_match_folder = true:suggestion
+# 'var' sólo cuando el tipo es aparente (coincide con el estilo del repo)
+csharp_style_var_when_type_is_apparent = true:suggestion
+
+[*.{json,yml,yaml,csproj,props,targets,slnx}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false

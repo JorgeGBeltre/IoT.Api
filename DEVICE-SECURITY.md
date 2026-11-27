@@ -4,7 +4,7 @@ La plataforma recibe de los equipos por **dos canales distintos**:
 
 | Canal | Puerto(s) | Equipos | Credencial | Cifrado |
 |---|---|---|---|---|
-| **MQTT** (broker embebido) | 1883 (claro) / **8883 (MQTTS, opt-in)** | ESP32 (Relay, GLP, Fligo, Toour, OTA) | **ApiKey** por dispositivo (en el username) | TLS disponible (opt-in) |
+| **MQTT** (broker embebido) | 1883 (claro) / **8883 (MQTTS, opt-in)** | ESP32 (Relay, GLP, Toour, OTA) | **ApiKey** por dispositivo (en el username) | TLS disponible (opt-in) |
 | **Gateway TCP binario** | 5023/5024/5027/5013/5001/5002 | Trackers GPS (GT06/SEEWORLD R12L-F, Mictrack, Queclink, Coban, iStartek, Jointech) | **IMEI** (en la trama de login) | No factible → aislamiento de red |
 
 Por defecto ambos van **en claro**. Este documento explica cómo cifrar el canal MQTT (MQTTS) y

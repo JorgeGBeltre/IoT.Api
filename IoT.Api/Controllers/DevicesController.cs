@@ -523,8 +523,20 @@ public sealed class DevicesController : ControllerBase
             return BadRequest(new { error = $"Ámbito de atributo inválido: '{scope}'. Use 'shared' o 'server'." });
         }
 
+        var safeAttributes = attributes ?? new Dictionary<string, string?>();
+        if (parsedScope == IoT.Domain.Enums.AttributeScope.Shared
+            && SetDeviceAttributesCommandHandler.ContainsActuationAttribute(safeAttributes)
+            && HttpContext?.RequestServices?.GetService<IAuthorizationService>() is { } authz)
+        {
+            var authResult = await authz.AuthorizeAsync(User, null, AuthorizationPolicies.DeviceCommand);
+            if (!authResult.Succeeded)
+            {
+                return Forbid();
+            }
+        }
+
         var result = await _mediator.Send(
-            new SetDeviceAttributesCommand(id, parsedScope, attributes ?? new Dictionary<string, string?>()),
+            new SetDeviceAttributesCommand(id, parsedScope, safeAttributes),
             cancellationToken);
 
         return result.IsSuccess ? NoContent() : MapAttributeFailure(result.Error);

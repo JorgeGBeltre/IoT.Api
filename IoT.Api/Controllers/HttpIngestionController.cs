@@ -65,49 +65,10 @@ public sealed class HttpIngestionController : ControllerBase
         string topicOrRoute = string.IsNullOrWhiteSpace(topic) ? "telemetry" : topic;
         string rawPayload = payload.GetRawText();
 
-        bool requireKey = _configuration.GetValue<bool>("HttpIngestion:RequireDeviceKey", false);
-        string? providedKey = Request.Headers["X-Device-Key"].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(providedKey) && Request.Headers.TryGetValue("Authorization", out var authHeader))
+        var authFailure = await ValidateHttpDeviceCredentialsAsync(topicOrRoute, payload, cancellationToken);
+        if (authFailure is not null)
         {
-            var authStr = authHeader.ToString();
-            if (authStr.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-            {
-                providedKey = authStr.Substring(7).Trim();
-            }
-        }
-
-        // Identidad del dispositivo: si el equipo tiene credencial per-device, la ingesta SIEMPRE
-        // debe presentarla y verificarla (consistente con poll-commands/attributes), aunque no se
-        // exija clave globalmente. Cierra el hueco de suplantación por ChipId para dispositivos que
-        // SÍ pueden autenticarse; los trackers "tontos" sin ApiKey siguen aceptándose por ChipId
-        // (modelo de adopción confirmado por el dueño) salvo que HttpIngestion:RequireDeviceKey lo exija.
-        if (_apiKeyService != null)
-        {
-            string? chipId = null;
-            if (payload.TryGetProperty("chipId", out var c1)) chipId = c1.GetString();
-            else if (payload.TryGetProperty("imei", out var c2)) chipId = c2.GetString();
-            else if (payload.TryGetProperty("Device", out var dElem) && dElem.TryGetProperty("ChipId", out var c3)) chipId = c3.GetString();
-
-            if (!string.IsNullOrWhiteSpace(chipId))
-            {
-                var device = await _deviceRepository.GetByChipIdGlobalAsync(chipId, cancellationToken);
-                if (device != null && device.HasMqttApiKey)
-                {
-                    if (string.IsNullOrWhiteSpace(providedKey) || !_apiKeyService.Verify(providedKey, device.MqttApiKeyHash!))
-                    {
-                        _logger.LogWarning("Ingesta HTTP rechazada para '{ChipId}': ApiKey no autorizada o ausente.", chipId);
-                        return Unauthorized(new { error = "Invalid or missing device API key." });
-                    }
-                }
-                else if (requireKey)
-                {
-                    return Unauthorized(new { error = "Device API key is required." });
-                }
-            }
-            else if (requireKey)
-            {
-                return Unauthorized(new { error = "Device identity and API key are required." });
-            }
+            return authFailure;
         }
 
         var command = new IngestTelemetryCommand(topicOrRoute, rawPayload, Source: "http");
@@ -125,6 +86,7 @@ public sealed class HttpIngestionController : ControllerBase
     [HttpPost("webhook/{source}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> IngestWebhook(
         string source,
         [FromQuery] string? route,
@@ -133,6 +95,12 @@ public sealed class HttpIngestionController : ControllerBase
     {
         string topicOrRoute = !string.IsNullOrWhiteSpace(route) ? route : $"webhook/{source}";
         string rawPayload = payload.GetRawText();
+
+        var authFailure = await ValidateHttpDeviceCredentialsAsync(topicOrRoute, payload, cancellationToken);
+        if (authFailure is not null)
+        {
+            return authFailure;
+        }
 
         var command = new IngestTelemetryCommand(topicOrRoute, rawPayload, Source: $"webhook:{source}");
         var result = await _mediator.Send(command, cancellationToken);
@@ -144,6 +112,113 @@ public sealed class HttpIngestionController : ControllerBase
         }
 
         return Ok(new { status = "Accepted", source, route = topicOrRoute });
+    }
+
+    private async Task<IActionResult?> ValidateHttpDeviceCredentialsAsync(
+        string topicOrRoute,
+        JsonElement payload,
+        CancellationToken cancellationToken)
+    {
+        if (_apiKeyService is null)
+        {
+            return null;
+        }
+
+        bool requireKey = _configuration.GetValue<bool>("HttpIngestion:RequireDeviceKey", false);
+        string? providedKey = Request.Headers["X-Device-Key"].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(providedKey) && Request.Headers.TryGetValue("Authorization", out var authHeader))
+        {
+            var authStr = authHeader.ToString();
+            if (authStr.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
+                providedKey = authStr.Substring(7).Trim();
+            }
+        }
+
+        string? chipId = ExtractCanonicalChipId(topicOrRoute, payload);
+        if (!string.IsNullOrWhiteSpace(chipId))
+        {
+            var device = await _deviceRepository.GetByChipIdGlobalAsync(chipId, cancellationToken);
+            if (device != null && device.HasMqttApiKey)
+            {
+                if (string.IsNullOrWhiteSpace(providedKey) || !_apiKeyService.Verify(providedKey, device.MqttApiKeyHash!))
+                {
+                    _logger.LogWarning("Ingesta HTTP rechazada para '{ChipId}': ApiKey no autorizada o ausente.", chipId);
+                    return Unauthorized(new { error = "Invalid or missing device API key." });
+                }
+            }
+            else if (requireKey)
+            {
+                return Unauthorized(new { error = "Device API key is required." });
+            }
+        }
+        else if (requireKey)
+        {
+            return Unauthorized(new { error = "Device identity and API key are required." });
+        }
+
+        return null;
+    }
+
+    private static string? ExtractCanonicalChipId(string topicOrRoute, JsonElement payload)
+    {
+        if (payload.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in payload.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.String &&
+                    (prop.Name.Equals("chipId", StringComparison.OrdinalIgnoreCase) ||
+                     prop.Name.Equals("chip_id", StringComparison.OrdinalIgnoreCase) ||
+                     prop.Name.Equals("imei", StringComparison.OrdinalIgnoreCase) ||
+                     prop.Name.Equals("deviceId", StringComparison.OrdinalIgnoreCase) ||
+                     prop.Name.Equals("device_id", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var val = prop.Value.GetString();
+                    if (!string.IsNullOrWhiteSpace(val)) return val.Trim();
+                }
+
+                if (prop.Value.ValueKind == JsonValueKind.Object &&
+                    prop.Name.Equals("device", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var nested in prop.Value.EnumerateObject())
+                    {
+                        if (nested.Value.ValueKind == JsonValueKind.String &&
+                            (nested.Name.Equals("chipId", StringComparison.OrdinalIgnoreCase) ||
+                             nested.Name.Equals("imei", StringComparison.OrdinalIgnoreCase) ||
+                             nested.Name.Equals("id", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var val = nested.Value.GetString();
+                            if (!string.IsNullOrWhiteSpace(val)) return val.Trim();
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(topicOrRoute))
+        {
+            var segments = topicOrRoute.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < segments.Length - 1; i++)
+            {
+                if (segments[i].Equals("devices", StringComparison.OrdinalIgnoreCase) ||
+                    segments[i].Equals("telemetry", StringComparison.OrdinalIgnoreCase) ||
+                    segments[i].Equals("event", StringComparison.OrdinalIgnoreCase) ||
+                    segments[i].Equals("events", StringComparison.OrdinalIgnoreCase) ||
+                    segments[i].Equals("ota", StringComparison.OrdinalIgnoreCase) ||
+                    segments[i].Equals("commands", StringComparison.OrdinalIgnoreCase))
+                {
+                    var candidate = segments[i + 1];
+                    if (!candidate.Equals("telemetry", StringComparison.OrdinalIgnoreCase) &&
+                        !candidate.Equals("ingest", StringComparison.OrdinalIgnoreCase) &&
+                        !candidate.Equals("webhook", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     [HttpGet("/api/v1/devices/{chipId}/poll-commands")]

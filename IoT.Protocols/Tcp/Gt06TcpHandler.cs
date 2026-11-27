@@ -292,7 +292,16 @@ public class Gt06TcpHandler : ITcpProtocolHandler
 
     public byte[]? BuildCommand(string commandText, ushort serial)
     {
+        if (string.IsNullOrWhiteSpace(commandText))
+        {
+            return null;
+        }
+
         byte[] contentBytes = Encoding.ASCII.GetBytes(commandText);
+        if (contentBytes.Length > 240)
+        {
+            return null;
+        }
 
         // Comando servidor 0x80. El tráfico REAL del equipo (apéndice B del spec R12L-F,
         // CRC-ITU verificado) NO lleva campo Language: el contenido va

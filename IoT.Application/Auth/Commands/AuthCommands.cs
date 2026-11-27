@@ -729,3 +729,105 @@ public sealed class LogoutCommandHandler : IRequestHandler<LogoutCommand, Result
         return Result.Success();
     }
 }
+
+public sealed record ChangePasswordCommand(
+    Guid UserId,
+    Guid TenantId,
+    string CurrentPassword,
+    string NewPassword,
+    string? IpAddress = null,
+    string? UserAgent = null) : IRequest<Result>;
+
+public sealed class ChangePasswordCommandHandler : IRequestHandler<ChangePasswordCommand, Result>
+{
+    private readonly IUserRepository _userRepository;
+    private readonly IPasswordHasher _passwordHasher;
+    private readonly IAuditLogRepository _auditLogRepository;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly ITenantContext? _tenantContext;
+
+    public ChangePasswordCommandHandler(
+        IUserRepository userRepository,
+        IPasswordHasher passwordHasher,
+        IAuditLogRepository auditLogRepository,
+        IUnitOfWork unitOfWork,
+        ITenantContext? tenantContext = null)
+    {
+        _userRepository = userRepository;
+        _passwordHasher = passwordHasher;
+        _auditLogRepository = auditLogRepository;
+        _unitOfWork = unitOfWork;
+        _tenantContext = tenantContext;
+    }
+
+    public async Task<Result> Handle(ChangePasswordCommand request, CancellationToken cancellationToken)
+    {
+        if (request.UserId == Guid.Empty || request.TenantId == Guid.Empty)
+        {
+            return Result.Failure(new Error("Auth.Unauthorized", "Sesión inválida."));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.CurrentPassword) || string.IsNullOrWhiteSpace(request.NewPassword))
+        {
+            return Result.Failure(new Error("Auth.InvalidInput", "Debe proporcionar la contraseña actual y la nueva contraseña."));
+        }
+
+        using var _ = IoT.Application.Common.Interfaces.TenantContextExtensions.BeginSystemOperationIfPresent(_tenantContext);
+        var user = await _userRepository.GetByIdSystemAsync(request.TenantId, request.UserId, cancellationToken)
+            ?? await _userRepository.GetByIdAsync(request.UserId, cancellationToken);
+
+        if (user is null || !user.IsActive || user.TenantId != request.TenantId)
+        {
+            return Result.Failure(new Error("Auth.InvalidCredentials", "Usuario no encontrado o inactivo."));
+        }
+
+        if (user.IsLockedOut)
+        {
+            return Result.Failure(new Error("Auth.LockedOut", "La cuenta está bloqueada temporalmente por intentos fallidos."));
+        }
+
+        if (!_passwordHasher.Verify(request.CurrentPassword, user.PasswordHash))
+        {
+            user.RecordFailedLogin();
+            _userRepository.Update(user);
+            await _auditLogRepository.AddAsync(new AuditLog(
+                Guid.NewGuid(),
+                user.TenantId,
+                user.Id,
+                user.Username,
+                "ChangePasswordFailed",
+                "Contraseña actual incorrecta durante cambio voluntario.",
+                request.IpAddress,
+                request.UserAgent), cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return Result.Failure(new Error("Auth.InvalidCredentials", "La contraseña actual no es válida."));
+        }
+
+        try
+        {
+            _passwordHasher.ValidateComplexity(request.NewPassword);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Result.Failure(new Error("Password.PolicyViolation", ex.Message));
+        }
+
+        string newHash = _passwordHasher.Hash(request.NewPassword);
+        user.UpdatePassword(newHash);
+        user.RotateSecurityStamp();
+        _userRepository.Update(user);
+
+        await _auditLogRepository.AddAsync(new AuditLog(
+            Guid.NewGuid(),
+            user.TenantId,
+            user.Id,
+            user.Username,
+            "ChangePassword",
+            "Contraseña actualizada exitosamente por el usuario.",
+            request.IpAddress,
+            request.UserAgent), cancellationToken);
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return Result.Success();
+    }
+}

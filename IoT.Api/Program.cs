@@ -186,16 +186,18 @@ builder.Services.AddAuthorization(options =>
         .RequireAuthenticatedUser()
         .Build();
 
-    // Escribir firmware en hardware real exige un ROL o PERMISO explícito (RBAC fino - Decisión D3).
+    // Escribir firmware en hardware real exige un ROL o PERMISO explícito a nivel raíz del tenant (RBAC fino - Decisión D3).
     var firmwareRoles = IoT.Api.Common.AuthorizationPolicies.ResolveFirmwareManageRoles(builder.Configuration);
     options.AddPolicy(
         IoT.Api.Common.AuthorizationPolicies.FirmwareManage,
         policy => policy
             .RequireAuthenticatedUser()
-            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
-                ctx.User,
-                IoT.Domain.Common.StandardPermissions.FirmwareManage,
-                firmwareRoles)));
+            .RequireAssertion(ctx =>
+                !IoT.Api.Common.AuthorizationPolicies.IsSubCustomerScoped(ctx.User) &&
+                IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
+                    ctx.User,
+                    IoT.Domain.Common.StandardPermissions.FirmwareManage,
+                    firmwareRoles)));
 
     // Enviar un comando a un dispositivo también es accionamiento físico (apagar un relé).
     var commandRoles = IoT.Api.Common.AuthorizationPolicies.ResolveDeviceCommandRoles(builder.Configuration);
@@ -223,10 +225,12 @@ builder.Services.AddAuthorization(options =>
         IoT.Api.Common.AuthorizationPolicies.TenantAdmin,
         policy => policy
             .RequireAuthenticatedUser()
-            .RequireAssertion(ctx => IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
-                ctx.User,
-                IoT.Domain.Common.StandardPermissions.SettingsManage,
-                tenantAdminRoles)));
+            .RequireAssertion(ctx =>
+                !IoT.Api.Common.AuthorizationPolicies.IsSubCustomerScoped(ctx.User) &&
+                IoT.Api.Common.AuthorizationPolicies.HasPermissionOrRole(
+                    ctx.User,
+                    IoT.Domain.Common.StandardPermissions.SettingsManage,
+                    tenantAdminRoles)));
 
     // Operar la jerarquía Customer (ADR-013 E8.4b). Exige permiso customers.manage o rol admin.
     var customerAdminRoles = IoT.Api.Common.AuthorizationPolicies.ResolveCustomerAdminRoles(builder.Configuration);

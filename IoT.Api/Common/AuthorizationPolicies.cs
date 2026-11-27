@@ -175,7 +175,17 @@ public static class AuthorizationPolicies
             BrokerManage,
             policy => policy
                 .RequireAuthenticatedUser()
-                .RequireAssertion(ctx => HasAnyRole(ctx.User, roles)));
+                .RequireAssertion(ctx => !IsSubCustomerScoped(ctx.User) && HasAnyRole(ctx.User, roles)));
+    }
+
+    /// <summary>
+    /// Determina si el principal está acotado a un sub-cliente descendiente (<c>customer_path</c> con nivel &gt;= 1, p. ej. <c>cRoot.cChild</c>).
+    /// Los usuarios raíz (<c>customer_path</c> nulo o de un solo segmento <c>cRoot</c>) conservan autoridad de nivel tenant.
+    /// </summary>
+    public static bool IsSubCustomerScoped(System.Security.Claims.ClaimsPrincipal user)
+    {
+        var path = user.FindFirst("customer_path")?.Value;
+        return !string.IsNullOrWhiteSpace(path) && path.Contains('.');
     }
 
     public static string[] ResolveFirmwareManageRoles(IConfiguration configuration) =>

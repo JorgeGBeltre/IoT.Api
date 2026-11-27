@@ -297,6 +297,12 @@ public sealed class MultiProtocolTcpGatewayService : BackgroundService, ITcpComm
                     _logger.LogWarning("Conexión TCP {Family} rechazada (IMEI {Imei}): no registrado o inactivo. Sin ACK.", handler.Family, outcome.SessionImei);
                     return;
                 }
+                if (device.HasMqttApiKey)
+                {
+                    session.Rejected = true;
+                    _logger.LogWarning("Conexión TCP {Family} rechazada (IMEI {Imei}): el dispositivo requiere transporte MQTT autenticado por ApiKey.", handler.Family, outcome.SessionImei);
+                    return;
+                }
                 session.Imei = outcome.SessionImei;
                 session.TenantId = device.TenantId;
                 session.DeviceId = device.Id;

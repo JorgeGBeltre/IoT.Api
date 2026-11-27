@@ -8,10 +8,12 @@ namespace IoT.Infrastructure.Services;
 public sealed class EventQueryService : IEventQueryService
 {
     private readonly ApplicationDbContext _context;
+    private readonly ITenantContext? _tenantContext;
 
-    public EventQueryService(ApplicationDbContext context)
+    public EventQueryService(ApplicationDbContext context, ITenantContext? tenantContext = null)
     {
         _context = context;
+        _tenantContext = tenantContext;
     }
 
     public async Task<IReadOnlyList<EventItemDto>> GetEventsAsync(
@@ -173,6 +175,13 @@ public sealed class EventQueryService : IEventQueryService
                             matchedChipId = dev.ChipId;
                             break;
                         }
+                    }
+
+                    bool isSubtreeScoped = _tenantContext?.CustomerSubtreeIds is not null
+                        || (!string.IsNullOrWhiteSpace(_tenantContext?.CustomerPath) && _tenantContext.CustomerPath.Contains('.'));
+                    if (isSubtreeScoped && matchedDeviceId is null)
+                    {
+                        continue;
                     }
                 }
 

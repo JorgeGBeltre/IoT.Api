@@ -134,13 +134,18 @@ public sealed class McpFleetService : IMcpFleetService
                 recordedAt = latestTel.RecordedAt,
                 metrics = latestTel.Metrics
             },
-            attributes = attributes.Select(a => new
-            {
-                scope = a.Scope.ToString(),
-                key = a.Key,
-                value = a.Value,
-                lastUpdatedAt = a.LastUpdatedAt
-            }).ToList()
+            attributes = attributes
+                .Where(a => !(a.Scope == Domain.Enums.AttributeScope.Server &&
+                              (a.Key.Equals("device_key", StringComparison.OrdinalIgnoreCase) ||
+                               a.Key.Equals("bind_token", StringComparison.OrdinalIgnoreCase) ||
+                               a.Key.Equals("ota_hmac_key", StringComparison.OrdinalIgnoreCase))))
+                .Select(a => new
+                {
+                    scope = a.Scope.ToString(),
+                    key = a.Key,
+                    value = a.Value,
+                    lastUpdatedAt = a.LastUpdatedAt
+                }).ToList()
         };
     }
 

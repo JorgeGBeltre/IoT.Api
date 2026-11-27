@@ -91,6 +91,9 @@ public static class TenantContextExtensions
         });
     }
 
+    public static IDisposable? BeginSystemOperationIfPresent(ITenantContext? tenantContext) =>
+        tenantContext is null ? null : BeginSystemOperation(tenantContext);
+
     private sealed class SystemOperationScope : IDisposable
     {
         private Action? _restore;

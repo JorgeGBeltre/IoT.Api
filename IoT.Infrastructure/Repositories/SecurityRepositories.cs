@@ -122,10 +122,14 @@ public sealed class RoleRepository : IRoleRepository
 public sealed class OtpRepository : IOtpRepository
 {
     private readonly ApplicationDbContext _context;
+    private readonly IoT.Application.Common.Interfaces.ITenantContext? _tenantContext;
 
-    public OtpRepository(ApplicationDbContext context)
+    public OtpRepository(
+        ApplicationDbContext context,
+        IoT.Application.Common.Interfaces.ITenantContext? tenantContext = null)
     {
         _context = context;
+        _tenantContext = tenantContext;
     }
 
     public async Task AddAsync(OtpCode otp, CancellationToken cancellationToken = default)
@@ -135,8 +139,10 @@ public sealed class OtpRepository : IOtpRepository
 
     public async Task<OtpCode?> GetActiveOtpAsync(Guid tenantId, string email, OtpPurpose purpose, CancellationToken cancellationToken = default)
     {
+        using var _ = IoT.Application.Common.Interfaces.TenantContextExtensions.BeginSystemOperationIfPresent(_tenantContext);
         var normalizedEmail = email.Trim().ToLowerInvariant();
         return await _context.OtpCodes
+            .IgnoreQueryFilters()
             .Where(o => o.TenantId == tenantId && o.Email == normalizedEmail && o.Purpose == purpose && !o.IsUsed && o.ExpirationUtc > DateTime.UtcNow)
             .OrderByDescending(o => o.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken);
@@ -149,7 +155,9 @@ public sealed class OtpRepository : IOtpRepository
 
     public async Task<PasswordResetToken?> GetActiveResetTokenAsync(Guid tenantId, Guid userId, CancellationToken cancellationToken = default)
     {
+        using var _ = IoT.Application.Common.Interfaces.TenantContextExtensions.BeginSystemOperationIfPresent(_tenantContext);
         return await _context.PasswordResetTokens
+            .IgnoreQueryFilters()
             .Where(t => t.TenantId == tenantId && t.UserId == userId && !t.IsUsed && t.ExpirationUtc > DateTime.UtcNow)
             .OrderByDescending(t => t.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken);

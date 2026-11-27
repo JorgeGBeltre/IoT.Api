@@ -709,6 +709,28 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                             return;
                         }
 
+                        if (e.CleanSession == false)
+                        {
+                            _logger.LogWarning(
+                                "Conexión rechazada ({ClientId}): las sesiones de bootstrap requieren CleanStart/CleanSession=true para impedir herencia de suscripciones persistentes.",
+                                e.ClientId);
+                            e.ReasonCode = MqttConnectReasonCode.NotAuthorized;
+                            return;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(e.ClientId))
+                        {
+                            var clientDevice = await deviceRepo.GetByChipIdGlobalAsync(e.ClientId);
+                            if (clientDevice is not null && (clientDevice.TenantId != tenant.Id || clientDevice.HasMqttApiKey))
+                            {
+                                _logger.LogWarning(
+                                    "Conexión de bootstrap rechazada: ClientId '{ClientId}' pertenece a otro tenant o ya requiere ApiKey por dispositivo.",
+                                    e.ClientId);
+                                e.ReasonCode = MqttConnectReasonCode.ClientIdentifierNotValid;
+                                return;
+                            }
+                        }
+
                         bootstrapTenantId = tenant.Id;
                         break;
                     }
@@ -871,11 +893,11 @@ public sealed class EmbeddedMqttBroker : BackgroundService, IMqttPublisher, IMqt
                 return Task.CompletedTask;
             }
 
-            // Ningún comando puntual o ACK puede quedar retenido en el broker (evita re-ejecución al reconectar).
-            if (e.ApplicationMessage.Retain && IsNonRetainableCommandTopic(topic))
+            // Ningún mensaje publicado por un cliente externo ni comando puntual puede quedar retenido en RAM del broker.
+            if (e.ApplicationMessage.Retain && (!isServerOrigin || IsNonRetainableCommandTopic(topic)))
             {
                 _logger.LogWarning(
-                    "Flag RETAIN bloqueado en tópico de comando '{Topic}' (emisor {ClientId}).",
+                    "Flag RETAIN bloqueado en tópico '{Topic}' (emisor {ClientId}).",
                     topic, e.ClientId);
                 e.ApplicationMessage.Retain = false;
             }

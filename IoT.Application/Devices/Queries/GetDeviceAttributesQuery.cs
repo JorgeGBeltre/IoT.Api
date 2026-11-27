@@ -51,10 +51,17 @@ public sealed class GetDeviceAttributesQueryHandler
         return Result<DeviceAttributesDto>.Success(dto);
     }
 
+    private static readonly HashSet<string> SensitiveServerKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "device_key",
+        "bind_token",
+        "ota_hmac_key"
+    };
+
     private static IReadOnlyList<DeviceAttributeItemDto> ToItems(
         IReadOnlyList<DeviceAttribute> source, AttributeScope scope) =>
         source
-            .Where(a => a.Scope == scope)
+            .Where(a => a.Scope == scope && !(scope == AttributeScope.Server && SensitiveServerKeys.Contains(a.Key)))
             .OrderBy(a => a.Key, StringComparer.Ordinal)
             .Select(a => new DeviceAttributeItemDto(a.Key, a.Value, a.LastUpdatedAt))
             .ToList();

@@ -69,6 +69,23 @@ public sealed class SetDeviceAttributesCommandHandler : IRequestHandler<SetDevic
                 "Attributes.InvalidKey", "Las claves de atributo no pueden estar vacías."));
         }
 
+        const int maxKeyLength = 128;
+        const int maxValueLength = 16_384;
+        foreach (var (k, v) in request.Attributes)
+        {
+            if (k.Length > maxKeyLength)
+            {
+                return Result.Failure(new Error(
+                    "Attributes.InvalidKey", $"La clave de atributo excede el máximo de {maxKeyLength} caracteres."));
+            }
+
+            if (v is not null && v.Length > maxValueLength)
+            {
+                return Result.Failure(new Error(
+                    "Attributes.ValueTooLarge", $"El valor del atributo '{k}' excede el máximo permitido de {maxValueLength} caracteres."));
+            }
+        }
+
         // Carga SCOPED (RLS + EF por subárbol): un dispositivo fuera del subárbol/tenant de la sesión
         // no es visible -> NotFound (mismo trato que un id inexistente, sin filtrar su existencia).
         var device = await _deviceRepository.GetByIdAsync(request.DeviceId, cancellationToken);
@@ -76,6 +93,24 @@ public sealed class SetDeviceAttributesCommandHandler : IRequestHandler<SetDevic
         {
             return Result.Failure(new Error(
                 "Device.NotFound", $"El dispositivo '{request.DeviceId}' no existe o está fuera del subárbol visible."));
+        }
+
+        if (request.Scope == AttributeScope.Shared && ContainsActuationAttribute(request.Attributes))
+        {
+            if (device.AdminStatus != DeviceAdminStatus.Active || device.OperationalStatus == DeviceOperationalStatus.Error)
+            {
+                return Result.Failure(new Error(
+                    "Device.CannotAcceptCommands",
+                    "El dispositivo está suspendido o en estado de error y no admite atributos de accionamiento."));
+            }
+
+            if (request.Attributes.TryGetValue("raw_command", out var rawCmd) && rawCmd is { Length: > 240 }
+                || request.Attributes.TryGetValue("command", out var altCmd) && altCmd is { Length: > 240 })
+            {
+                return Result.Failure(new Error(
+                    "Attributes.ValueTooLarge",
+                    "El comando crudo GT06 no puede superar los 240 caracteres ASCII."));
+            }
         }
 
         foreach (var (key, value) in request.Attributes)
@@ -105,5 +140,20 @@ public sealed class SetDeviceAttributesCommandHandler : IRequestHandler<SetDevic
         }
 
         return Result.Success();
+    }
+
+    public static bool ContainsActuationAttribute(IReadOnlyDictionary<string, string?> attributes)
+    {
+        foreach (var key in attributes.Keys)
+        {
+            var normalized = key.Trim().ToLowerInvariant();
+            if (normalized is "raw_command" or "command" or "relay" or "relay_cut"
+                or "engine_stop" or "relay_restore" or "engine_resume" or "reset" or "reboot")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

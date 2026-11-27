@@ -142,6 +142,7 @@ services:
       - ASPNETCORE_URLS=http://+:5000
       # Runtime: rol de aplicación iot_app (NOBYPASSRLS) → la Row-Level Security por tenant es EFECTIVA (ADR-003 D4).
       - ConnectionStrings__Postgres=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${APP_DB_USER:-iot_app};Password=${APP_DB_PASSWORD:?APP_DB_PASSWORD es obligatorio}
+      - Platform__Rls__Enforce=${RLS_ENFORCE:-true}
       # Admin: migraciones, seeding y aprovisionamiento del rol iot_app (iot_admin, superusuario/BYPASSRLS).
       - ConnectionStrings__PostgresAdmin=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${POSTGRES_USER:?POSTGRES_USER es obligatorio};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
       - ConnectionStrings__Redis=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
@@ -242,7 +243,8 @@ services:
         condition: service_healthy
     environment:
       - DOTNET_ENVIRONMENT=Production
-      - ConnectionStrings__Postgres=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${POSTGRES_USER:?POSTGRES_USER es obligatorio};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
+      - ConnectionStrings__Postgres=Host=iot-postgres-db;Port=5432;Database=${POSTGRES_DB:?POSTGRES_DB es obligatorio};Username=${APP_DB_USER:-iot_app};Password=${APP_DB_PASSWORD:?APP_DB_PASSWORD es obligatorio}
+      - Platform__Rls__Enforce=${RLS_ENFORCE:-true}
       - ConnectionStrings__Redis=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
       - Redis__ConnectionString=iot-redis-db:6379,password=${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio},abortConnect=false
       # El worker sólo ejecuta retención de datos. El broker MQTT y el gateway TCP

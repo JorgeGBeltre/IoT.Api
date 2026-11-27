@@ -186,8 +186,8 @@ public sealed class Device : AggregateRoot<Guid>, ITenantScoped, ICustomerScoped
             return Result.Failure(new Error("Device.InvalidName", "El nombre del dispositivo es obligatorio."));
 
         var trimmed = newName.Trim();
-        if (trimmed.Length > 120)
-            return Result.Failure(new Error("Device.InvalidName", "El nombre del dispositivo no puede superar 120 caracteres."));
+        if (trimmed.Length > 100)
+            return Result.Failure(new Error("Device.InvalidName", "El nombre del dispositivo no puede superar 100 caracteres."));
 
         Name = trimmed;
         UpdatedAt = DateTime.UtcNow;

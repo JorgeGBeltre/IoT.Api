@@ -99,9 +99,10 @@ public sealed class TelemetryStore : ITelemetryStore
             query = query.Where(p => p.Source == source);
         }
 
+        int safeLimit = Math.Clamp(limit, 1, 5000);
         var entities = await query
             .OrderBy(p => p.RecordedAt)
-            .Take(limit)
+            .Take(safeLimit)
             .ToListAsync(cancellationToken);
 
         return entities.Select(e => new HistoricalPositionDto(
@@ -136,9 +137,10 @@ public sealed class TelemetryStore : ITelemetryStore
             query = query.Where(t => t.Source == source);
         }
 
+        int safeLimit = Math.Clamp(limit, 1, 5000);
         var entities = await query
             .OrderByDescending(t => t.RecordedAt)
-            .Take(limit)
+            .Take(safeLimit)
             .ToListAsync(cancellationToken);
 
         entities.Reverse();

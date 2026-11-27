@@ -9,10 +9,14 @@ namespace IoT.Infrastructure.Repositories;
 public sealed class DeviceRepository : IDeviceRepository
 {
     private readonly ApplicationDbContext _context;
+    private readonly IoT.Application.Common.Interfaces.ITenantContext? _tenantContext;
 
-    public DeviceRepository(ApplicationDbContext context)
+    public DeviceRepository(
+        ApplicationDbContext context,
+        IoT.Application.Common.Interfaces.ITenantContext? tenantContext = null)
     {
         _context = context;
+        _tenantContext = tenantContext;
     }
 
     public async Task<Device?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
@@ -50,6 +54,7 @@ public sealed class DeviceRepository : IDeviceRepository
         // tenants comparten IMEI, resolver "el primero" atribuiría la telemetría a un
         // tenant arbitrario (fuga cross-tenant). Por eso, ante COLISIÓN devolvemos null
         // (ambiguo => no adoptable) en vez de elegir al azar.
+        using var _ = IoT.Application.Common.Interfaces.TenantContextExtensions.BeginSystemOperationIfPresent(_tenantContext);
         var normalized = chipId.Trim();
         var normalizedLower = normalized.ToLower();
         var matches = await _context.Devices
@@ -69,6 +74,7 @@ public sealed class DeviceRepository : IDeviceRepository
             return false;
         }
 
+        using var _ = IoT.Application.Common.Interfaces.TenantContextExtensions.BeginSystemOperationIfPresent(_tenantContext);
         var normalized = chipId.Trim();
         var normalizedLower = normalized.ToLower();
         return await _context.Devices
@@ -83,9 +89,8 @@ public sealed class DeviceRepository : IDeviceRepository
             return false;
         }
 
-        // IgnoreQueryFilters + filtro EXPLÍCITO: el filtro global depende del tenant
-        // ambiental, que en una invocación del hub no está resuelto (Guid.Empty) y
-        // negaría también el acceso legítimo. Aquí el tenant viene del claim del JWT.
+        // IgnoreQueryFilters + operación de sistema acotada + filtro EXPLÍCITO por tenantId.
+        using var _ = IoT.Application.Common.Interfaces.TenantContextExtensions.BeginSystemOperationIfPresent(_tenantContext);
         return await _context.Devices
             .IgnoreQueryFilters()
             .AnyAsync(d => d.Id == deviceId && d.TenantId == tenantId, cancellationToken);

@@ -191,6 +191,41 @@ public sealed class AuthController : ControllerBase
         return Ok(result.Value);
     }
 
+    public sealed record ChangePasswordDto(string CurrentPassword, string NewPassword);
+
+    [HttpPost("change-password")]
+    [Authorize]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordDto request, CancellationToken cancellationToken)
+    {
+        var sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
+        if (!Guid.TryParse(sub, out var userId) || _tenantContext.TenantId == Guid.Empty)
+        {
+            return Unauthorized(new ProblemDetails { Title = "No autorizado", Detail = "Sesión inválida." });
+        }
+
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString();
+        var userAgent = Request.Headers.UserAgent.ToString();
+        var result = await _mediator.Send(new ChangePasswordCommand(
+            userId,
+            _tenantContext.TenantId,
+            request.CurrentPassword,
+            request.NewPassword,
+            ip,
+            userAgent), cancellationToken);
+
+        if (result.IsFailure)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "No se pudo actualizar la contraseña",
+                Detail = result.Error.Message,
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        return Ok(new { message = "Contraseña actualizada correctamente." });
+    }
+
     public sealed record ForgotPasswordDto(string Email, Guid? TenantId);
 
     [HttpPost("forgot-password")]

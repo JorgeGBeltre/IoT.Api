@@ -13,15 +13,18 @@ public sealed class FleetHub : Hub
     private readonly IDeviceRepository _deviceRepository;
     private readonly ILogger<FleetHub> _logger;
     private readonly ITenantContext? _tenantContext;
+    private readonly ICustomerRepository? _customerRepository;
 
     public FleetHub(
         IDeviceRepository deviceRepository,
         ILogger<FleetHub> logger,
-        ITenantContext? tenantContext = null)
+        ITenantContext? tenantContext = null,
+        ICustomerRepository? customerRepository = null)
     {
         _deviceRepository = deviceRepository;
         _logger = logger;
         _tenantContext = tenantContext;
+        _customerRepository = customerRepository;
     }
 
     public async Task JoinTenantFleet(string tenantId)
@@ -34,6 +37,13 @@ public sealed class FleetHub : Hub
             _logger.LogWarning("Security Violation: Connection {ConnectionId} with tenant {UserTenant} attempted unauthorized join to tenant fleet {TargetTenant}",
                 Context.ConnectionId, userTenantId, tenantId);
             throw new HubException("No tienes autorización para unirte a la flota de este tenant.");
+        }
+
+        if (Context.User is not null && IoT.Api.Common.AuthorizationPolicies.IsSubCustomerScoped(Context.User))
+        {
+            _logger.LogWarning("Security Violation: Sub-customer connection {ConnectionId} attempted to join root tenant group tenant_{TenantId}",
+                Context.ConnectionId, requestedTenant);
+            throw new HubException("Los usuarios acotados a un sub-cliente deben suscribirse por dispositivo visible.");
         }
 
         // Nombre de grupo normalizado (Guid "D", minúsculas) para coincidir exactamente con
@@ -67,16 +77,28 @@ public sealed class FleetHub : Hub
         {
             _tenantContext.TenantId = userTenantId.Value;
             _tenantContext.IsSystemOperation = false;
+            var customerPath = Context.User?.FindFirst("customer_path")?.Value;
+            var rawCustomerId = Context.User?.FindFirst("customer_id")?.Value;
+            if (!string.IsNullOrWhiteSpace(customerPath) && Guid.TryParse(rawCustomerId, out var cid) && cid != Guid.Empty)
+            {
+                _tenantContext.CustomerId = cid;
+                _tenantContext.CustomerPath = customerPath;
+                if (_customerRepository is not null)
+                {
+                    _tenantContext.CustomerSubtreeIds = await _customerRepository.GetSubtreeIdsAsync(
+                        customerPath, Context.ConnectionAborted);
+                }
+            }
         }
 
-        // B-01: antes bastaba con tener CUALQUIER tenant para unirse a device_{id} y recibir
-        // posiciones, telemetría y progreso OTA de equipos de otra organización. Ahora el
-        // dispositivo debe pertenecer al tenant del JWT. Mismo mensaje para "no existe" y
-        // "es de otro tenant" (sin oráculo de existencia).
-        if (!Guid.TryParse(deviceId, out var parsedDeviceId)
-            || !await _deviceRepository.BelongsToTenantAsync(parsedDeviceId, userTenantId.Value, Context.ConnectionAborted))
+        // B-01 + ADR-013: validar tanto pertenencia al tenant como visibilidad en el subárbol del cliente.
+        bool isSubCustomer = Context.User is not null && IoT.Api.Common.AuthorizationPolicies.IsSubCustomerScoped(Context.User);
+        bool allowed = Guid.TryParse(deviceId, out var parsedDeviceId)
+            && await _deviceRepository.BelongsToTenantAsync(parsedDeviceId, userTenantId.Value, Context.ConnectionAborted)
+            && (!isSubCustomer || await _deviceRepository.GetByIdAsync(parsedDeviceId, Context.ConnectionAborted) is not null);
+        if (!allowed)
         {
-            _logger.LogWarning("Security Violation: Connection {ConnectionId} with tenant {UserTenant} attempted to subscribe to device {DeviceId} outside its tenant",
+            _logger.LogWarning("Security Violation: Connection {ConnectionId} with tenant {UserTenant} attempted to subscribe to device {DeviceId} outside its scope",
                 Context.ConnectionId, userTenantId, deviceId);
             throw new HubException("No tienes autorización para suscribirte a este dispositivo.");
         }

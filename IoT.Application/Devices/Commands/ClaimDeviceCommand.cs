@@ -100,20 +100,29 @@ public sealed class ClaimDeviceCommandHandler
                 ?? clientAttrs.FirstOrDefault(a => string.Equals(a.Key, "device_key", StringComparison.OrdinalIgnoreCase))?.Value;
 
             bool hasConfiguredSecret = !string.IsNullOrWhiteSpace(storedBindToken) || !string.IsNullOrWhiteSpace(storedDeviceKey);
-            if (hasConfiguredSecret)
+            if (!hasConfiguredSecret)
             {
-                bool matchesBind = ConstantTimeEquals(claimSecret, storedBindToken);
-                bool matchesKey = ConstantTimeEquals(claimSecret, storedDeviceKey);
-                if (!matchesBind && !matchesKey)
-                {
-                    return Result<DeviceProvisioningResultDto>.Failure(
-                        new Error("Device.InvalidClaimSecret", "El token de reclamación no coincide con el bind_token o device_key registrado del dispositivo."));
-                }
+                return Result<DeviceProvisioningResultDto>.Failure(
+                    new Error("Device.NotClaimable", "El dispositivo existente no tiene bind_token ni device_key configurado para reclamación."));
+            }
+
+            bool matchesBind = ConstantTimeEquals(claimSecret, storedBindToken);
+            bool matchesKey = ConstantTimeEquals(claimSecret, storedDeviceKey);
+            if (!matchesBind && !matchesKey)
+            {
+                return Result<DeviceProvisioningResultDto>.Failure(
+                    new Error("Device.InvalidClaimSecret", "El token de reclamación no coincide con el bind_token o device_key registrado del dispositivo."));
             }
 
             Guid? targetCustomer = request.TargetCustomerId ?? _tenantContext.CustomerId;
             if (targetCustomer.HasValue && targetCustomer.Value != Guid.Empty)
             {
+                if (_tenantContext.CustomerSubtreeIds is not null && !_tenantContext.CustomerSubtreeIds.Contains(targetCustomer.Value))
+                {
+                    return Result<DeviceProvisioningResultDto>.Failure(
+                        new Error("Customer.Forbidden", "El nodo Customer destino está fuera del subárbol autorizado del usuario."));
+                }
+
                 existing.AssignToCustomer(targetCustomer.Value);
             }
 
@@ -186,6 +195,13 @@ public sealed class ClaimDeviceCommandHandler
             return Result<DeviceProvisioningResultDto>.Failure(new Error(
                 "Device.NoCustomerNode",
                 "El tenant no tiene un nodo Customer raíz al que asignar el dispositivo."));
+        }
+
+        if (_tenantContext.CustomerSubtreeIds is not null && !_tenantContext.CustomerSubtreeIds.Contains(customerId.Value))
+        {
+            return Result<DeviceProvisioningResultDto>.Failure(new Error(
+                "Customer.Forbidden",
+                "El nodo Customer destino está fuera del subárbol autorizado del usuario."));
         }
 
         device.AssignToCustomer(customerId.Value);

@@ -4,6 +4,7 @@ using System.Text.Json;
 using IoT.Application.Common.Interfaces;
 using IoT.Application.Common.Security;
 using IoT.Domain.Common;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace IoT.Infrastructure.Services;
@@ -33,27 +34,43 @@ public sealed class LanZeroconfConnectorService : ILanZeroconfConnectorService
         "ota_flash"
     };
 
+    private static readonly HashSet<int> AllowedLanPorts = new()
+    {
+        80,
+        8080,
+        8081,
+        8088
+    };
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<LanZeroconfConnectorService> _logger;
+    private readonly Microsoft.Extensions.Configuration.IConfiguration? _configuration;
 
     public LanZeroconfConnectorService(
         IHttpClientFactory httpClientFactory,
-        ILogger<LanZeroconfConnectorService> logger)
+        ILogger<LanZeroconfConnectorService> logger,
+        Microsoft.Extensions.Configuration.IConfiguration? configuration = null)
     {
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _configuration = configuration;
     }
 
     public Result ValidateLanTargetHost(string host, int port)
     {
+        if (_configuration != null && !_configuration.GetValue<bool>("LanConnector:Enabled", true))
+        {
+            return Result.Failure(new Error("LanConnector.Disabled", "El conector LAN del servidor está deshabilitado en este entorno."));
+        }
+
         if (string.IsNullOrWhiteSpace(host))
         {
             return Result.Failure(new Error("LanConnector.InvalidHost", "La dirección IP o hostname local del dispositivo es obligatoria."));
         }
 
-        if (port is < 1 or > 65535)
+        if (!AllowedLanPorts.Contains(port))
         {
-            return Result.Failure(new Error("LanConnector.InvalidPort", "El puerto TCP debe estar entre 1 y 65535."));
+            return Result.Failure(new Error("LanConnector.InvalidPort", "Sólo se permiten puertos locales de aprovisionamiento/Zeroconf (80, 8080, 8081, 8088)."));
         }
 
         string trimmed = host.Trim();
@@ -135,7 +152,7 @@ public sealed class LanZeroconfConnectorService : ILanZeroconfConnectorService
                     Host: cleanHost,
                     Port: port,
                     Mode: normalizedMode,
-                    RawResponseJson: rawJson,
+                    RawResponseJson: null,
                     ErrorMessage: $"HTTP {(int)response.StatusCode}"));
             }
 
@@ -257,8 +274,8 @@ public sealed class LanZeroconfConnectorService : ILanZeroconfConnectorService
                 HttpStatusCode: (int)response.StatusCode,
                 DeviceErrorCode: deviceError,
                 Encrypted: encrypt,
-                DecryptedDataJson: decryptedData,
-                RawResponseJson: rawResp,
+                DecryptedDataJson: ok ? decryptedData : null,
+                RawResponseJson: response.IsSuccessStatusCode ? rawResp : null,
                 ErrorMessage: ok ? null : $"HTTP {(int)response.StatusCode}, error={deviceError}"));
         }
         catch (Exception ex)

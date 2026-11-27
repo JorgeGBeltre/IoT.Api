@@ -273,9 +273,11 @@ public sealed class UpsertDeviceTimersCommandHandler : IRequestHandler<UpsertDev
         {
             id = id[..23];
         }
+        int collisionSuffix = ordinal;
+        string baseId = id[..Math.Min(16, id.Length)];
         while (!usedIds.Add(id))
         {
-            id = $"{id[..Math.Min(18, id.Length)]}_{ordinal}";
+            id = $"{baseId}_{collisionSuffix++}";
         }
 
         if (item.Channel is < 0 or > 16)

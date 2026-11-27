@@ -62,6 +62,12 @@ public sealed record R12LFFrame
         if (start1 == 0x78)
         {
             byte lengthByte = slice[2];
+            if (lengthByte < 5)
+            {
+                consumedBytes += 2;
+                return false;
+            }
+
             int totalFrameSize = 5 + lengthByte;
 
             if (slice.Length < totalFrameSize)
@@ -115,6 +121,12 @@ public sealed record R12LFFrame
                 return false; // falta la cabecera mínima
 
             int lengthField = BinaryPrimitives.ReadUInt16BigEndian(slice.Slice(2, 2));
+            if (lengthField < 5)
+            {
+                consumedBytes += 2;
+                return false;
+            }
+
             int totalFrameSize = 6 + lengthField;
 
             if (slice.Length < totalFrameSize)

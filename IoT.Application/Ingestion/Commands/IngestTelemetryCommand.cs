@@ -109,7 +109,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         Common.Observability.IoTMetrics.TelemetryReceivedCounter.Add(
             1,
-            new KeyValuePair<string, object?>("topic", request.Topic),
+            new KeyValuePair<string, object?>("topic", NormalizeTopicForMetrics(request.Topic)),
             new KeyValuePair<string, object?>("source", request.Source));
 
         try
@@ -595,7 +595,7 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
 
                     if (_webhookDispatcher != null)
                     {
-                        _ = _webhookDispatcher.DispatchAsync(
+                        await _webhookDispatcher.DispatchAsync(
                             device.TenantId,
                             $"device.alert.{detectedAlertType.ToLowerInvariant()}",
                             new
@@ -821,5 +821,25 @@ public sealed class IngestTelemetryCommandHandler : IRequestHandler<IngestTeleme
         string raw = $"{deviceId}:{recordedAt.Ticks}:{rawPayload ?? string.Empty}";
         byte[] bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(raw));
         return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    private static string NormalizeTopicForMetrics(string? topic)
+    {
+        if (string.IsNullOrWhiteSpace(topic)) return "empty";
+        var t = topic.Trim('/');
+        if (t.StartsWith("devices/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (t.EndsWith("/telemetry", StringComparison.OrdinalIgnoreCase)) return "devices/+/telemetry";
+            if (t.EndsWith("/events", StringComparison.OrdinalIgnoreCase) || t.EndsWith("/event", StringComparison.OrdinalIgnoreCase)) return "devices/+/events";
+            if (t.EndsWith("/ack", StringComparison.OrdinalIgnoreCase) || t.EndsWith("/status", StringComparison.OrdinalIgnoreCase)) return "devices/+/status";
+            if (t.EndsWith("/report", StringComparison.OrdinalIgnoreCase)) return "devices/+/report";
+            return "devices/+";
+        }
+        if (t.StartsWith("telemetry/", StringComparison.OrdinalIgnoreCase)) return "telemetry/+";
+        if (t.StartsWith("event/", StringComparison.OrdinalIgnoreCase) || t.StartsWith("events/", StringComparison.OrdinalIgnoreCase)) return "event/+";
+        if (t.StartsWith("ota/", StringComparison.OrdinalIgnoreCase)) return "ota/+";
+        if (t.StartsWith("webhook/", StringComparison.OrdinalIgnoreCase)) return "webhook/+";
+        if (t.Equals("telemetry", StringComparison.OrdinalIgnoreCase)) return "telemetry";
+        return "other";
     }
 }

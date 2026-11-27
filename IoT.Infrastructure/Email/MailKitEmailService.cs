@@ -101,7 +101,9 @@ public sealed class MailKitEmailService : IEmailService
         string otpCode,
         CancellationToken cancellationToken = default)
     {
-        var subject = $"Código de Recuperación OTP [{otpCode}] — IoT Nexus";
+        var subject = "Código de Recuperación — IoT Nexus";
+        var safeUsername = System.Net.WebUtility.HtmlEncode(username);
+        var safeOtp = System.Net.WebUtility.HtmlEncode(otpCode);
 
         var bodyHtml = $@"<!DOCTYPE html>
 <html lang=""es"">
@@ -123,11 +125,11 @@ public sealed class MailKitEmailService : IEmailService
       <h1 class=""title"">Recuperación de Contraseña</h1>
     </div>
     <div class=""content"">
-      <p style=""font-size:14px; color:#94A3B8; margin-top:0;"">Hola <strong>{username}</strong>,</p>
+      <p style=""font-size:14px; color:#94A3B8; margin-top:0;"">Hola <strong>{safeUsername}</strong>,</p>
       <p style=""font-size:14px; line-height:20px; color:#CBD5E1;"">
         Utiliza el siguiente código OTP de verificación para restablecer tu contraseña. Este código expirará en 15 minutos:
       </p>
-      <div class=""otp"">{otpCode}</div>
+      <div class=""otp"">{safeOtp}</div>
       <p style=""font-size:12px; color:#64748B; margin:0;"">
         Si no solicitaste este cambio, puedes ignorar este correo con total tranquilidad. Tu cuenta permanece protegida.
       </p>
@@ -208,10 +210,10 @@ public sealed class MailKitEmailService : IEmailService
   <div class=""card"">
     <div class=""alert"">⚠️ Alerta de Seguridad en tu Cuenta</div>
     <p style=""font-size:14px; color:#CBD5E1;"">
-      Detectamos actividad inusual en la cuenta de <strong>{username}</strong>: <strong>{eventName}</strong>.
+      Detectamos actividad inusual en la cuenta de <strong>{System.Net.WebUtility.HtmlEncode(username)}</strong>: <strong>{System.Net.WebUtility.HtmlEncode(eventName)}</strong>.
     </p>
     <p style=""font-size:13px; color:#94A3B8;"">
-      IP: {ipAddress ?? "No disponible"} &bull; Dispositivo: {deviceInfo ?? "No disponible"}
+      IP: {System.Net.WebUtility.HtmlEncode(ipAddress ?? "No disponible")} &bull; Dispositivo: {System.Net.WebUtility.HtmlEncode(deviceInfo ?? "No disponible")}
     </p>
   </div>
 </body>
@@ -251,7 +253,7 @@ public sealed class MailKitEmailService : IEmailService
 
             var socketOptions = _settings.Port == 465
                 ? SecureSocketOptions.SslOnConnect
-                : (_settings.Port == 587 ? SecureSocketOptions.StartTlsWhenAvailable : (_settings.EnableSsl ? SecureSocketOptions.Auto : SecureSocketOptions.None));
+                : (_settings.Port == 587 && _settings.EnableSsl ? SecureSocketOptions.StartTls : (_settings.EnableSsl ? SecureSocketOptions.Auto : SecureSocketOptions.None));
 
             await client.ConnectAsync(_settings.SmtpServer, _settings.Port, socketOptions, cancellationToken);
 

@@ -34,4 +34,21 @@ if (!string.Equals(builder.Configuration["TelemetryQueue:Engine"], "Direct", Str
 builder.Services.AddHostedService<HeartbeatWorker>();
 
 var host = builder.Build();
-host.Run();
+
+using (var scope = host.Services.CreateScope())
+{
+    var sp = scope.ServiceProvider;
+    var config = sp.GetRequiredService<IConfiguration>();
+    var env = sp.GetRequiredService<IHostEnvironment>();
+    var runtimeConn = config.GetConnectionString("Postgres");
+    if (!string.IsNullOrWhiteSpace(runtimeConn))
+    {
+        await IoT.Infrastructure.Persistence.RlsStartupGuard.EnsureIsolationEnforcedAsync(
+            runtimeConn,
+            env.IsProduction(),
+            config.GetValue<bool>("Platform:Rls:Enforce", false),
+            sp.GetRequiredService<ILoggerFactory>().CreateLogger("IoT.Infrastructure.Persistence.RlsStartupGuard"));
+    }
+}
+
+await host.RunAsync();

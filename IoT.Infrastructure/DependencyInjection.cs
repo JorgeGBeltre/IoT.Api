@@ -153,10 +153,48 @@ public static class DependencyInjection
         services.AddScoped<IoT.Application.Protocols.ITenantConverterResolver, Protocols.TenantConverterResolver>();
         services.AddSingleton<IoT.Protocols.Routing.ITopicRoutingService, IoT.Protocols.Routing.TopicRoutingService>();
 
-        // HTTP Device Transport (E3-04). Timeout acotado: un endpoint de dispositivo lento
-        // no debe bloquear el hilo de downlink indefinidamente.
-        services.AddHttpClient("IoT.HttpDeviceTransport", c => c.Timeout = TimeSpan.FromSeconds(15));
-        services.AddHttpClient("OutboundWebhookClient", c => c.Timeout = TimeSpan.FromSeconds(5));
+        // HTTP Device Transport (E3-04). Timeout acotado y redirecciones deshabilitadas (anti-SSRF por 302).
+        services.AddHttpClient("IoT.HttpDeviceTransport", c => c.Timeout = TimeSpan.FromSeconds(15))
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false
+            });
+
+        bool allowPrivateWebhooks = configuration.GetValue<bool>("Webhook:AllowPrivateNetworks", false);
+        services.AddHttpClient("OutboundWebhookClient", c => c.Timeout = TimeSpan.FromSeconds(5))
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = async (ctx, ct) =>
+                {
+                    var addresses = await System.Net.Dns.GetHostAddressesAsync(ctx.DnsEndPoint.Host, ct);
+                    if (addresses.Length == 0)
+                    {
+                        throw new HttpRequestException($"Webhook host '{ctx.DnsEndPoint.Host}' did not resolve to any IP address.");
+                    }
+
+                    if (!allowPrivateWebhooks && addresses.Any(Services.OutboundWebhookDispatcher.IsDisallowedTargetAddress))
+                    {
+                        throw new HttpRequestException($"Blocked outbound webhook connection to private/reserved IP for host '{ctx.DnsEndPoint.Host}'.");
+                    }
+
+                    var selectedIp = addresses[0];
+                    var socket = new System.Net.Sockets.Socket(selectedIp.AddressFamily, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp)
+                    {
+                        NoDelay = true
+                    };
+                    try
+                    {
+                        await socket.ConnectAsync(new System.Net.IPEndPoint(selectedIp, ctx.DnsEndPoint.Port), ct);
+                        return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                }
+            });
         services.AddSingleton<Http.HttpDeviceTransport>();
 
         // Gateway TCP multi-protocolo (E5, ADR-007): un handler por familia + un servicio

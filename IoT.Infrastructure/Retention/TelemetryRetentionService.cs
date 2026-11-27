@@ -54,24 +54,47 @@ public sealed class TelemetryRetentionService : ITelemetryRetentionService
         int deletedPositions = 0;
         int deletedTelemetry = 0;
 
-        // 1. Purge per-tenant if TenantSettings specifies custom RetentionDays and context is available
+        // 1. Purge per-tenant respecting custom RetentionDays so tenants with longer retention (e.g., 180-365d)
+        //    are never truncated by the default global TTL.
+        bool purgedPerTenant = false;
         if (_context != null)
         {
             try
             {
-                var tenantSettingsList = await _context.TenantSettings
+                var tenantSettingsByTenant = await _context.TenantSettings
                     .IgnoreQueryFilters()
+                    .Where(ts => ts.RetentionDays > 0)
+                    .ToDictionaryAsync(ts => ts.TenantId, ts => ts.RetentionDays, cancellationToken);
+
+                var allTenantIds = await _context.Tenants
+                    .IgnoreQueryFilters()
+                    .Select(t => t.Id)
                     .ToListAsync(cancellationToken);
 
-                foreach (var ts in tenantSettingsList)
+                foreach (var tid in tenantSettingsByTenant.Keys)
                 {
-                    if (ts.RetentionDays > 0)
+                    if (!allTenantIds.Contains(tid))
                     {
-                        var tenantCutoff = now.AddDays(-ts.RetentionDays);
-                        deletedPositions += await _telemetryStore.PurgePositionsOlderThanAsync(tenantCutoff, ts.TenantId, cancellationToken);
-                        deletedTelemetry += await _telemetryStore.PurgeTelemetryRecordsOlderThanAsync(tenantCutoff, ts.TenantId, cancellationToken);
+                        allTenantIds.Add(tid);
                     }
                 }
+
+                foreach (var tenantId in allTenantIds)
+                {
+                    DateTime posCut = positionsCutoff;
+                    DateTime telCut = telemetryCutoff;
+                    if (tenantSettingsByTenant.TryGetValue(tenantId, out int customDays) && customDays > 0)
+                    {
+                        var customCutoff = now.AddDays(-customDays);
+                        posCut = customCutoff;
+                        telCut = customCutoff;
+                    }
+
+                    deletedPositions += await _telemetryStore.PurgePositionsOlderThanAsync(posCut, tenantId, cancellationToken);
+                    deletedTelemetry += await _telemetryStore.PurgeTelemetryRecordsOlderThanAsync(telCut, tenantId, cancellationToken);
+                }
+
+                purgedPerTenant = true;
             }
             catch (Exception ex)
             {
@@ -79,9 +102,12 @@ public sealed class TelemetryRetentionService : ITelemetryRetentionService
             }
         }
 
-        // 2. Global purge for records older than default TTL (unconfigured tenants or orphaned data)
-        deletedPositions += await _telemetryStore.PurgePositionsOlderThanAsync(positionsCutoff, cancellationToken);
-        deletedTelemetry += await _telemetryStore.PurgeTelemetryRecordsOlderThanAsync(telemetryCutoff, cancellationToken);
+        // 2. Global fallback purge only when DbContext is absent (e.g., isolated store unit tests) or per-tenant enumeration failed
+        if (!purgedPerTenant)
+        {
+            deletedPositions += await _telemetryStore.PurgePositionsOlderThanAsync(positionsCutoff, cancellationToken);
+            deletedTelemetry += await _telemetryStore.PurgeTelemetryRecordsOlderThanAsync(telemetryCutoff, cancellationToken);
+        }
 
         // 3. Purge closed DeviceCommands older than TTL
         int deletedCommands = await _commandRepository.PurgeClosedCommandsOlderThanAsync(commandsCutoff, cancellationToken);
